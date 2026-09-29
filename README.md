@@ -1,5 +1,7 @@
 # Solayge
 
+![App screenshot](./public/screenshot.png)
+
 **Orchestrate coding agents as a dependency graph — each task in its own git worktree.**
 
 Solayge is a cross-platform desktop app (macOS, Windows, and Linux) for planning,
@@ -27,22 +29,36 @@ prompts, secrets) on your machine.
 
 ## Table of contents
 
-- [Why Solayge](#why-solayge)
-- [Features](#features)
-- [Requirements](#requirements)
-- [Getting started](#getting-started)
-- [Concepts](#concepts)
-- [Agents & models](#agents--models)
-- [Permissions & safety](#permissions--safety)
-- [Project context](#project-context)
-- [Ship & Combine](#ship--combine)
-- [Automatic code review](#automatic-code-review)
-- [Settings & cache](#settings--cache)
-- [How it works](#how-it-works)
-- [Repository layout](#repository-layout)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+- [Solayge](#solayge)
+  - [Table of contents](#table-of-contents)
+  - [Why Solayge](#why-solayge)
+  - [Features](#features)
+    - [Planning \& execution](#planning--execution)
+    - [Visibility](#visibility)
+    - [Projects](#projects)
+    - [Ship](#ship)
+  - [Requirements](#requirements)
+  - [Getting started](#getting-started)
+  - [Concepts](#concepts)
+    - [Task](#task)
+    - [Separation](#separation)
+    - [Task kinds](#task-kinds)
+  - [Agents \& models](#agents--models)
+  - [Permissions \& safety](#permissions--safety)
+  - [Project context](#project-context)
+  - [Ship \& Combine](#ship--combine)
+    - [Conflict policy](#conflict-policy)
+  - [Automatic code review](#automatic-code-review)
+  - [Settings \& cache](#settings--cache)
+  - [How it works](#how-it-works)
+    - [Scheduler](#scheduler)
+    - [Data](#data)
+    - [Planner output contract](#planner-output-contract)
+  - [Repository layout](#repository-layout)
+  - [Roadmap](#roadmap)
+  - [Contributing](#contributing)
+  - [License](#license)
+  - [Acknowledgements](#acknowledgements)
 
 ## Why Solayge
 
@@ -452,6 +468,7 @@ src-tauri/            Tauri app (Rust)
 ## Contributing
 
 Contributions are welcome — issues, ideas, and pull requests.
+Especially Windows, Linux, Claude code, Codex testers, contributors would be appreciated.
 
 1. Fork the repo and create a branch.
 2. `pnpm install` and `pnpm tauri dev`.
