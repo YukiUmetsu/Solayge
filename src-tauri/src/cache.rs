@@ -1,9 +1,10 @@
 //! Prompt history and log files are treated as a cache: they are capped, pruned
 //! by a retention window, and can be cleared from Settings.
 
+use std::collections::HashSet;
 use std::time::UNIX_EPOCH;
 
-use crate::models::{CacheStats, Isolation, PermissionProfile, PromptEntry};
+use crate::models::{CacheStats, Isolation, PermissionProfile, PromptEntry, ReviewStatus};
 use crate::scheduler::now;
 use crate::state::AppState;
 
@@ -13,6 +14,13 @@ const MAX_PROMPTS: usize = 300;
 const MAX_PROMPT_CHARS: usize = 8_000;
 /// Suggest count returned to the UI by default.
 const DEFAULT_SUGGEST: usize = 50;
+/// Log files that are not task logs. They are never counted, pruned, or cleared
+/// with the cache: the error log has its own viewer and its own clear button.
+const RESERVED_LOG_STEMS: &[&str] = &["errors", "scheduler"];
+
+fn is_task_log(stem: &str) -> bool {
+    !RESERVED_LOG_STEMS.contains(&stem)
+}
 
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -48,11 +56,26 @@ fn cap(prompts: &mut Vec<PromptEntry>) {
     prompts.truncate(MAX_PROMPTS);
 }
 
+/// Log-file stems that must never be pruned or cleared: the task logs of
+/// running tasks, and the review logs of reviews that are still running. A
+/// review log's stem is `review-<task id>`, which is why the plain task-id set
+/// was not enough.
+fn protected_log_stems(st: &AppState) -> HashSet<String> {
+    let mut out: HashSet<String> = crate::state::lock(&st.running).keys().cloned().collect();
+    let inner = crate::state::lock(&st.inner);
+    for t in &inner.tasks {
+        if t.review
+            .as_ref()
+            .is_some_and(|r| r.status == ReviewStatus::Running)
+        {
+            out.insert(format!("review-{}", t.id));
+        }
+    }
+    out
+}
+
 fn prune_logs(st: &AppState, cutoff: i64) {
-    let running: std::collections::HashSet<String> = crate::state::lock(&st.running)
-        .keys()
-        .cloned()
-        .collect();
+    let running = protected_log_stems(st);
     let Ok(entries) = std::fs::read_dir(st.logs_dir()) else {
         return;
     };
@@ -64,7 +87,11 @@ fn prune_logs(st: &AppState, cutoff: i64) {
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        // Never delete the log of a running task.
+        // Never touch the error log or another non-task log.
+        if !is_task_log(id) {
+            continue;
+        }
+        // Never delete the log of a running task or review.
         if running.contains(id) {
             continue;
         }
@@ -155,6 +182,13 @@ pub fn stats(st: &AppState) -> CacheStats {
             if path.extension().and_then(|s| s.to_str()) != Some("log") {
                 continue;
             }
+            if !path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(is_task_log)
+            {
+                continue;
+            }
             log_count += 1;
             if let Ok(md) = entry.metadata() {
                 log_bytes += md.len();
@@ -178,10 +212,7 @@ pub fn clear(st: &AppState, prompts: bool, logs: bool) -> CacheStats {
         st.save();
     }
     if logs {
-        let running: std::collections::HashSet<String> = crate::state::lock(&st.running)
-            .keys()
-            .cloned()
-            .collect();
+        let running = protected_log_stems(st);
         if let Ok(entries) = std::fs::read_dir(st.logs_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -191,7 +222,7 @@ pub fn clear(st: &AppState, prompts: bool, logs: bool) -> CacheStats {
                 let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                if running.contains(id) {
+                if !is_task_log(id) || running.contains(id) {
                     continue;
                 }
                 let _ = std::fs::remove_file(&path);

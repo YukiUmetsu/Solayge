@@ -126,6 +126,15 @@ export function clock(epochSec?: number | null): string {
   });
 }
 
+/** Compact elapsed label: seconds under a minute, then minutes, then hours. */
+export function compactDuration(totalSecs: number): string {
+  const s = Math.max(0, Math.round(totalSecs));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /** Duration of a task, live while it is still running. */
 export function runDuration(
   task: { started_at?: number | null; finished_at?: number | null },

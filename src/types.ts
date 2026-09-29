@@ -264,12 +264,24 @@ export interface ProjectConfigInput extends AgentConfig {
   conflict_mode?: ConflictMode | null;
 }
 
+/** A soft-deleted task: the task record plus the pieces kept for restore. */
+export interface DeletedTask {
+  task: Task;
+  deleted_at: number;
+  /** Tail of the task's log when it was deleted. */
+  summary?: string | null;
+  /** Working-tree diff captured when it was deleted. */
+  diff?: string | null;
+}
+
 export interface Snapshot {
   projects: Project[];
   tasks: Task[];
   concurrency: number;
   running: number;
   settings: Settings;
+  /** Soft-deleted tasks across all projects; filter by `task.project_path`. */
+  deleted_tasks: DeletedTask[];
 }
 
 export interface Settings {
@@ -380,6 +392,10 @@ export interface TaskPatch {
   base_ref?: string;
   delay_seconds?: number;
   depends_on?: string[];
+  command?: string;
+  branch_mode?: BranchMode;
+  new_branch?: string;
+  kind?: TaskKind;
 }
 
 export interface LogEvent {

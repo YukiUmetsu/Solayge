@@ -7,6 +7,7 @@ import type {
   Task,
 } from "../types";
 import { editorLabel, providerLabel, reviewModeLabel } from "../lib/providers";
+import { isRetryable, isTerminalStatus } from "../lib/tasks";
 import { Icon } from "./Icons";
 
 export function ProjectHeader({
@@ -55,15 +56,9 @@ export function ProjectHeader({
   const failed = tasks.filter((t) => t.status === "failed").length;
   const interrupted = tasks.filter((t) => t.status === "interrupted").length;
   const drafts = tasks.filter((t) => t.status === "draft").length;
-  const retryable = tasks.filter((t) =>
-    ["failed", "canceled", "blocked", "interrupted"].includes(t.status),
-  ).length;
+  const retryable = tasks.filter(isRetryable).length;
   const runnable = drafts + retryable;
-  const finished = tasks.filter((t) =>
-    ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
-      t.status,
-    ),
-  ).length;
+  const finished = tasks.filter((t) => isTerminalStatus(t.status)).length;
   const pct = total === 0 ? 0 : Math.round((finished / total) * 100);
 
   const providerTool = tools?.providers.find(

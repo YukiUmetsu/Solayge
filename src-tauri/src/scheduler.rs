@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::OpenOptions;
@@ -21,12 +21,12 @@ use tauri_plugin_notification::NotificationExt;
 /// output, or a managed step) for this long is presumed orphaned.
 const STALL_SECS: i64 = 600;
 
-pub fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+/// How many auto-reviews may run at once. Tasks are capped by `concurrency`;
+/// reviews need their own cap so a project full of finished tasks cannot fork
+/// one provider process per task at once.
+const MAX_CONCURRENT_REVIEWS: usize = 4;
+
+pub use crate::state::now;
 
 pub fn emit_state(app: &AppHandle) {
     let snap = crate::state::snapshot(app);
@@ -66,25 +66,11 @@ where
     }
 }
 
-/// Record a scheduler-level problem where the user can see it: appended to
-/// `logs/scheduler.log` and surfaced as a notification.
+/// Record a scheduler-level problem where the user can see it: appended to the
+/// error-only log and surfaced as a notification.
 fn record_scheduler_error(app: &AppHandle, message: &str) {
     eprintln!("[Solayge] {message}");
-    let path = {
-        let st = app.state::<AppState>();
-        st.logs_dir().join("scheduler.log")
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "[{}] {message}", now());
-    }
+    crate::errorlog::record(app, "scheduler", message);
     notify(app, "Solayge", message);
 }
 
@@ -198,11 +184,17 @@ fn reap_stalled(app: &AppHandle) {
     }
 }
 
-/// Claim every succeeded task whose review is queued, returning their ids and
-/// flipping the review to running. Pure so the selection can be tested.
-fn reviews_to_start(tasks: &mut [Task]) -> Vec<String> {
+/// Claim up to `limit` succeeded tasks whose review is queued, returning their
+/// ids and flipping the review to running. Pure so the selection can be tested.
+fn reviews_to_start(tasks: &mut [Task], limit: usize) -> Vec<String> {
     let mut out = Vec::new();
+    if limit == 0 {
+        return out;
+    }
     for t in tasks {
+        if out.len() >= limit {
+            break;
+        }
         if t.status != TaskStatus::Succeeded {
             continue;
         }
@@ -217,12 +209,15 @@ fn reviews_to_start(tasks: &mut [Task]) -> Vec<String> {
 }
 
 /// Start (or restart) reviews left queued by a previous tick or session. This is
-/// the single path that launches a review, so there is no race at success time.
+/// the single path that launches a review, so there is no race at success time,
+/// and it honors [`MAX_CONCURRENT_REVIEWS`] so a burst of finished tasks cannot
+/// fork one process each.
 fn resume_reviews(app: &AppHandle) {
     let st = app.state::<AppState>();
+    let slots = MAX_CONCURRENT_REVIEWS.saturating_sub(crate::state::lock(&st.reviewing).len());
     let to_start: Vec<String> = {
         let mut inner = crate::state::lock(&st.inner);
-        reviews_to_start(&mut inner.tasks)
+        reviews_to_start(&mut inner.tasks, slots)
     };
     if to_start.is_empty() {
         return;
@@ -554,6 +549,7 @@ async fn prepare_worktree(
 
 fn fail_task(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
+    crate::errorlog::record(app, "task", &format!("{id}: {msg}"));
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
@@ -623,25 +619,19 @@ fn load_run(app: &AppHandle, id: &str) -> Option<TaskRun> {
 
 fn project_context(app: &AppHandle, project: &str) -> ProjectContext {
     let st = app.state::<AppState>();
-    let (name, system_prompt, keys, kind, conflict_mode) = {
-        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let (name, system_prompt, conflict_mode) = {
+        let inner = crate::state::lock(&st.inner);
         let p = inner.projects.iter().find(|p| p.path == project);
         (
             p.map(|p| p.name.clone()).unwrap_or_default(),
             p.and_then(|p| p.system_prompt.clone()),
-            p.map(|p| p.env_vars.iter().map(|e| e.key.clone()).collect::<Vec<_>>())
-                .unwrap_or_default(),
-            crate::secrets::StoreKind::parse(inner.settings.secret_store.as_deref()),
             p.and_then(|p| p.conflict_mode).unwrap_or_default(),
         )
     };
-    let env = crate::secrets::Secrets::new(&st.data_dir, kind)
-        .get_many(project, &keys)
-        .unwrap_or_default();
     ProjectContext {
         name,
         system_prompt,
-        env,
+        env: st.project_env(project),
         conflict_mode,
     }
 }
@@ -703,11 +693,7 @@ fn log_note(app: &AppHandle, id: &str, message: &str) {
 /// When this task's log was last written, as unix seconds. Best-effort.
 fn last_activity(app: &AppHandle, id: &str) -> Option<i64> {
     let st = app.state::<AppState>();
-    let modified = std::fs::metadata(st.log_path(id)).and_then(|m| m.modified()).ok()?;
-    modified
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
+    crate::state::log_mtime(&st.data_dir, id)
 }
 
 /// Record that a task is still making progress, so the stall watchdog leaves it
@@ -965,18 +951,29 @@ async fn start_task(app: AppHandle, id: String) {
     }
 }
 
+/// The directory a task runs in: its own worktree when isolated, otherwise the
+/// project folder. Creating or reusing that worktree is identical for every
+/// kind of task, so the starters share it.
+async fn resolve_cwd(
+    app: &AppHandle,
+    run: &TaskRun,
+    project_path: &Path,
+) -> Result<PathBuf, String> {
+    if run.isolation != Isolation::Worktree {
+        return Ok(project_path.to_path_buf());
+    }
+    prepare_or_reuse(app, run, project_path).await
+}
+
 async fn start_agent_task(app: AppHandle, run: TaskRun) {
     let project_path = PathBuf::from(&run.project);
-    let mut cwd = project_path.clone();
-    if run.isolation == Isolation::Worktree {
-        match prepare_or_reuse(&app, &run, &project_path).await {
-            Ok(wt) => cwd = wt,
-            Err(e) => {
-                fail_task(&app, &run.id, e);
-                return;
-            }
+    let cwd = match resolve_cwd(&app, &run, &project_path).await {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            fail_task(&app, &run.id, e);
+            return;
         }
-    }
+    };
     init_log(&app, &run.id).await;
 
     // In the project directory, optionally start a new branch first.
@@ -1021,10 +1018,7 @@ async fn opencode_setup(
     run: &TaskRun,
 ) -> Result<(opencode_server::Connection, String), String> {
     let project_path = PathBuf::from(&run.project);
-    let mut cwd = project_path.clone();
-    if run.isolation == Isolation::Worktree {
-        cwd = prepare_or_reuse(app, run, &project_path).await?;
-    }
+    let cwd = resolve_cwd(app, run, &project_path).await?;
     init_log(app, &run.id).await;
     maybe_new_branch(app, run, &project_path).await?;
 
@@ -1401,16 +1395,13 @@ async fn execute_git(
 /// Run a shell task: a user-provided command in the platform's shell.
 async fn start_shell_task(app: AppHandle, run: TaskRun) {
     let project_path = PathBuf::from(&run.project);
-    let mut cwd = project_path.clone();
-    if run.isolation == Isolation::Worktree {
-        match prepare_or_reuse(&app, &run, &project_path).await {
-            Ok(wt) => cwd = wt,
-            Err(e) => {
-                fail_task(&app, &run.id, e);
-                return;
-            }
+    let cwd = match resolve_cwd(&app, &run, &project_path).await {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            fail_task(&app, &run.id, e);
+            return;
         }
-    }
+    };
     init_log(&app, &run.id).await;
     if let Err(e) = maybe_new_branch(&app, &run, &project_path).await {
         fail_task(&app, &run.id, e);
@@ -1886,18 +1877,7 @@ async fn start_review(app: AppHandle, id: String) {
     };
     let env = {
         let st = app.state::<AppState>();
-        let (keys, kind) = {
-            let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let proj = inner.projects.iter().find(|p| p.path == project);
-            (
-                proj.map(|p| p.env_vars.iter().map(|e| e.key.clone()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-                crate::secrets::StoreKind::parse(inner.settings.secret_store.as_deref()),
-            )
-        };
-        crate::secrets::Secrets::new(&st.data_dir, kind)
-            .get_many(&project, &keys)
-            .unwrap_or_default()
+        st.project_env(&project)
     };
     let prompt = agent::review_prompt(&title, &task_prompt, mode);
     let (log_path, logs_dir) = {
@@ -2375,7 +2355,7 @@ mod tests {
             reviewed(not_done, ReviewMode::Autofix, ReviewStatus::Pending),
         ];
 
-        assert_eq!(reviews_to_start(&mut tasks), vec!["queued".to_string()]);
+        assert_eq!(reviews_to_start(&mut tasks, 8), vec!["queued".to_string()]);
         // The claimed review is flipped to running; nothing else moves.
         assert_eq!(tasks[0].review.as_ref().unwrap().status, ReviewStatus::Running);
         assert_eq!(
@@ -2384,6 +2364,37 @@ mod tests {
         );
         assert_eq!(tasks[2].review.as_ref().unwrap().status, ReviewStatus::Pending);
         assert_eq!(tasks[3].review.as_ref().unwrap().status, ReviewStatus::Pending);
+    }
+
+    #[test]
+    fn reviews_to_start_respects_its_limit() {
+        // A project full of finished tasks must not fork one reviewer each.
+        let mut tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                let mut t = task(&format!("t{i}"), "/p", &[], Isolation::Worktree, None);
+                t.status = TaskStatus::Succeeded;
+                reviewed(t, ReviewMode::Autofix, ReviewStatus::Pending)
+            })
+            .collect();
+
+        let claimed = reviews_to_start(&mut tasks, 2);
+
+        assert_eq!(claimed.len(), 2);
+        let started = tasks
+            .iter()
+            .filter(|t| t.review.as_ref().unwrap().status == ReviewStatus::Running)
+            .count();
+        assert_eq!(
+            started, 2,
+            "only the limit is claimed, the rest stay queued"
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| t.review.as_ref().unwrap().status == ReviewStatus::Pending)
+                .count(),
+            3
+        );
     }
 
     /// Reproduces the original freeze at the scheduler level: claiming a queued
@@ -2398,7 +2409,7 @@ mod tests {
         );
         let claimed = {
             let mut inner = st.inner.lock().unwrap();
-            reviews_to_start(&mut inner.tasks)
+            reviews_to_start(&mut inner.tasks, 8)
         }; // the guard is dropped before saving, as it must be
         assert_eq!(claimed, vec!["t".to_string()]);
         st.save(); // hung forever before the fix

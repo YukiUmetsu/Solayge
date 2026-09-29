@@ -107,6 +107,12 @@ impl Secrets {
     /// Copy every `(project, key)` secret from one store to another, removing
     /// it from the source. Used when the account switches stores. No-op when
     /// the stores are the same.
+    ///
+    /// Two-phase on purpose: nothing is deleted from the source until *every*
+    /// value has been written to the destination. A failure partway through
+    /// (a locked keychain, a full disk) therefore leaves the config's current
+    /// store intact instead of stranding secrets in the store it does not point
+    /// at.
     pub fn migrate(
         data_dir: &Path,
         from: StoreKind,
@@ -118,15 +124,40 @@ impl Secrets {
         }
         let src = Secrets::new(data_dir, from);
         let dst = Secrets::new(data_dir, to);
-        for (project, key) in entries {
-            let Some(value) = src.get(project, key)? else {
-                continue;
-            };
-            dst.set(project, key, &value)?;
-            let _ = src.delete(project, key);
-        }
-        Ok(())
+        migrate_entries(
+            entries,
+            |project, key| src.get(project, key),
+            |project, key, value| dst.set(project, key, value),
+            |project, key| {
+                let _ = src.delete(project, key);
+            },
+        )
     }
+}
+
+/// The store-agnostic half of [`Secrets::migrate`]: read every value from the
+/// source, write it all to the destination, and only then remove the originals.
+/// Taking the operations as closures keeps the ordering rule testable without a
+/// real keychain or a second data directory.
+fn migrate_entries(
+    entries: &[(String, String)],
+    mut get: impl FnMut(&str, &str) -> Result<Option<String>>,
+    mut set: impl FnMut(&str, &str, &str) -> Result<()>,
+    mut remove: impl FnMut(&str, &str),
+) -> Result<()> {
+    let mut copied: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    for (project, key) in entries {
+        let Some(value) = get(project, key)? else {
+            continue;
+        };
+        set(project, key, &value)?;
+        copied.push((project.clone(), key.clone()));
+    }
+    // Every write succeeded; the source copies are now safe to drop.
+    for (project, key) in &copied {
+        remove(project, key);
+    }
+    Ok(())
 }
 
 // ---- encrypted file store ----
@@ -484,5 +515,89 @@ mod tests {
             assert_eq!(mode, 0o600, "{path:?} should be 0600");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_moves_every_value_once_all_writes_succeed() {
+        let source: Vec<(String, String)> = vec![
+            ("/p".into(), "A".into()),
+            ("/p".into(), "B".into()),
+            ("/q".into(), "C".into()),
+        ];
+        let mut destination: Vec<(String, String)> = Vec::new();
+        let mut removed: Vec<(String, String)> = Vec::new();
+
+        migrate_entries(
+            &source,
+            |p, k| {
+                Ok(source
+                    .iter()
+                    .find(|(ap, ak)| ap == p && ak == k)
+                    .map(|(_, v)| v.clone()))
+            },
+            |p, k, v| {
+                destination.push((format!("{p}/{k}"), v.to_string()));
+                Ok(())
+            },
+            |p, k| removed.push((p.to_string(), k.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(destination.len(), 3, "every value reached the destination");
+        assert_eq!(removed.len(), 3, "and every original was dropped");
+    }
+
+    #[test]
+    fn migration_keeps_the_source_when_a_write_fails() {
+        // A destination that fails on the second write must not delete anything
+        // from the source: the settings still point at the old store, so a
+        // stranded value would be unreachable.
+        let source: Vec<(String, String)> = vec![
+            ("/p".into(), "A".into()),
+            ("/p".into(), "B".into()),
+            ("/p".into(), "C".into()),
+        ];
+        let mut writes = 0usize;
+        let mut removed: Vec<(String, String)> = Vec::new();
+
+        let result = migrate_entries(
+            &source,
+            |p, k| {
+                Ok(source
+                    .iter()
+                    .find(|(ap, ak)| ap == p && ak == k)
+                    .map(|(_, v)| v.clone()))
+            },
+            |_, _, _| {
+                writes += 1;
+                if writes == 2 {
+                    Err(anyhow!("destination unavailable"))
+                } else {
+                    Ok(())
+                }
+            },
+            |p, k| removed.push((p.to_string(), k.to_string())),
+        );
+
+        assert!(result.is_err(), "the failure is surfaced");
+        assert!(removed.is_empty(), "nothing was deleted from the source");
+    }
+
+    #[test]
+    fn migration_skips_values_the_source_does_not_have() {
+        let mut writes: Vec<String> = Vec::new();
+        let mut removed: Vec<String> = Vec::new();
+        migrate_entries(
+            &[("/p".into(), "MISSING".into())],
+            |_, _| Ok(None),
+            |_, k, _| {
+                writes.push(k.to_string());
+                Ok(())
+            },
+            |_, k| removed.push(k.to_string()),
+        )
+        .unwrap();
+        assert!(writes.is_empty());
+        assert!(removed.is_empty());
     }
 }

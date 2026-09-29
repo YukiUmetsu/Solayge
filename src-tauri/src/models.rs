@@ -148,6 +148,15 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Every provider, in display order. Kept next to the enum so adding a
+    /// variant and forgetting a list is a compile error, not a silent omission.
+    pub const ALL: [Provider; 4] = [
+        Provider::Opencode,
+        Provider::Codex,
+        Provider::Claude,
+        Provider::Cursor,
+    ];
+
     pub fn command_key(self) -> &'static str {
         match self {
             Provider::Opencode => "opencode",
@@ -694,6 +703,20 @@ pub struct CacheStats {
     pub retention_days: i64,
 }
 
+/// A soft-deleted task: the task record (prompt, details, dependencies), plus
+/// the small pieces worth keeping once the full log and worktree are gone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedTask {
+    pub task: Task,
+    pub deleted_at: i64,
+    /// Tail of the task's log when it was deleted (its "output summary").
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Working-tree diff captured when it was deleted.
+    #[serde(default)]
+    pub diff: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
@@ -706,6 +729,9 @@ pub struct PersistedState {
     pub settings: Settings,
     #[serde(default)]
     pub prompts: Vec<PromptEntry>,
+    /// Soft-deleted tasks, kept so they can be restored. Capped per project.
+    #[serde(default)]
+    pub deleted_tasks: Vec<DeletedTask>,
 }
 
 impl Default for PersistedState {
@@ -716,6 +742,7 @@ impl Default for PersistedState {
             concurrency: default_concurrency(),
             settings: Settings::default(),
             prompts: Vec::new(),
+            deleted_tasks: Vec::new(),
         }
     }
 }
@@ -727,6 +754,8 @@ pub struct Snapshot {
     pub concurrency: usize,
     pub running: usize,
     pub settings: Settings,
+    /// Soft-deleted tasks (all projects; the UI filters by project).
+    pub deleted_tasks: Vec<DeletedTask>,
 }
 
 // ---- git DTOs ----
@@ -848,6 +877,15 @@ pub struct TaskPatch {
     pub depends_on: Option<Vec<String>>,
     #[serde(default)]
     pub command: Option<String>,
+    /// For non-worktree tasks: run on the current branch, or create one first.
+    #[serde(default)]
+    pub branch_mode: Option<BranchMode>,
+    /// Requested new-branch name (empty lets the agent choose one).
+    #[serde(default)]
+    pub new_branch: Option<String>,
+    /// What the task does (agent prompt, shell command, git op, merge).
+    #[serde(default)]
+    pub kind: Option<TaskKind>,
 }
 
 #[derive(Debug, Clone, Serialize)]

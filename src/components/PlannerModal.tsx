@@ -16,6 +16,7 @@ import {
   separationMeta,
 } from "../lib/providers";
 import { Modal } from "./Modal";
+import { ErrorNote } from "./Field";
 import { Icon } from "./Icons";
 import { PromptSuggestions } from "./PromptSuggestions";
 
@@ -204,11 +205,7 @@ export function PlannerModal({
           still take precedence per task.
         </p>
 
-        {error && (
-          <div className="rounded-lg border border-danger-line bg-danger-soft p-2.5 text-[12px] text-danger">
-            {error}
-          </div>
-        )}
+        <ErrorNote error={error} />
 
         {summary && (
           <div className="rounded-lg border border-accent-line bg-accent-soft p-3 text-[12px] leading-relaxed text-ink">

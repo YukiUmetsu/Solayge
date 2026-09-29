@@ -14,15 +14,6 @@ export function cachedModels(provider: Provider): string[] | undefined {
   return cache.get(provider);
 }
 
-/** Whether a provider can list models at all. */
-export const PROVIDER_LISTS_MODELS: Record<Provider, boolean> = {
-  opencode: true,
-  cursor: true,
-  codex: true,
-  // Claude Code only documents `--model` aliases (sonnet/opus/haiku).
-  claude: false,
-};
-
 export async function loadModels(
   provider: Provider,
   force = false,

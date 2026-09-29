@@ -1,4 +1,5 @@
 import type { Project, Snapshot, Task } from "../types";
+import { compactDuration } from "../lib/format";
 import { useTheme } from "../theme";
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
@@ -240,15 +241,6 @@ function Stat({
   );
 }
 
-/** Compact "how long" label: seconds under a minute, then minutes, then hours. */
-function elapsedLabel(secs: number): string {
-  const s = Math.max(0, Math.round(secs));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
 /**
  * A small always-visible status chip for a project: a spinner and elapsed time
  * while anything runs, then failures, blocked, pending, or a done check.
@@ -269,7 +261,7 @@ function ProjectStatus({ tasks, now }: { tasks: Task[]; now: number }) {
         title={`${running.length} running`}
       >
         <Icon name="refresh" className="h-3 w-3 animate-spin" />
-        {elapsedLabel(elapsed)}
+        {compactDuration(elapsed)}
       </span>
     );
   }

@@ -20,6 +20,8 @@ import { TaskTree } from "./components/TaskTree";
 import { DetailPanel } from "./components/DetailPanel";
 import { PlannerModal } from "./components/PlannerModal";
 import { NewTaskModal } from "./components/NewTaskModal";
+import { EditTaskModal } from "./components/EditTaskModal";
+import { DeletedTasksModal } from "./components/DeletedTasksModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { ShipModal } from "./components/ShipModal";
@@ -133,6 +135,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [showPlanner, setShowPlanner] = useState(false);
@@ -142,6 +145,7 @@ export default function App() {
   const [showShip, setShowShip] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [showBranchDiff, setShowBranchDiff] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [remote, setRemote] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
@@ -277,16 +281,27 @@ export default function App() {
   // project changes so it never shows the previous project's task.
   useEffect(() => {
     setSelectedTaskId(null);
+    setEditingTaskId(null);
+    setShowDeleted(false);
   }, [selectedProject]);
 
   const project = snapshot?.projects.find((p) => p.path === selectedProject) ?? null;
   const projectTasks = snapshot
     ? snapshot.tasks.filter((t) => t.project_path === selectedProject)
     : [];
+  const deletedTasks = snapshot
+    ? snapshot.deleted_tasks.filter(
+        (d) => d.task.project_path === selectedProject,
+      )
+    : [];
   // A task belongs to exactly one project: only resolve the selected id within
   // the current project so switching projects never shows another project's task.
   const selectedTask =
     projectTasks.find((t) => t.id === selectedTaskId) ?? null;
+  // Only a draft is editable; resolve the id within the project so switching
+  // projects can never open another project's task.
+  const editingTask =
+    projectTasks.find((t) => t.id === editingTaskId) ?? null;
   const running = projectTasks.filter((t) => t.status === "running").length;
   const resolved = useMemo(
     () => effectiveConfig(project ?? {}, snapshot?.settings ?? {}),
@@ -419,6 +434,7 @@ export default function App() {
                   tasks={projectTasks}
                   selectedId={selectedTaskId}
                   onSelect={setSelectedTaskId}
+                  onEdit={setEditingTaskId}
                   onStartNow={(id) =>
                     void runAction(() => api.startNow(id))
                   }
@@ -433,6 +449,8 @@ export default function App() {
                   onClearFinished={() =>
                     void runAction(() => api.clearFinished(project.path))
                   }
+                  deletedCount={deletedTasks.length}
+                  onShowDeleted={() => setShowDeleted(true)}
                 />
               </div>
 
@@ -449,6 +467,7 @@ export default function App() {
                     project={project}
                     logs={selectedTaskId ? logs[selectedTaskId] ?? [] : []}
                     width={rightWidth}
+                    onEdit={setEditingTaskId}
                     onRemoveWorktree={(id) =>
                       void runAction(() => api.removeWorktree(id))
                     }
@@ -476,6 +495,22 @@ export default function App() {
           tasks={projectTasks}
           onClose={() => setShowNewTask(false)}
           onCreated={apply}
+        />
+      )}
+      {editingTask && editingTask.status === "draft" && project && (
+        <EditTaskModal
+          task={editingTask}
+          project={project}
+          tasks={projectTasks}
+          onClose={() => setEditingTaskId(null)}
+          onSaved={apply}
+        />
+      )}
+      {showDeleted && project && (
+        <DeletedTasksModal
+          deleted={deletedTasks}
+          onClose={() => setShowDeleted(false)}
+          onRestore={(id) => void runAction(() => api.restoreTask(id))}
         />
       )}
       {showSettings && snapshot && (

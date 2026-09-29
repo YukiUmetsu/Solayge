@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState } from "react";
 import type { AgentConfig, EnvironmentStatus, Provider, ReviewMode } from "../types";
 import {
   EDITORS,
@@ -8,41 +8,10 @@ import {
 } from "../lib/providers";
 import { cachedModels, loadModels } from "../lib/models";
 import { Icon } from "./Icons";
+import { Field, SectionLabel } from "./Field";
 
-export function SectionLabel({
-  icon,
-  children,
-}: {
-  icon: Parameters<typeof Icon>[0]["name"];
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-ink-subtle">
-      <Icon name={icon} className="h-3.5 w-3.5" />
-      {children}
-    </div>
-  );
-}
-
-export function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-ink-subtle">
-        {label}
-      </span>
-      {children}
-      {hint && <span className="mt-1 block text-[10.5px] text-ink-subtle">{hint}</span>}
-    </label>
-  );
-}
+// Re-exported so existing `from "./AgentConfigForm"` imports keep working.
+export { Field, SectionLabel } from "./Field";
 
 export function ProviderSelect({
   value,

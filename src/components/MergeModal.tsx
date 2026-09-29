@@ -3,6 +3,7 @@ import type { MergeSpec, MergeStrategy, NewTask, Project, Snapshot, Task } from 
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Field, SectionLabel } from "./AgentConfigForm";
+import { ErrorNote } from "./Field";
 import { Icon } from "./Icons";
 import { shortId } from "../lib/format";
 
@@ -214,11 +215,7 @@ export function MergeModal({
           runs on its own.
         </p>
 
-        {error && (
-          <div className="rounded-lg border border-danger-line bg-danger-soft p-2.5 text-[12px] text-danger">
-            {error}
-          </div>
-        )}
+        <ErrorNote error={error} />
       </div>
     </Modal>
   );

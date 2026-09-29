@@ -21,9 +21,11 @@ import {
   secretStoreLabel,
 } from "../lib/providers";
 import { AgentConfigForm, SectionLabel } from "./AgentConfigForm";
+import { ErrorNote } from "./Field";
 import { SaveButton, SavedPill, type SaveState } from "./SaveButton";
 import { Modal } from "./Modal";
 import { Icon, type IconName } from "./Icons";
+import { newId } from "../lib/id";
 
 type Tab = "general" | "agent" | "environment" | "prompt" | "skills" | "git";
 
@@ -65,17 +67,9 @@ const PROMPT_VARIABLES = [
   ["{{env.NAME}}", "a project environment variable"],
 ] as const;
 
-function newId(): string {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return `sk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  }
-}
-
 function newSkill(): ProjectSkill {
   return {
-    id: newId(),
+    id: newId("sk"),
     name: "",
     command: "",
     description: "",
@@ -415,11 +409,7 @@ export function ProjectSettingsModal({
           </section>
         )}
 
-        {error && (
-          <div className="rounded-lg border border-danger-line bg-danger-soft p-2.5 text-[12px] text-danger">
-            {error}
-          </div>
-        )}
+        <ErrorNote error={error} />
       </div>
     </Modal>
   );

@@ -1,6 +1,7 @@
 mod agent;
 mod cache;
 mod commands;
+mod errorlog;
 mod git;
 mod models;
 mod opencode;
@@ -70,6 +71,7 @@ pub fn run() {
             commands::create_tasks,
             commands::update_task,
             commands::delete_task,
+            commands::restore_task,
             commands::start_task_now,
             commands::cancel_task,
             commands::retry_task,
@@ -92,6 +94,8 @@ pub fn run() {
             commands::get_project_secrets,
             commands::get_resolved_config,
             commands::get_review_log,
+            commands::get_error_log,
+            commands::clear_error_log,
             commands::environment_check,
             commands::list_models,
         ])

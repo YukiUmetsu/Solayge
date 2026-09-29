@@ -6,8 +6,9 @@ use tauri::{AppHandle, Manager};
 
 use crate::models::{PersistedState, ReviewStatus, Snapshot, TaskStatus};
 
-/// Unix seconds, without pulling `scheduler::now` (which depends on this module).
-fn now() -> i64 {
+/// Unix seconds. The single clock the whole crate shares, so "now" is
+/// consistent and defined in one place.
+pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -66,6 +67,32 @@ impl AppState {
         self.logs_dir().join(format!("review-{id}.log"))
     }
 
+    /// The decrypted environment variables for a project, applying the
+    /// account's configured secret store. Unset values are skipped.
+    pub fn project_env(&self, project: &str) -> Vec<(String, String)> {
+        let (keys, kind) = {
+            let inner = lock(&self.inner);
+            let keys = inner
+                .projects
+                .iter()
+                .find(|p| p.path == project)
+                .map(|p| p.env_vars.iter().map(|e| e.key.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let kind = crate::secrets::StoreKind::parse(inner.settings.secret_store.as_deref());
+            (keys, kind)
+        };
+        crate::secrets::Secrets::new(&self.data_dir, kind)
+            .get_many(project, &keys)
+            .unwrap_or_default()
+    }
+
+    /// Record a failed save to stderr and the error log. A full disk or a bad
+    /// path must not fail silently.
+    fn report_save_error(&self, message: &str) {
+        eprintln!("[Solayge] {message}");
+        crate::errorlog::append(&self.logs_dir(), "save", message);
+    }
+
     pub fn save(&self) {
         // `std::sync::Mutex` is not reentrant. Wait briefly for a concurrent
         // writer to finish, but never block forever if *this* thread already
@@ -75,15 +102,14 @@ impl AppState {
             match self.inner.try_lock() {
                 Ok(inner) => {
                     if let Err(e) = save(&self.data_dir, &inner) {
-                        // A full disk or a bad path must not fail silently.
-                        eprintln!("[Solayge] failed to save state.json: {e}");
+                        self.report_save_error(&format!("failed to save state.json: {e}"));
                     }
                     return;
                 }
                 Err(std::sync::TryLockError::Poisoned(e)) => {
                     let inner = e.into_inner();
                     if let Err(e) = save(&self.data_dir, &inner) {
-                        eprintln!("[Solayge] failed to save state.json: {e}");
+                        self.report_save_error(&format!("failed to save state.json: {e}"));
                     }
                     return;
                 }
@@ -92,19 +118,45 @@ impl AppState {
                 }
             }
         }
-        eprintln!(
-            "[Solayge] save() could not acquire the state lock; skipping this save \
-             (a caller is probably holding it)"
+        self.report_save_error(
+            "save() could not acquire the state lock; skipping this save \
+             (a caller is probably holding it)",
         );
     }
 }
 
 pub fn load(data_dir: &Path) -> PersistedState {
     let p = data_dir.join("state.json");
-    std::fs::read_to_string(&p)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let text = match std::fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PersistedState::default(),
+        Err(e) => {
+            report_state_error(data_dir, &format!("could not read {}: {e}", p.display()));
+            return PersistedState::default();
+        }
+    };
+    match serde_json::from_str(&text) {
+        Ok(state) => state,
+        Err(e) => {
+            // Never overwrite the file: it is the only copy of the user's data.
+            report_state_error(
+                data_dir,
+                &format!(
+                    "could not parse {}: {e}; starting from an empty state \
+                     (the file was left untouched)",
+                    p.display()
+                ),
+            );
+            PersistedState::default()
+        }
+    }
+}
+
+/// Surface a state-load problem where the user can see it, instead of silently
+/// presenting an empty app.
+fn report_state_error(data_dir: &Path, message: &str) {
+    eprintln!("[Solayge] {message}");
+    crate::errorlog::append(&data_dir.join("logs"), "state", message);
 }
 
 pub fn save(data_dir: &Path, state: &PersistedState) -> std::io::Result<()> {
@@ -204,7 +256,7 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
             t.status = TaskStatus::Interrupted;
             // The last log write is the best estimate of when it actually died;
             // falling back to now would overstate the run's duration.
-            let died = last_log_time(data_dir, &t.id)
+            let died = log_mtime(data_dir, &t.id)
                 .or(t.started_at)
                 .unwrap_or_else(now);
             t.finished_at = Some(died);
@@ -240,8 +292,9 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
     changed
 }
 
-/// When a log file was last written, as unix seconds. Best-effort.
-fn last_log_time(data_dir: &Path, id: &str) -> Option<i64> {
+/// When a task's log file was last written, as unix seconds. Best-effort: used
+/// to estimate when an interrupted run actually died, and by the stall watchdog.
+pub fn log_mtime(data_dir: &Path, id: &str) -> Option<i64> {
     let path = data_dir.join("logs").join(format!("{id}.log"));
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     modified
@@ -278,12 +331,17 @@ fn snapshot_of(inner: &PersistedState, running: usize) -> Snapshot {
     for t in &mut tasks {
         t.drop_orphaned_ask();
     }
+    let mut deleted_tasks = inner.deleted_tasks.clone();
+    for d in &mut deleted_tasks {
+        d.task.drop_orphaned_ask();
+    }
     Snapshot {
         projects: inner.projects.clone(),
         tasks,
         concurrency: inner.concurrency,
         running,
         settings: inner.settings.clone(),
+        deleted_tasks,
     }
 }
 
@@ -519,16 +577,18 @@ mod tests {
     fn snapshot_never_exposes_an_ask_on_a_stopped_task() {
         // Belt-and-suspenders for the UI contract: even if some transition fails
         // to clear an ask, the snapshot the UI sees must not contain it.
-        let mut state = PersistedState::default();
-        state.tasks = serde_json::from_value::<Vec<crate::models::Task>>(serde_json::json!([
-            {"id":"run","project_path":"/p","title":"a","prompt":"p","status":"running","created_at":1,
-             "ask":{"id":"f1","kind":"question","title":"q","session_id":"ses_1"}},
-            {"id":"int","project_path":"/p","title":"b","prompt":"p","status":"interrupted","created_at":2,
-             "ask":{"id":"f2","kind":"question","title":"q","session_id":"ses_1"}},
-            {"id":"done","project_path":"/p","title":"c","prompt":"p","status":"succeeded","created_at":3,
-             "ask":{"id":"f3","kind":"permission","title":"p","session_id":"ses_1"}}
-        ]))
-        .unwrap();
+        let state = PersistedState {
+            tasks: serde_json::from_value::<Vec<crate::models::Task>>(serde_json::json!([
+                {"id":"run","project_path":"/p","title":"a","prompt":"p","status":"running","created_at":1,
+                 "ask":{"id":"f1","kind":"question","title":"q","session_id":"ses_1"}},
+                {"id":"int","project_path":"/p","title":"b","prompt":"p","status":"interrupted","created_at":2,
+                 "ask":{"id":"f2","kind":"question","title":"q","session_id":"ses_1"}},
+                {"id":"done","project_path":"/p","title":"c","prompt":"p","status":"succeeded","created_at":3,
+                 "ask":{"id":"f3","kind":"permission","title":"p","session_id":"ses_1"}}
+            ]))
+            .unwrap(),
+            ..Default::default()
+        };
 
         let snap = snapshot_of(&state, 1);
         let has_ask =

@@ -65,15 +65,31 @@ Rules:
     )
 }
 
+/// Remove ANSI escape sequences from terminal-ish output.
+///
+/// The input is untrusted (model and CLI output can contain any bytes), so this
+/// must never index into the middle of a UTF-8 character. The escape branches
+/// only advance over ASCII control bytes, and the fallback skips one whole
+/// character, so `input[i..]` is always on a char boundary.
 pub fn strip_ansi(input: &str) -> String {
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
+    let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            // Skip CSI/OSC escape sequences.
-            i += 1;
-            if i < bytes.len() && bytes[i] == b'[' {
+        if bytes[i] != 0x1b {
+            let ch = input[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        // ESC: consume it plus the sequence that follows.
+        i += 1;
+        if i >= bytes.len() {
+            break;
+        }
+        match bytes[i] {
+            // CSI: consume until a final byte in 0x40..=0x7e.
+            b'[' => {
                 i += 1;
                 while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
                     i += 1;
@@ -81,7 +97,9 @@ pub fn strip_ansi(input: &str) -> String {
                 if i < bytes.len() {
                     i += 1;
                 }
-            } else if i < bytes.len() && bytes[i] == b']' {
+            }
+            // OSC: consume until BEL.
+            b']' => {
                 i += 1;
                 while i < bytes.len() && bytes[i] != 0x07 {
                     i += 1;
@@ -89,13 +107,12 @@ pub fn strip_ansi(input: &str) -> String {
                 if i < bytes.len() {
                     i += 1;
                 }
-            } else if i < bytes.len() {
-                i += 1;
             }
-        } else {
-            let ch = input[i..].chars().next().unwrap_or(' ');
-            out.push(ch);
-            i += ch.len_utf8();
+            // Any other escape: skip exactly one following character.
+            _ => {
+                let ch = input[i..].chars().next().unwrap_or(' ');
+                i += ch.len_utf8();
+            }
         }
     }
     out
@@ -190,6 +207,16 @@ mod tests {
     #[test]
     fn strips_ansi_sequences() {
         assert_eq!(strip_ansi("\u{1b}[0mhello\u{1b}[1;32m!\u{1b}[0m"), "hello!");
+    }
+
+    #[test]
+    fn strips_ansi_without_splitting_multibyte_characters() {
+        // ESC immediately followed by a multi-byte character used to panic by
+        // slicing mid-character. Untrusted output can contain exactly this.
+        assert_eq!(strip_ansi("\u{1b}éhello"), "hello");
+        assert_eq!(strip_ansi("ok\u{1b}é"), "ok");
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{7}x"), "x");
+        assert_eq!(strip_ansi("plain é́ text"), "plain é́ text");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import type { Task } from "../types";
 import { useNow } from "../lib/useNow";
+import { isClearable } from "../lib/tasks";
 import { TaskCard, buildTree } from "./TaskCard";
 import { Icon } from "./Icons";
 
@@ -7,6 +8,7 @@ export function TaskTree({
   tasks,
   selectedId,
   onSelect,
+  onEdit,
   onStartNow,
   onCancel,
   onRetry,
@@ -14,10 +16,13 @@ export function TaskTree({
   onShowDiff,
   onCombine,
   onClearFinished,
+  deletedCount,
+  onShowDeleted,
 }: {
   tasks: Task[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onEdit: (id: string) => void;
   onStartNow: (id: string) => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
@@ -25,14 +30,13 @@ export function TaskTree({
   onShowDiff: (id: string) => void;
   onCombine: () => void;
   onClearFinished: () => void;
+  deletedCount: number;
+  onShowDeleted: () => void;
 }) {
   const rows = buildTree(tasks);
   const now = useNow();
-  const finished = tasks.filter((t) =>
-    ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
-      t.status,
-    ),
-  ).length;
+  // Mirrors the backend `is_clearable`; the rule lives in `lib/tasks`.
+  const clearable = tasks.filter(isClearable).length;
 
   if (tasks.length === 0) {
     return (
@@ -47,10 +51,18 @@ export function TaskTree({
           parallel, each in its own git worktree. Nothing runs until you press{" "}
           <span className="text-ink-muted">Execute</span>.
         </p>
-        <button className="btn btn-ghost mt-1" onClick={onCombine}>
-          <Icon name="diff" className="h-3.5 w-3.5" />
-          Combine branches
-        </button>
+        <div className="mt-1 flex gap-2">
+          <button className="btn btn-ghost" onClick={onCombine}>
+            <Icon name="diff" className="h-3.5 w-3.5" />
+            Combine branches
+          </button>
+          {deletedCount > 0 && (
+            <button className="btn btn-ghost" onClick={onShowDeleted}>
+              <Icon name="retry" className="h-3.5 w-3.5" />
+              Recently deleted · {deletedCount}
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -61,12 +73,20 @@ export function TaskTree({
         <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
           Graph · {tasks.length} task{tasks.length === 1 ? "" : "s"}
         </span>
-        {finished > 0 && (
-          <button className="btn btn-ghost" onClick={onClearFinished}>
-            <Icon name="trash" className="h-3.5 w-3.5" />
-            Clear finished
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {deletedCount > 0 && (
+            <button className="btn btn-ghost" onClick={onShowDeleted}>
+              <Icon name="retry" className="h-3.5 w-3.5" />
+              Recently deleted · {deletedCount}
+            </button>
+          )}
+          {clearable > 0 && (
+            <button className="btn btn-ghost" onClick={onClearFinished}>
+              <Icon name="trash" className="h-3.5 w-3.5" />
+              Clear finished
+            </button>
+          )}
+        </div>
       </div>
       {rows.map(({ task, depth }) => (
         <div
@@ -91,6 +111,7 @@ export function TaskTree({
             now={now}
             selected={task.id === selectedId}
             onSelect={() => onSelect(task.id)}
+            onEdit={() => onEdit(task.id)}
             onStartNow={() => onStartNow(task.id)}
             onCancel={() => onCancel(task.id)}
             onRetry={() => onRetry(task.id)}

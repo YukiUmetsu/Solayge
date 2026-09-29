@@ -11,9 +11,10 @@ import type {
 } from "../types";
 import { api } from "../api";
 import { clock } from "../lib/format";
-import { DEFAULT_COMMANDS, SECRET_STORES } from "../lib/providers";
+import { SECRET_STORES } from "../lib/providers";
 import { useTheme, type ThemePref } from "../theme";
 import { AgentConfigForm, Field, SectionLabel } from "./AgentConfigForm";
+import { ErrorNote } from "./Field";
 import { SaveButton, SavedPill, type SaveState } from "./SaveButton";
 import { Modal } from "./Modal";
 import { Icon } from "./Icons";
@@ -54,6 +55,7 @@ export function SettingsModal({
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorLog, setErrorLog] = useState<string>("");
 
   function flashSaved(key: string) {
     setFlash(key);
@@ -72,7 +74,7 @@ export function SettingsModal({
     editor: settings.editor ?? null,
   }));
   const [templates, setTemplates] = useState<CommandTemplates>(
-    () => settings.command_templates ?? DEFAULT_COMMANDS,
+    () => settings.command_templates,
   );
 
   const refreshStats = () =>
@@ -81,9 +83,29 @@ export function SettingsModal({
       .then(setStats)
       .catch(() => {});
 
+  const refreshErrorLog = () =>
+    api
+      .errorLog()
+      .then(setErrorLog)
+      .catch(() => {});
+
   useEffect(() => {
     void refreshStats();
+    void refreshErrorLog();
   }, []);
+
+  async function clearErrors() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.clearErrorLog();
+      setErrorLog("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function persist(patch: Partial<Settings>, key: string) {
     setBusy(true);
@@ -372,11 +394,38 @@ export function SettingsModal({
           </div>
         </section>
 
-        {error && (
-          <div className="rounded-lg border border-danger-line bg-danger-soft p-2.5 text-[12px] text-danger">
-            {error}
+        <section className="space-y-2">
+          <div className="flex items-center justify-between">
+            <SectionLabel icon="alert">Error log</SectionLabel>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-ghost !px-2 !py-1"
+                onClick={() => void refreshErrorLog()}
+                disabled={busy}
+              >
+                <Icon name="refresh" className="h-3 w-3" />
+                Refresh
+              </button>
+              <button
+                className="btn btn-ghost !px-2 !py-1"
+                onClick={() => void clearErrors()}
+                disabled={busy || !errorLog.trim()}
+              >
+                <Icon name="trash" className="h-3 w-3" />
+                Clear
+              </button>
+            </div>
           </div>
-        )}
+          <p className="text-[11px] leading-relaxed text-ink-subtle">
+            Errors only: scheduler, task-launch, and state-save failures. Full
+            task output stays under each task's Logs.
+          </p>
+          <pre className="mono max-h-64 min-h-16 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-well p-2.5 text-[11px] leading-relaxed text-ink-muted">
+            {errorLog.trim() || "No errors logged."}
+          </pre>
+        </section>
+
+        <ErrorNote error={error} />
       </div>
     </Modal>
   );

@@ -271,7 +271,12 @@ pub fn parse_verdict(output: &str) -> (ReviewStatus, Option<String>) {
             verdict = Some((ReviewStatus::Issues, Some("issues found".to_string())));
         }
     }
-    verdict.unwrap_or((ReviewStatus::Passed, None))
+    verdict.unwrap_or((
+        // No verdict line is a failed review, not a pass: a reviewer that exits
+        // 0 without reporting must not be silently recorded as "passed".
+        ReviewStatus::Failed,
+        Some("the reviewer did not report a verdict".to_string()),
+    ))
 }
 
 /// Last ~40 lines of the review output, used as the recorded summary when there
@@ -578,6 +583,13 @@ mod tests {
         let (s, m) = parse_verdict("blah\nREVIEW: ISSUES: null deref on cancel\n");
         assert_eq!(s, ReviewStatus::Issues);
         assert_eq!(m.as_deref(), Some("null deref on cancel"));
+    }
+
+    #[test]
+    fn a_review_without_a_verdict_is_not_a_pass() {
+        let (status, summary) = parse_verdict("I looked at the code and it seems fine");
+        assert_eq!(status, ReviewStatus::Failed);
+        assert!(summary.is_some(), "the reason is recorded");
     }
 
     #[test]

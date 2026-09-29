@@ -6,6 +6,7 @@ import {
   runDuration,
   shortId,
 } from "../lib/format";
+import { canCancel, canRun, isTerminalStatus } from "../lib/tasks";
 import { providerLabel, reviewStatusMeta, taskKindLabel, taskSeparationDisplay } from "../lib/providers";
 import { Icon } from "./Icons";
 
@@ -14,6 +15,7 @@ export function TaskCard({
   now,
   selected,
   onSelect,
+  onEdit,
   onStartNow,
   onCancel,
   onRetry,
@@ -24,6 +26,7 @@ export function TaskCard({
   now: number;
   selected: boolean;
   onSelect: () => void;
+  onEdit: () => void;
   onStartNow: () => void;
   onCancel: () => void;
   onRetry: () => void;
@@ -32,11 +35,6 @@ export function TaskCard({
 }) {
   const meta = STATUS_META[task.status];
   const pm = PROFILE_META[task.profile] ?? PROFILE_META.autonomous;
-  const isTerminal = ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
-    task.status,
-  );
-  const canRun = ["draft", "waiting", "ready", "blocked"].includes(task.status);
-  const canCancel = ["waiting", "ready", "running"].includes(task.status);
   const live = isLive(task);
   const review =
     task.review && task.review.mode !== "off" ? task.review : null;
@@ -67,7 +65,6 @@ export function TaskCard({
               className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10.5px] font-medium ${meta.chip} ${meta.text}`}
             >
               {meta.label}
-              {task.status === "succeeded" && task.exit_code === 0 ? "" : ""}
             </span>
           </div>
 
@@ -169,13 +166,18 @@ export function TaskCard({
         </div>
 
         <div className="flex shrink-0 flex-col gap-1 opacity-0 transition group-hover:opacity-100">
-          {canRun && (
+          {canRun(task) && (
             <IconBtn name="play" title="Start now" onClick={onStartNow} />
           )}
-          {canCancel && (
+          {task.status === "draft" && (
+            <IconBtn name="edit" title="Edit prompt" onClick={onEdit} />
+          )}
+          {canCancel(task) && (
             <IconBtn name="stop" title="Cancel" onClick={onCancel} danger />
           )}
-          {isTerminal && <IconBtn name="retry" title="Retry" onClick={onRetry} />}
+          {isTerminalStatus(task.status) && (
+            <IconBtn name="retry" title="Retry" onClick={onRetry} />
+          )}
           {(task.worktree_path || task.branch) && (
             <IconBtn name="diff" title="View diff" onClick={onShowDiff} />
           )}

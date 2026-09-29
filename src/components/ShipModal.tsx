@@ -3,7 +3,9 @@ import type { GitOp, NewTask, Project, Snapshot } from "../types";
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Field, SectionLabel } from "./AgentConfigForm";
+import { ErrorNote } from "./Field";
 import { Icon, type IconName } from "./Icons";
+import { newId } from "../lib/id";
 
 type StepKind =
   | "commit"
@@ -51,16 +53,8 @@ const PALETTE: StepKind[] = [
   "shell",
 ];
 
-function uid(): string {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  }
-}
-
 function step(kind: StepKind, extra: Partial<ShipStep> = {}): ShipStep {
-  return { id: uid(), kind, enabled: true, ...extra };
+  return { id: newId("s"), kind, enabled: true, ...extra };
 }
 
 const DEFAULT_STEPS: ShipStep[] = [
@@ -346,11 +340,7 @@ export function ShipModal({
           <span className="text-ink">Execute</span>.
         </p>
 
-        {error && (
-          <div className="rounded-lg border border-danger-line bg-danger-soft p-2.5 text-[12px] text-danger">
-            {error}
-          </div>
-        )}
+        <ErrorNote error={error} />
       </div>
     </Modal>
   );

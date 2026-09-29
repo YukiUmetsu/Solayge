@@ -48,6 +48,8 @@ export const api = {
     invoke<Snapshot>("update_task", { taskId, patch }),
   deleteTask: (taskId: string) =>
     invoke<Snapshot>("delete_task", { taskId }),
+  restoreTask: (taskId: string) =>
+    invoke<Snapshot>("restore_task", { taskId }),
   startNow: (taskId: string) =>
     invoke<Snapshot>("start_task_now", { taskId }),
   cancel: (taskId: string) => invoke<Snapshot>("cancel_task", { taskId }),
@@ -88,6 +90,8 @@ export const api = {
   cacheStats: () => invoke<CacheStats>("get_cache_stats"),
   clearCache: (prompts: boolean, logs: boolean) =>
     invoke<CacheStats>("clear_cache", { prompts, logs }),
+  errorLog: () => invoke<string>("get_error_log"),
+  clearErrorLog: () => invoke<void>("clear_error_log"),
 
   // ---- projects ----
   reorderProjects: (paths: string[]) =>

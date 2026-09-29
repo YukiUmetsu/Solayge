@@ -22,6 +22,7 @@ export function DetailPanel({
   project,
   logs,
   width,
+  onEdit,
   onRemoveWorktree,
   onCollapse,
 }: {
@@ -29,6 +30,7 @@ export function DetailPanel({
   project: Project | null;
   logs: string[];
   width: number;
+  onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -223,6 +225,7 @@ export function DetailPanel({
             <DetailsView
               task={task}
               now={now}
+              onEdit={onEdit}
               onRemoveWorktree={onRemoveWorktree}
             />
           )}
@@ -582,10 +585,12 @@ function ReviewView({ task }: { task: Task }) {
 function DetailsView({
   task,
   now,
+  onEdit,
   onRemoveWorktree,
 }: {
   task: Task;
   now: number;
+  onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
 }) {
   const meta = STATUS_META[task.status];
@@ -661,6 +666,16 @@ function DetailsView({
       )}
 
       <Field label="Prompt">
+        {/* A draft has not run yet, so its prompt is still safe to change. */}
+        {task.status === "draft" && (
+          <button
+            className="btn btn-ghost mb-1.5 !px-2 !py-1"
+            onClick={() => onEdit(task.id)}
+          >
+            <Icon name="edit" className="h-3 w-3" />
+            Edit prompt
+          </button>
+        )}
         <pre className="mono whitespace-pre-wrap rounded-lg border border-line bg-well-strong p-2.5 text-[11.5px] leading-relaxed text-ink-muted">
           {task.prompt}
         </pre>

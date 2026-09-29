@@ -1,7 +1,6 @@
 import type {
   AgentConfig,
   BranchMode,
-  CommandTemplates,
   ConflictMode,
   GitOp,
   Isolation,
@@ -25,14 +24,6 @@ export const PROVIDERS: { id: Provider; label: string }[] = [
 export function providerLabel(id?: Provider | null): string {
   return PROVIDERS.find((p) => p.id === id)?.label ?? "—";
 }
-
-/** Built-in command templates; editable in Settings. */
-export const DEFAULT_COMMANDS: CommandTemplates = {
-  opencode: "opencode run --standalone {auto} [--model {model}] {prompt}",
-  codex: "codex exec [--model {model}] {prompt}",
-  claude: "claude -p {prompt} [--model {model}]",
-  cursor: "cursor-agent -p {prompt} [--model {model}]",
-};
 
 /**
  * Model suggestions per provider. The field is free text, so anything the

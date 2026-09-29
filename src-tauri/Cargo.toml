@@ -30,11 +30,13 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 
+# Release builds unwind on panic on purpose: the scheduler runs every tick in
+# its own task (`supervised_tick`) and turns a panic into a logged error so the
+# loop keeps running. `panic = "abort"` would take the whole app down instead.
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
 strip = true
 
 # A Tauri dependency tree is large, and `target/debug` is dominated by debug
