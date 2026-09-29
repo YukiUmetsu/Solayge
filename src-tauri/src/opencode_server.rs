@@ -375,20 +375,45 @@ pub fn part_lines(message: &Value) -> Vec<String> {
 
 /// The agent's final assistant message as markdown text, if any. Used as the
 /// task's "result" so it can be rendered and re-read later.
+///
+/// The server returns messages newest-first while exports are oldest-first, so
+/// pick the text with the latest completion time rather than trusting position.
 pub fn final_text(messages: &[Value]) -> Option<String> {
-    messages.iter().rev().find_map(|m| {
+    let mut best: Option<(i64, String)> = None;
+    for m in messages {
         if m.get("type").and_then(Value::as_str) != Some("assistant") {
-            return None;
+            continue;
         }
-        let content = m.get("content").and_then(Value::as_array)?;
-        let text = content
-            .iter()
-            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        (!text.trim().is_empty()).then_some(text)
-    })
+        let text = assistant_text(m);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let at = m
+            .get("time")
+            .and_then(|t| t.get("completed").or_else(|| t.get("created")))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if best.as_ref().is_none_or(|(previous, _)| at > *previous) {
+            best = Some((at, text));
+        }
+    }
+    best.map(|(_, text)| text)
+}
+
+/// The text parts of one message, joined.
+fn assistant_text(message: &Value) -> String {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
 }
 
 fn field_kind(s: &str) -> Option<AskFieldKind> {
@@ -606,22 +631,30 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_final_assistant_text_as_the_result() {
-        let msgs = vec![
-            json!({"type":"assistant","content":[{"type":"text","text":"Working on it"}]}),
-            json!({"type":"assistant","content":[
-                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"}}}
-            ]}),
-            json!({"type":"assistant","content":[{"type":"text","text":"# Done\n\nAll good."}]}),
-        ];
-        assert_eq!(final_text(&msgs).as_deref(), Some("# Done\n\nAll good."));
+    fn takes_the_most_recent_assistant_text_regardless_of_order() {
+        let older = json!({"type":"assistant","time":{"completed":100},
+            "content":[{"type":"text","text":"I'll start by exploring."}]});
+        let tool_only = json!({"type":"assistant","time":{"completed":150},
+            "content":[{"type":"tool","name":"shell",
+             "state":{"status":"completed","input":{"command":"ls"}}}]});
+        let newer = json!({"type":"assistant","time":{"completed":200},
+            "content":[{"type":"text","text":"# Done\n\nAll good."}]});
+
+        // The server returns newest-first; exports are oldest-first. Either way
+        // the latest text must win, not the first one encountered.
+        let newest_first = vec![newer.clone(), tool_only.clone(), older.clone()];
+        assert_eq!(final_text(&newest_first).as_deref(), Some("# Done\n\nAll good."));
+
+        let oldest_first = vec![older, tool_only, newer];
+        assert_eq!(final_text(&oldest_first).as_deref(), Some("# Done\n\nAll good."));
     }
 
     #[test]
     fn no_final_text_when_there_is_none() {
         assert_eq!(final_text(&[]), None);
+        assert_eq!(final_text(&[json!({"type":"assistant","content":[]})]), None);
         assert_eq!(
-            final_text(&[json!({"type":"assistant","content":[]})]),
+            final_text(&[json!({"type":"user","content":[{"type":"text","text":"hi"}]})]),
             None
         );
     }

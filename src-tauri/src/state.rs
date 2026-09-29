@@ -94,23 +94,26 @@ impl AppState {
     }
 
     /// Derive and store a task's result from its log when it does not have one
-    /// yet (a task that finished before results were captured, or a CLI run).
-    /// Returns whether the task's result changed.
+    /// yet (a task that finished before results were captured, or a CLI run),
+    /// or when the stored result is wrong. Returns whether the result changed.
     pub fn backfill_result(&self, id: &str) -> bool {
-        let derived = {
+        let resolved = {
             let inner = lock(&self.inner);
-            match inner.tasks.iter().find(|t| t.id == id) {
-                Some(t) => derive_result(&self.data_dir, t),
-                None => None,
-            }
+            inner
+                .tasks
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| resolve_result(&self.data_dir, t))
         };
-        let Some(result) = derived else {
+        let Some(result) = resolved else {
             return false;
         };
         {
             let mut inner = lock(&self.inner);
             match inner.tasks.iter_mut().find(|t| t.id == id) {
-                Some(t) if t.result.is_none() => t.result = Some(result),
+                Some(t) if t.result.as_deref() != Some(result.as_str()) => {
+                    t.result = Some(result)
+                }
                 _ => return false,
             }
         }
@@ -324,22 +327,46 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
     changed
 }
 
-/// Derive a task's result from its log, if it is a finished task without one.
-fn derive_result(data_dir: &Path, task: &crate::models::Task) -> Option<String> {
-    if task.result.is_some() || !matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed) {
+/// The result a finished task should show: any captured result merged with one
+/// recovered from its log. `None` means "leave the task alone".
+fn resolve_result(data_dir: &Path, task: &crate::models::Task) -> Option<String> {
+    if !matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed) {
         return None;
     }
     let path = data_dir.join("logs").join(format!("{}.log", task.id));
-    crate::summary::from_log_file(&path)
+    merge_result(task.result.as_deref(), crate::summary::from_log_file(&path))
+}
+
+/// Choose between a captured result and one recovered from the log.
+///
+/// The log is the raw record, so a recovered result wins — unless it is only
+/// part of what was captured (a native capture can include text the log parser
+/// splits off around tool calls). This also repairs results captured by an older
+/// build that picked the wrong message.
+fn merge_result(stored: Option<&str>, derived: Option<String>) -> Option<String> {
+    match (stored, derived) {
+        (_, None) => stored.map(str::to_string),
+        (None, Some(derived)) => Some(derived),
+        (Some(stored), Some(derived)) => {
+            let stored = stored.trim();
+            if !stored.is_empty() && stored.contains(&derived) {
+                Some(stored.to_string())
+            } else {
+                Some(derived)
+            }
+        }
+    }
 }
 
 /// Recover results for every finished task that does not have one yet.
 fn backfill_results(data_dir: &Path, state: &mut PersistedState) -> bool {
     let mut changed = false;
     for task in state.tasks.iter_mut() {
-        if let Some(result) = derive_result(data_dir, task) {
-            task.result = Some(result);
-            changed = true;
+        if let Some(result) = resolve_result(data_dir, task) {
+            if task.result.as_deref() != Some(result.as_str()) {
+                task.result = Some(result);
+                changed = true;
+            }
         }
     }
     changed
@@ -552,33 +579,49 @@ mod tests {
     }
 
     #[test]
-    fn backfills_results_for_tasks_that_predate_capture() {
+    fn backfills_results_and_repairs_wrong_ones() {
         let root = std::env::temp_dir().join(format!("solayge-backfill-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("logs")).unwrap();
         let mut state = PersistedState {
             tasks: serde_json::from_value(serde_json::json!([
                 {"id":"done","project_path":"/p","title":"t","prompt":"p","status":"succeeded","created_at":1},
-                {"id":"running","project_path":"/p","title":"t","prompt":"p","status":"running","created_at":2}
+                {"id":"stale","project_path":"/p","title":"t","prompt":"p","status":"succeeded","created_at":2,
+                 "result":"I'll start by exploring."},
+                {"id":"running","project_path":"/p","title":"t","prompt":"p","status":"running","created_at":3}
             ]))
             .unwrap(),
             ..Default::default()
         };
-        std::fs::write(
-            root.join("logs").join("done.log"),
+        let log = |name: &str, body: &str| {
+            std::fs::write(root.join("logs").join(format!("{name}.log")), body).unwrap()
+        };
+        log(
+            "done",
             "[Solayge] opencode session ses_1\n[tool] read: src/main.rs\n\
              [Solayge] All done.\n## Summary\nit works\n",
-        )
-        .unwrap();
-        std::fs::write(root.join("logs").join("running.log"), "[Solayge] mid work\n").unwrap();
+        );
+        // A result captured by an older build picked the wrong (oldest) message.
+        log(
+            "stale",
+            "[Solayge] opencode session ses_1\n\
+             [Solayge] I'll start by exploring.\n[tool] read: x\n\
+             [Solayge] Done. Here's the completion report.\n## Detail\nok\n",
+        );
+        log("running", "[Solayge] mid work\n");
 
         assert!(backfill_results(&root, &mut state));
         assert_eq!(
             state.tasks[0].result.as_deref(),
             Some("All done.\n## Summary\nit works")
         );
+        assert_eq!(
+            state.tasks[1].result.as_deref(),
+            Some("Done. Here's the completion report.\n## Detail\nok"),
+            "a wrong stored result is repaired from the log"
+        );
         // A task still running is left alone.
-        assert!(state.tasks[1].result.is_none());
-        // Idempotent once a result exists.
+        assert!(state.tasks[2].result.is_none());
+        // Idempotent once results are correct.
         assert!(!backfill_results(&root, &mut state));
 
         let _ = std::fs::remove_dir_all(&root);
