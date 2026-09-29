@@ -248,6 +248,9 @@ async fn step(app: &AppHandle) {
     if mutated {
         emit_state(app);
     }
+    // Keep the heartbeat map bounded: finished and deleted tasks must not leave
+    // entries behind forever.
+    prune_heartbeat(app);
     for id in started {
         let a = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -367,6 +370,7 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
             }
         }
     }
+    crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
 
@@ -702,6 +706,33 @@ fn touch(app: &AppHandle, id: &str) {
     crate::state::lock(&st.heartbeat).insert(id.to_string(), now());
 }
 
+/// Ids that still need a heartbeat entry: a running task, or a task whose review
+/// is running. Everything else (finished, blocked, deleted) can be dropped.
+fn active_heartbeat_ids(tasks: &[Task]) -> HashSet<String> {
+    tasks
+        .iter()
+        .filter(|t| {
+            t.status == TaskStatus::Running
+                || t.review
+                    .as_ref()
+                    .is_some_and(|r| r.status == ReviewStatus::Running)
+        })
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// Drop heartbeat entries for tasks that are no longer running, so the map does
+/// not grow with every task ever run (and survives task deletion).
+fn prune_heartbeat(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let active = {
+        let inner = crate::state::lock(&st.inner);
+        active_heartbeat_ids(&inner.tasks)
+    };
+    let mut beat = crate::state::lock(&st.heartbeat);
+    beat.retain(|id, _| active.contains(id));
+}
+
 /// Spawn a child, stream its output to the task log, and register it so it can
 /// be cancelled. Finalization is left to `reap`.
 fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
@@ -767,9 +798,53 @@ async fn prepare_or_reuse(
     }
 }
 
+/// Which branch to use for a task that creates one.
+enum BranchChoice {
+    /// Use this exact name. `reused` marks a name recorded on a previous
+    /// attempt, which is allowed to already exist.
+    Named { name: String, reused: bool },
+    /// No name was known; ask the agent for one.
+    AskAgent,
+}
+
+/// Decide the branch name source: an explicit request, a name recorded on a
+/// previous attempt, or the agent. Pure, so it can be unit-tested.
+fn choose_branch(requested: &str, reuse: Option<&str>) -> BranchChoice {
+    if !requested.is_empty() {
+        let name = agent::sanitize_branch_name(requested);
+        let reused = reuse == Some(name.as_str());
+        return BranchChoice::Named { name, reused };
+    }
+    if let Some(branch) = reuse.filter(|b| !b.trim().is_empty()) {
+        return BranchChoice::Named {
+            name: branch.to_string(),
+            reused: true,
+        };
+    }
+    BranchChoice::AskAgent
+}
+
+/// Whether the chosen branch exists right now, and whether that is an error.
+///
+/// A name recorded on a previous attempt is allowed to *not* exist anymore (for
+/// example the branch was deleted by "remove worktree"): it is reported as
+/// missing so the caller recreates it instead of failing the retry.
+async fn resolve_named_branch(
+    project_path: &Path,
+    name: &str,
+    reused: bool,
+) -> Result<(String, bool), String> {
+    let exists = git::branch_exists(project_path, name).await;
+    if exists && !reused {
+        return Err(format!("branch \"{name}\" already exists"));
+    }
+    Ok((name.to_string(), exists))
+}
+
 /// Create (or reuse) the task's new branch, returning its name. A blank
 /// requested name is chosen by the agent and de-duplicated; a branch recorded on
-/// a previous attempt is reused so retries don't pile up new branches.
+/// a previous attempt is reused if it still exists, and otherwise recreated, so
+/// retries don't pile up new branches or fail on a deleted one.
 async fn ensure_new_branch(
     app: &AppHandle,
     run: &TaskRun,
@@ -779,41 +854,37 @@ async fn ensure_new_branch(
     let requested = run.new_branch.as_deref().map(str::trim).unwrap_or("");
     let reuse = run.branch.clone().filter(|b| !b.trim().is_empty());
 
-    // Resolve the branch name and whether it already exists.
-    let (name, exists) = if !requested.is_empty() {
-        let name = agent::sanitize_branch_name(requested);
-        let exists = git::branch_exists(project_path, &name).await;
-        if exists && reuse.as_deref() != Some(name.as_str()) {
-            return Err(format!("branch \"{name}\" already exists"));
+    let (name, exists) = match choose_branch(requested, reuse.as_deref()) {
+        BranchChoice::Named { name, reused } => {
+            resolve_named_branch(project_path, &name, reused).await?
         }
-        (name, exists)
-    } else if let Some(branch) = reuse {
-        // Agent-named branch from a previous attempt: reuse it.
-        (branch, true)
-    } else {
-        let suggested = {
-            let mut cmd = agent::build_command(
-                run.provider,
-                run.model.as_deref(),
-                &command_templates(app),
-                &agent::branch_name_prompt(&run.title),
-                PermissionProfile::Readonly,
-                project_path,
-            )?;
-            agent::apply_env(&mut cmd, &project_context(app, &run.project).env);
-            match tokio::time::timeout(Duration::from_secs(45), cmd.output()).await {
-                Ok(Ok(out)) => agent::sanitize_branch_name(&String::from_utf8_lossy(&out.stdout)),
-                // Fall back to a slug of the title if the agent is unavailable.
-                _ => agent::sanitize_branch_name(&run.title),
+        BranchChoice::AskAgent => {
+            let suggested = {
+                let mut cmd = agent::build_command(
+                    run.provider,
+                    run.model.as_deref(),
+                    &command_templates(app),
+                    &agent::branch_name_prompt(&run.title),
+                    PermissionProfile::Readonly,
+                    project_path,
+                )?;
+                agent::apply_env(&mut cmd, &project_context(app, &run.project).env);
+                match tokio::time::timeout(Duration::from_secs(45), cmd.output()).await {
+                    Ok(Ok(out)) => {
+                        agent::sanitize_branch_name(&String::from_utf8_lossy(&out.stdout))
+                    }
+                    // Fall back to a slug of the title if the agent is unavailable.
+                    _ => agent::sanitize_branch_name(&run.title),
+                }
+            };
+            let mut name = suggested.clone();
+            let mut n = 1;
+            while git::branch_exists(project_path, &name).await {
+                n += 1;
+                name = format!("{suggested}-{n}");
             }
-        };
-        let mut name = suggested.clone();
-        let mut n = 1;
-        while git::branch_exists(project_path, &name).await {
-            n += 1;
-            name = format!("{suggested}-{n}");
+            (name, false)
         }
-        (name, false)
     };
 
     // Check out the branch, creating it if it doesn't exist yet.
@@ -1694,6 +1765,7 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
             title = Some(t.title.clone());
         }
     }
+    crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
     if let Some(title) = title {
@@ -1718,6 +1790,7 @@ fn finish_blocked(app: &AppHandle, id: &str, reason: String) {
             title = Some(t.title.clone());
         }
     }
+    crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
     if let Some(title) = title {
@@ -2077,8 +2150,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch, now, review_clear, reviews_to_start, stall_sweep, supervised_tick,
+        active_heartbeat_ids, choose_branch, dispatch, now, resolve_named_branch, review_clear,
+        reviews_to_start, stall_sweep, supervised_tick, BranchChoice,
     };
+    use std::path::Path;
     use crate::models::{
         BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskKind,
         TaskReview, TaskStatus,
@@ -2509,5 +2584,147 @@ mod tests {
         );
         // And the supervisor can run another tick afterwards.
         assert!(supervised_tick(|| async {}).await.is_ok());
+    }
+
+    // ---- heartbeat growth ----
+
+    #[test]
+    fn heartbeat_keeps_only_running_tasks_and_running_reviews() {
+        let mut succeeded = task("done", "/p", &[], Isolation::Worktree, None);
+        succeeded.status = TaskStatus::Succeeded;
+        let mut failed = task("bad", "/p", &[], Isolation::Worktree, None);
+        failed.status = TaskStatus::Failed;
+        let mut blocked = task("blocked", "/p", &[], Isolation::Worktree, None);
+        blocked.status = TaskStatus::Blocked;
+        let mut interrupted = task("int", "/p", &[], Isolation::Worktree, None);
+        interrupted.status = TaskStatus::Interrupted;
+
+        let mut reviewing = task("rev", "/p", &[], Isolation::Worktree, None);
+        reviewing.status = TaskStatus::Succeeded;
+        let reviewing = reviewed(reviewing, ReviewMode::Autofix, ReviewStatus::Running);
+
+        let mut review_done = task("revdone", "/p", &[], Isolation::Worktree, None);
+        review_done.status = TaskStatus::Succeeded;
+        let review_done = reviewed(review_done, ReviewMode::Autofix, ReviewStatus::Passed);
+
+        let tasks = vec![
+            running("live", Some(1)),
+            succeeded,
+            failed,
+            blocked,
+            interrupted,
+            reviewing,
+            review_done,
+        ];
+        let active = active_heartbeat_ids(&tasks);
+        assert!(active.contains("live"), "a running task keeps its heartbeat");
+        assert!(active.contains("rev"), "a running review keeps its heartbeat");
+        assert_eq!(active.len(), 2, "finished/blocked tasks are dropped: {active:?}");
+    }
+
+    // ---- new-branch reuse on retry ----
+
+    #[test]
+    fn choose_branch_prefers_request_then_reuse_then_agent() {
+        // An explicit request wins, and is not treated as "reused" unless it is
+        // the same name recorded previously.
+        assert!(matches!(
+            choose_branch("feat", None),
+            BranchChoice::Named { name, reused: false } if name == "feat"
+        ));
+        assert!(matches!(
+            choose_branch("feat", Some("feat")),
+            BranchChoice::Named { name, reused: true } if name == "feat"
+        ));
+        // A blank request falls back to the recorded name.
+        assert!(matches!(
+            choose_branch("", Some("devtools/abc")),
+            BranchChoice::Named { name, reused: true } if name == "devtools/abc"
+        ));
+        // Neither: ask the agent.
+        assert!(matches!(choose_branch("", None), BranchChoice::AskAgent));
+        // A recorded-but-blank name is ignored (the caller trims first).
+        assert!(matches!(
+            choose_branch("", Some("  ")),
+            BranchChoice::AskAgent
+        ));
+    }
+
+    async fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "test"],
+            // Don't inherit a global commit-signing config from this machine.
+            vec!["config", "commit.gpgsign", "false"],
+            vec!["commit", "--allow-empty", "-qm", "init"],
+        ] {
+            let out = crate::git::git_cmd(dir, &args).output().await.unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recreates_a_reused_branch_that_was_deleted_between_attempts() {
+        let dir = std::env::temp_dir().join(format!("solayge-branch-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        let run = |args: Vec<&'static str>| {
+            let d = dir.clone();
+            async move { crate::git::git_cmd(&d, &args).output().await.unwrap() }
+        };
+        assert!(run(vec!["branch", "feat"]).await.status.success());
+
+        // While the branch exists, a recorded name is reused as-is.
+        let (name, exists) = resolve_named_branch(&dir, "feat", true).await.unwrap();
+        assert_eq!(name, "feat");
+        assert!(exists, "an existing reused branch should be reported as existing");
+
+        // Simulate the branch being deleted between attempts (e.g. "remove
+        // worktree").
+        assert!(run(vec!["branch", "-D", "feat"]).await.status.success());
+        assert!(!crate::git::branch_exists(&dir, "feat").await);
+
+        // The bug: this used to be assumed to exist, so `git checkout feat`
+        // failed and the retry errored out. It must now be reported as missing.
+        let (name, exists) = resolve_named_branch(&dir, "feat", true).await.unwrap();
+        assert_eq!(name, "feat");
+        assert!(
+            !exists,
+            "a deleted reused branch must be reported as missing so it is recreated"
+        );
+
+        // And the caller's recreation path must then succeed.
+        let out = run(vec!["checkout", "-b", "feat"]).await;
+        assert!(
+            out.status.success(),
+            "recreating the branch should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(crate::git::current_branch(&dir).await.as_deref(), Some("feat"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_request_for_an_existing_branch_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("solayge-branch2-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        let out = crate::git::git_cmd(&dir, &["branch", "feat"])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+
+        // A fresh explicit request for a name that already exists is rejected...
+        assert!(resolve_named_branch(&dir, "feat", false).await.is_err());
+        // ...but the same name recorded from a previous attempt is allowed.
+        assert!(resolve_named_branch(&dir, "feat", true).await.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
