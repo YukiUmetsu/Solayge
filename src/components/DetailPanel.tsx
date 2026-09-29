@@ -41,6 +41,7 @@ export function DetailPanel({
   const now = useNow();
 
   const diffTarget = task?.worktree_path ?? project?.path ?? null;
+  const projectPath = project?.path ?? null;
 
   const loadDiff = useMemo(
     () => async () => {
@@ -60,16 +61,19 @@ export function DetailPanel({
 
   const loadWorktrees = useMemo(
     () => async () => {
-      if (!project) return;
+      if (!projectPath) return;
       try {
-        setWorktrees(await api.projectWorktrees(project.path));
+        setWorktrees(await api.projectWorktrees(projectPath));
       } catch {
         setWorktrees([]);
       }
     },
-    [project],
+    [projectPath],
   );
 
+  // Depend only on stable values: the snapshot object is replaced on every poll,
+  // so depending on `project`/`task` objects re-ran these loaders each poll and
+  // made the diff flash "Loading…" once a second.
   useEffect(() => {
     if (tab === "diff") void loadDiff();
     if (tab === "worktrees") void loadWorktrees();
@@ -133,15 +137,26 @@ export function DetailPanel({
 
           {tab === "diff" && (
             <div className="scroll min-h-0 flex-1 p-3">
-              <div className="mb-2 flex items-center justify-between">
+              <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="mono truncate text-[11px] text-ink-subtle">
                   {diffTarget}
                 </span>
-                <button className="btn btn-ghost !px-2 !py-1" onClick={() => void loadDiff()}>
-                  <Icon name="refresh" className="h-3 w-3" />
-                </button>
+                <div className="flex shrink-0 items-center gap-1">
+                  {/* Inline in the fixed-height header so it never reflows the
+                      diff below while loading. */}
+                  <span
+                    className={`text-[10.5px] text-ink-subtle transition-opacity ${
+                      diffLoading ? "opacity-100" : "opacity-0"
+                    }`}
+                    aria-hidden={!diffLoading}
+                  >
+                    Loading…
+                  </span>
+                  <button className="btn btn-ghost !px-2 !py-1" onClick={() => void loadDiff()}>
+                    <Icon name="refresh" className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
-              {diffLoading && <p className="text-xs text-ink-subtle">Loading…</p>}
               {diffErr && <p className="text-xs text-danger">{diffErr}</p>}
               {diff && <DiffBody result={diff} />}
             </div>
@@ -275,6 +290,9 @@ function ReviewView({ task }: { task: Task }) {
   const now = useNow();
 
   const status = review?.status ?? "none";
+  // Reload on task/verdict changes only. Depending on the `review` object made
+  // this refetch on every snapshot poll; the rendered body keys off `log`, so
+  // this alone avoids the "Loading…" flash.
   useEffect(() => {
     if (!review) return;
     let alive = true;
@@ -287,7 +305,8 @@ function ReviewView({ task }: { task: Task }) {
     return () => {
       alive = false;
     };
-  }, [task.id, status, review]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id, status]);
 
   if (!review) return <EmptyDetail />;
   const meta = reviewStatusMeta(review.status);

@@ -29,7 +29,9 @@ export function TaskTree({
   const rows = buildTree(tasks);
   const now = useNow();
   const finished = tasks.filter((t) =>
-    ["succeeded", "failed", "canceled", "blocked"].includes(t.status),
+    ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
+      t.status,
+    ),
   ).length;
 
   if (tasks.length === 0) {

@@ -12,13 +12,21 @@ pub enum TaskStatus {
     Failed,
     Canceled,
     Blocked,
+    /// The task was mid-run when the app stopped (crash, forced quit, out of
+    /// disk, or the scheduler stalled). Not a real failure of the work, but it
+    /// did not finish; retrying re-queues it.
+    Interrupted,
 }
 
 impl TaskStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Canceled | TaskStatus::Blocked
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Canceled
+                | TaskStatus::Blocked
+                | TaskStatus::Interrupted
         )
     }
 }
@@ -528,6 +536,36 @@ pub struct ResolvedConfig {
     pub editor: Option<String>,
 }
 
+// ---- preflight environment check ----
+
+/// Whether a tool is available on `PATH`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolStatus {
+    pub name: String,
+    pub found: bool,
+    pub path: Option<String>,
+    /// Extra warning, e.g. a Windows `.cmd`/`.bat` shim needing `cmd /C`.
+    pub note: Option<String>,
+}
+
+/// A provider and whether its configured CLI is available.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderTool {
+    pub provider: Provider,
+    /// The binary named first in the provider's command template.
+    pub command: String,
+    pub found: bool,
+    pub path: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnvironmentStatus {
+    pub git: ToolStatus,
+    pub gh: ToolStatus,
+    pub providers: Vec<ProviderTool>,
+}
+
 /// A previously used prompt (task prompt or planner goal), kept as cache so it
 /// can be re-used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,4 +759,30 @@ pub struct LogEvent {
     pub task_id: String,
     pub stream: String,
     pub line: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskStatus;
+
+    #[test]
+    fn terminal_statuses_are_the_six_finished_ones() {
+        for s in [
+            TaskStatus::Succeeded,
+            TaskStatus::Failed,
+            TaskStatus::Canceled,
+            TaskStatus::Blocked,
+            TaskStatus::Interrupted,
+        ] {
+            assert!(s.is_terminal(), "{s:?} should be terminal");
+        }
+        for s in [
+            TaskStatus::Draft,
+            TaskStatus::Waiting,
+            TaskStatus::Ready,
+            TaskStatus::Running,
+        ] {
+            assert!(!s.is_terminal(), "{s:?} should not be terminal");
+        }
+    }
 }

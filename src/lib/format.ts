@@ -56,6 +56,12 @@ export const STATUS_META: Record<TaskStatus, StatusMeta> = {
     chip: "bg-violet-soft border-violet-line",
     text: "text-violet",
   },
+  interrupted: {
+    label: "Interrupted",
+    dot: "bg-warning",
+    chip: "bg-warning-soft border-warning-line",
+    text: "text-warning",
+  },
 };
 
 export const PROFILE_META: Record<

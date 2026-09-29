@@ -11,7 +11,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
-import type { GitStatus, LogEvent, Snapshot } from "./types";
+import type { EnvironmentStatus, GitStatus, LogEvent, Snapshot } from "./types";
 import { effectiveConfig } from "./lib/providers";
 import { Icon } from "./components/Icons";
 import { Sidebar } from "./components/Sidebar";
@@ -151,6 +151,17 @@ export default function App() {
   const [leftWidth, setLeftWidth] = useStoredState("solayge.layout.leftWidth", 264);
   const [rightWidth, setRightWidth] = useStoredState("solayge.layout.rightWidth", 460);
 
+  const [tools, setTools] = useState<EnvironmentStatus | null>(null);
+  const refreshTools = useCallback(() => {
+    api
+      .environmentCheck()
+      .then(setTools)
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    refreshTools();
+  }, [refreshTools]);
+
   const notify = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -226,6 +237,8 @@ export default function App() {
   }, [selectedProject]);
 
   useEffect(() => {
+    // Don't show the previous project's branch until the new status arrives.
+    setStatus(null);
     refreshStatus();
     const t = window.setInterval(refreshStatus, 5000);
     return () => window.clearInterval(t);
@@ -249,6 +262,7 @@ export default function App() {
       setRemote(null);
       return;
     }
+    setRemote(null);
     let alive = true;
     api
       .projectRemote(selectedProject)
@@ -259,12 +273,20 @@ export default function App() {
     };
   }, [selectedProject]);
 
+  // The detail panel is per-task and per-project; drop the selection when the
+  // project changes so it never shows the previous project's task.
+  useEffect(() => {
+    setSelectedTaskId(null);
+  }, [selectedProject]);
+
   const project = snapshot?.projects.find((p) => p.path === selectedProject) ?? null;
   const projectTasks = snapshot
     ? snapshot.tasks.filter((t) => t.project_path === selectedProject)
     : [];
+  // A task belongs to exactly one project: only resolve the selected id within
+  // the current project so switching projects never shows another project's task.
   const selectedTask =
-    snapshot?.tasks.find((t) => t.id === selectedTaskId) ?? null;
+    projectTasks.find((t) => t.id === selectedTaskId) ?? null;
   const running = projectTasks.filter((t) => t.status === "running").length;
   const resolved = useMemo(
     () => effectiveConfig(project ?? {}, snapshot?.settings ?? {}),
@@ -369,6 +391,8 @@ export default function App() {
               running={running}
               resolved={resolved}
               remote={remote}
+              tools={tools}
+              onCheckTools={refreshTools}
               onNewTask={() => setShowNewTask(true)}
               onPlan={() => setShowPlanner(true)}
               onRefresh={() => {
@@ -457,14 +481,19 @@ export default function App() {
       {showSettings && snapshot && (
         <SettingsModal
           snapshot={snapshot}
+          tools={tools}
           onClose={() => setShowSettings(false)}
-          onSaved={apply}
+          onSaved={(s) => {
+            apply(s);
+            refreshTools();
+          }}
         />
       )}
       {showProjectSettings && project && snapshot && (
         <ProjectSettingsModal
           project={project}
           settings={snapshot.settings}
+          tools={tools}
           onClose={() => setShowProjectSettings(false)}
           onSaved={apply}
         />

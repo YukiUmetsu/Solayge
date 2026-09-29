@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import type { AgentConfig, Provider, ReviewMode } from "../types";
+import type { AgentConfig, EnvironmentStatus, Provider, ReviewMode } from "../types";
 import {
   EDITORS,
   MODEL_SUGGESTIONS,
@@ -170,15 +170,26 @@ export function AgentConfigForm({
   onChange,
   disabled,
   inherit,
+  tools,
+  effectiveProvider,
 }: {
   value: AgentConfig;
   onChange: (patch: Partial<AgentConfig>) => void;
   disabled?: boolean;
   /** Show "Use account default" options (for per-project config). */
   inherit?: boolean;
+  /** Preflight results, to warn when the selected CLI is missing. */
+  tools?: EnvironmentStatus | null;
+  /** The provider actually used (value may be null = inherit). */
+  effectiveProvider?: Provider | null;
 }) {
   const inheritLabel = inherit ? "Use account default" : undefined;
   const modeValue = value.review_mode ?? "";
+  const providerTool = tools
+    ? tools.providers.find(
+        (p) => p.provider === (effectiveProvider ?? value.provider ?? "opencode"),
+      )
+    : undefined;
   return (
     <div className="space-y-5">
       <section className="space-y-2">
@@ -201,6 +212,17 @@ export function AgentConfigForm({
             />
           </Field>
         </div>
+        {providerTool && (!providerTool.found || providerTool.note) && (
+          <p
+            className={`text-[11px] leading-relaxed ${
+              providerTool.found ? "text-warning" : "text-danger"
+            }`}
+          >
+            {providerTool.found
+              ? providerTool.note
+              : `"${providerTool.command}" was not found on PATH — tasks will fail to launch. Install it, or pick another provider.`}
+          </p>
+        )}
       </section>
 
       <section className="space-y-2">

@@ -24,6 +24,34 @@ fn valid_env_key(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Clear a finished task's run state so it can run again. Worktrees are
+/// recreated (their path is deterministic); a chosen branch is kept so retries
+/// reuse the same name instead of piling up new branches.
+fn reset_for_rerun(t: &mut Task) {
+    t.not_before = None;
+    t.exit_code = None;
+    t.error = None;
+    t.started_at = None;
+    t.finished_at = None;
+    t.last_permission = None;
+    t.used_fallback = false;
+    if t.isolation == Isolation::Worktree {
+        t.worktree_path = None;
+        t.branch = None;
+    }
+    if let Some(r) = t.review.as_mut() {
+        r.status = ReviewStatus::None;
+        r.summary = None;
+        r.started_at = None;
+        r.finished_at = None;
+    }
+    t.status = if t.depends_on.is_empty() {
+        TaskStatus::Ready
+    } else {
+        TaskStatus::Waiting
+    };
+}
+
 #[tauri::command]
 pub async fn add_project(app: AppHandle, path: String) -> Result<Snapshot, String> {
     let p = PathBuf::from(&path);
@@ -37,7 +65,7 @@ pub async fn add_project(app: AppHandle, path: String) -> Result<Snapshot, Strin
         .to_string();
     {
         let st = app.state::<AppState>();
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !inner.projects.iter().any(|x| x.path == path) {
             inner.projects.push(Project {
                 path: path.clone(),
@@ -70,7 +98,7 @@ pub async fn add_project(app: AppHandle, path: String) -> Result<Snapshot, Strin
 pub async fn remove_project(app: AppHandle, path: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let ids: Vec<(String, Option<String>, Option<String>)> = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .tasks
             .iter()
@@ -88,7 +116,7 @@ pub async fn remove_project(app: AppHandle, path: String) -> Result<Snapshot, St
         let _ = std::fs::remove_file(st.log_path(id));
     }
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.projects.retain(|p| p.path != path);
         inner.tasks.retain(|t| t.project_path != path);
     }
@@ -134,24 +162,34 @@ pub async fn project_branch_diff(path: String) -> Result<DiffResult, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Release every draft task in a project so the scheduler can run them.
+/// Release every draft task in a project, and re-queue failed / canceled /
+/// blocked ones, so the scheduler runs them again.
 #[tauri::command]
 pub fn execute_project(app: AppHandle, project_path: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = now();
         for t in inner.tasks.iter_mut() {
-            if t.project_path != project_path || t.status != TaskStatus::Draft {
+            if t.project_path != project_path {
                 continue;
             }
-            let time_ok = t.not_before.is_none_or(|nb| now >= nb);
-            t.status = if t.depends_on.is_empty() && time_ok {
-                TaskStatus::Ready
-            } else {
-                TaskStatus::Waiting
-            };
-            t.error = None;
+            match t.status {
+                TaskStatus::Draft => {
+                    let time_ok = t.not_before.is_none_or(|nb| now >= nb);
+                    t.status = if t.depends_on.is_empty() && time_ok {
+                        TaskStatus::Ready
+                    } else {
+                        TaskStatus::Waiting
+                    };
+                    t.error = None;
+                }
+                TaskStatus::Failed | TaskStatus::Canceled | TaskStatus::Blocked
+                | TaskStatus::Interrupted => {
+                    reset_for_rerun(t);
+                }
+                _ => {}
+            }
         }
     }
     st.save();
@@ -167,7 +205,7 @@ pub fn create_tasks(
     default_isolation: Option<Isolation>,
 ) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
-    let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+    let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
     let existing: HashSet<String> = inner.tasks.iter().map(|t| t.id.clone()).collect();
     let project_default = inner
         .projects
@@ -284,7 +322,7 @@ pub fn create_tasks(
 pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
             if let Some(v) = patch.title {
                 t.title = v;
@@ -328,7 +366,7 @@ pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<
 pub async fn delete_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let info = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.iter().find(|t| t.id == task_id).map(|t| {
             (
                 t.project_path.clone(),
@@ -347,7 +385,7 @@ pub async fn delete_task(app: AppHandle, task_id: String) -> Result<Snapshot, St
         let _ = std::fs::remove_file(st.log_path(&task_id));
     }
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.retain(|t| t.id != task_id);
         for t in inner.tasks.iter_mut() {
             t.depends_on.retain(|d| d != &task_id);
@@ -362,7 +400,7 @@ pub async fn delete_task(app: AppHandle, task_id: String) -> Result<Snapshot, St
 pub fn start_task_now(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
             if !t.status.is_terminal() && t.status != TaskStatus::Running {
                 t.not_before = None;
@@ -380,7 +418,7 @@ pub fn start_task_now(app: AppHandle, task_id: String) -> Result<Snapshot, Strin
 pub fn cancel_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
             if !t.status.is_terminal() {
                 t.status = TaskStatus::Canceled;
@@ -389,19 +427,19 @@ pub fn cancel_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> 
         }
     }
     {
-        let mut running = st.running.lock().map_err(|e| e.to_string())?;
+        let mut running = st.running.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = running.get_mut(&task_id) {
             let _ = child.start_kill();
         }
     }
     {
-        let mut reviewing = st.reviewing.lock().map_err(|e| e.to_string())?;
+        let mut reviewing = st.reviewing.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = reviewing.get_mut(&task_id) {
             let _ = child.start_kill();
         }
     }
     {
-        let mut merging = st.merging.lock().map_err(|e| e.to_string())?;
+        let mut merging = st.merging.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = merging.get_mut(&task_id) {
             let _ = child.start_kill();
         }
@@ -415,31 +453,12 @@ pub fn cancel_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> 
 pub fn retry_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
             if !t.status.is_terminal() {
                 return Err("task is already active".into());
             }
-            t.status = if t.depends_on.is_empty() {
-                TaskStatus::Ready
-            } else {
-                TaskStatus::Waiting
-            };
-            t.not_before = None;
-            t.exit_code = None;
-            t.error = None;
-            t.started_at = None;
-            t.finished_at = None;
-            t.worktree_path = None;
-            t.branch = None;
-            t.last_permission = None;
-            t.used_fallback = false;
-            if let Some(r) = t.review.as_mut() {
-                r.status = ReviewStatus::None;
-                r.summary = None;
-                r.started_at = None;
-                r.finished_at = None;
-            }
+            reset_for_rerun(t);
         }
     }
     st.save();
@@ -451,7 +470,7 @@ pub fn retry_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
 pub async fn remove_task_worktree(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let info = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.iter().find(|t| t.id == task_id).map(|t| {
             (
                 t.project_path.clone(),
@@ -469,7 +488,7 @@ pub async fn remove_task_worktree(app: AppHandle, task_id: String) -> Result<Sna
         }
     }
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
             t.worktree_path = None;
             t.branch = None;
@@ -484,7 +503,7 @@ pub async fn remove_task_worktree(app: AppHandle, task_id: String) -> Result<Sna
 pub async fn clear_finished(app: AppHandle, project_path: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let ids: Vec<(String, Option<String>, Option<String>)> = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .tasks
             .iter()
@@ -503,7 +522,7 @@ pub async fn clear_finished(app: AppHandle, project_path: String) -> Result<Snap
     }
     let removed: HashSet<String> = ids.into_iter().map(|(id, _, _)| id).collect();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.retain(|t| !removed.contains(&t.id));
     }
     st.save();
@@ -521,7 +540,7 @@ pub fn get_task_log(app: AppHandle, task_id: String) -> Result<String, String> {
 pub fn set_concurrency(app: AppHandle, value: usize) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.concurrency = value.clamp(1, 16);
     }
     st.save();
@@ -537,7 +556,7 @@ pub fn set_project_default_profile(
 ) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = inner.projects.iter_mut().find(|p| p.path == path) {
             p.default_profile = profile;
         }
@@ -558,7 +577,7 @@ pub async fn plan_with_opencode(
     let mt = max_tasks.unwrap_or(8).clamp(1, 30);
     let st = app.state::<AppState>();
     let (provider, model, templates, skills, keys, kind) = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let proj = inner.projects.iter().find(|p| p.path == project_path);
         let r = agent::resolve(proj, &inner.settings);
         let skills = proj.map(|p| p.skills.clone()).unwrap_or_default();
@@ -612,7 +631,7 @@ pub async fn plan_with_opencode(
 pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let (from, to, entries) = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let from = secrets::StoreKind::parse(inner.settings.secret_store.as_deref());
         let to = secrets::StoreKind::parse(settings.secret_store.as_deref());
         let entries: Vec<(String, String)> = inner
@@ -632,7 +651,7 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, S
         secrets::Secrets::migrate(&st.data_dir, from, to, &entries).map_err(|e| e.to_string())?;
     }
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = settings;
         next.cache_retention_days = next.cache_retention_days.clamp(0, 3650);
         inner.settings = next;
@@ -673,7 +692,7 @@ pub fn clear_cache(app: AppHandle, prompts: bool, logs: bool) -> CacheStats {
 pub fn reorder_projects(app: AppHandle, paths: Vec<String>) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut ordered: Vec<Project> = Vec::with_capacity(inner.projects.len());
         for p in &paths {
             if let Some(found) = inner.projects.iter().find(|x| &x.path == p) {
@@ -714,7 +733,7 @@ pub fn open_in_editor(
         Some(e) => Some(e),
         None => {
             let st = app.state::<AppState>();
-            let inner = st.inner.lock().map_err(|e| e.to_string())?;
+            let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
             let proj = inner.projects.iter().find(|p| p.path == path);
             agent::resolve_editor(
                 proj.and_then(|p| p.editor.as_deref()),
@@ -733,12 +752,12 @@ pub fn update_project_config(
 ) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let kind = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         secrets::StoreKind::parse(inner.settings.secret_store.as_deref())
     };
     let store = secrets::Secrets::new(&st.data_dir, kind);
     {
-        let mut inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = inner.projects.iter_mut().find(|p| p.path == path) {
             p.provider = config.provider;
             p.model = config.model;
@@ -806,7 +825,7 @@ pub fn update_project_config(
 pub fn get_project_secrets(app: AppHandle, path: String) -> Result<Vec<EnvValue>, String> {
     let st = app.state::<AppState>();
     let (vars, kind) = {
-        let inner = st.inner.lock().map_err(|e| e.to_string())?;
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let p = inner
             .projects
             .iter()
@@ -836,7 +855,7 @@ pub fn get_project_secrets(app: AppHandle, path: String) -> Result<Vec<EnvValue>
 #[tauri::command]
 pub fn get_resolved_config(app: AppHandle, path: String) -> Result<ResolvedConfig, String> {
     let st = app.state::<AppState>();
-    let inner = st.inner.lock().map_err(|e| e.to_string())?;
+    let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
     let proj = inner.projects.iter().find(|p| p.path == path);
     Ok(agent::resolve(proj, &inner.settings))
 }
@@ -845,6 +864,76 @@ pub fn get_resolved_config(app: AppHandle, path: String) -> Result<ResolvedConfi
 pub fn get_review_log(app: AppHandle, task_id: String) -> String {
     let st = app.state::<AppState>();
     std::fs::read_to_string(st.review_log_path(&task_id)).unwrap_or_default()
+}
+
+/// Explain why a resolved CLI isn't runnable.
+fn shim_note(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat") {
+                return Some(
+                    "Windows .cmd/.bat shim — wrap it in `cmd /C` in the command template".into(),
+                );
+            }
+        }
+    }
+    let _ = path;
+    None
+}
+
+fn tool_status(name: &str) -> ToolStatus {
+    let resolved = agent::which(name);
+    let note = resolved.as_deref().and_then(shim_note);
+    ToolStatus {
+        name: name.to_string(),
+        found: resolved.is_some(),
+        path: resolved.map(|p| p.to_string_lossy().to_string()),
+        note,
+    }
+}
+
+/// Preflight: are `git`, `gh`, and each provider CLI on `PATH`?
+#[tauri::command]
+pub fn environment_check(app: AppHandle) -> EnvironmentStatus {
+    let templates = {
+        let st = app.state::<AppState>();
+        st.inner
+            .lock()
+            .map(|i| i.settings.command_templates.clone())
+            .unwrap_or_default()
+    };
+    let providers = [
+        Provider::Opencode,
+        Provider::Codex,
+        Provider::Claude,
+        Provider::Cursor,
+    ]
+    .into_iter()
+    .map(|p| {
+        let command = templates
+            .for_provider(p)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let resolved = agent::which(&command);
+        let note = resolved.as_deref().and_then(shim_note);
+        ProviderTool {
+            provider: p,
+            command,
+            found: resolved.is_some(),
+            path: resolved.map(|x| x.to_string_lossy().to_string()),
+            note,
+        }
+    })
+    .collect();
+
+    EnvironmentStatus {
+        git: tool_status("git"),
+        gh: tool_status("gh"),
+        providers,
+    }
 }
 
 #[tauri::command]
@@ -874,4 +963,91 @@ pub async fn list_models(
         };
     }
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reset_for_rerun;
+    use crate::models::{
+        BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskKind,
+        TaskReview, TaskStatus,
+    };
+
+    fn task(status: TaskStatus, isolation: Isolation) -> Task {
+        Task {
+            id: "t".into(),
+            project_path: "/p".into(),
+            title: "t".into(),
+            prompt: "p".into(),
+            isolation,
+            profile: PermissionProfile::default(),
+            last_permission: None,
+            base_ref: None,
+            branch: None,
+            worktree_path: None,
+            not_before: None,
+            depends_on: Vec::new(),
+            status,
+            exit_code: None,
+            error: None,
+            created_at: 1,
+            started_at: None,
+            finished_at: None,
+            provider: None,
+            model: None,
+            fallback_provider: None,
+            fallback_model: None,
+            used_fallback: false,
+            review: None,
+            kind: TaskKind::Agent,
+            git_op: None,
+            command: None,
+            merge: None,
+            branch_mode: BranchMode::Current,
+            new_branch: None,
+        }
+    }
+
+    #[test]
+    fn reset_for_rerun_makes_an_interrupted_task_runnable_again() {
+        let mut t = task(TaskStatus::Interrupted, Isolation::Worktree);
+        t.worktree_path = Some("/wt".into());
+        t.branch = Some("devtools/abc".into());
+        t.error = Some("Interrupted: ...".into());
+        t.exit_code = Some(1);
+        t.started_at = Some(10);
+        t.finished_at = Some(20);
+        t.used_fallback = true;
+        t.review = Some(TaskReview {
+            mode: ReviewMode::Autofix,
+            status: ReviewStatus::Running,
+            provider: None,
+            model: None,
+            summary: Some("stale".into()),
+            started_at: Some(10),
+            finished_at: None,
+        });
+
+        reset_for_rerun(&mut t);
+
+        assert_eq!(t.status, TaskStatus::Ready);
+        assert!(t.error.is_none());
+        assert!(t.exit_code.is_none());
+        assert!(t.started_at.is_none() && t.finished_at.is_none());
+        assert!(!t.used_fallback);
+        // Worktree isolation gets a fresh worktree/branch on the next attempt.
+        assert!(t.worktree_path.is_none());
+        assert!(t.branch.is_none());
+        let r = t.review.as_ref().unwrap();
+        assert_eq!(r.status, ReviewStatus::None);
+        assert!(r.summary.is_none() && r.finished_at.is_none());
+    }
+
+    #[test]
+    fn reset_for_rerun_waits_for_dependencies() {
+        let mut t = task(TaskStatus::Interrupted, Isolation::Shared);
+        t.depends_on = vec!["dep".into()];
+        reset_for_rerun(&mut t);
+        assert_eq!(t.status, TaskStatus::Waiting);
+    }
 }

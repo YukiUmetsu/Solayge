@@ -3,6 +3,7 @@ import type {
   AgentConfig,
   ConflictMode,
   EnvValue,
+  EnvironmentStatus,
   Project,
   ProjectSkill,
   Settings,
@@ -92,11 +93,13 @@ function skillPrompt(skill: ProjectSkill): string {
 export function ProjectSettingsModal({
   project,
   settings,
+  tools,
   onClose,
   onSaved,
 }: {
   project: Project;
   settings: Settings;
+  tools: EnvironmentStatus | null;
   onClose: () => void;
   onSaved: (s: Snapshot) => void;
 }) {
@@ -326,6 +329,8 @@ export function ProjectSettingsModal({
               onChange={patch}
               disabled={saveState === "saving"}
               inherit
+              tools={tools}
+              effectiveProvider={eff.provider}
             />
 
             <div className="rounded-lg border border-line bg-well p-3 text-[11.5px] text-ink-muted">

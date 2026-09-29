@@ -6,7 +6,8 @@ export type TaskStatus =
   | "succeeded"
   | "failed"
   | "canceled"
-  | "blocked";
+  | "blocked"
+  | "interrupted";
 
 export type Isolation = "worktree" | "shared";
 
@@ -64,6 +65,29 @@ export interface SystemPrompt {
 
 /** Where encrypted secrets are stored. */
 export type SecretStore = "keychain" | "file";
+
+/** Preflight: whether a tool is available on PATH. */
+export interface ToolStatus {
+  name: string;
+  found: boolean;
+  path?: string | null;
+  note?: string | null;
+}
+
+export interface ProviderTool {
+  provider: Provider;
+  /** The binary named first in the provider's command template. */
+  command: string;
+  found: boolean;
+  path?: string | null;
+  note?: string | null;
+}
+
+export interface EnvironmentStatus {
+  git: ToolStatus;
+  gh: ToolStatus;
+  providers: ProviderTool[];
+}
 
 /** What a task does when it runs. */
 export type TaskKind = "agent" | "shell" | "git" | "merge";

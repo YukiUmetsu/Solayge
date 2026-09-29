@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,11 +10,15 @@ use crate::agent;
 use crate::git;
 use crate::models::{
     BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSpec,
-    MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt, TaskKind,
-    TaskStatus,
+    MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt, Task,
+    TaskKind, TaskStatus,
 };
 use crate::state::AppState;
 use tauri_plugin_notification::NotificationExt;
+
+/// A task that is `running` but has shown no sign of life (live child, streamed
+/// output, or a managed step) for this long is presumed orphaned.
+const STALL_SECS: i64 = 600;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -37,16 +41,201 @@ pub fn spawn_scheduler(app: AppHandle) {
         let mut tick = tokio::time::interval(Duration::from_millis(1000));
         loop {
             tick.tick().await;
-            step(&app).await;
+            // Run each tick in its own task and observe the result, so a panic in
+            // one tick is logged and the loop keeps going instead of silently
+            // dying and freezing every running task forever.
+            let a = app.clone();
+            if let Err(e) = supervised_tick(move || async move { step(&a).await }).await {
+                record_scheduler_error(&app, &e);
+            }
         }
     });
 }
 
-async fn step(app: &AppHandle) {
-    if reap(app) {
-        // finalize() already emitted.
+/// Run one tick in its own task, turning a panic into an `Err` so the caller's
+/// loop survives. Kept generic and free of Tauri types so it is unit-testable.
+async fn supervised_tick<F, Fut>(tick_fn: F) -> Result<(), String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    match tokio::spawn(tick_fn()).await {
+        Ok(()) => Ok(()),
+        Err(e) => Err(format!("scheduler tick failed: {e}")),
     }
+}
+
+/// Record a scheduler-level problem where the user can see it: appended to
+/// `logs/scheduler.log` and surfaced as a notification.
+fn record_scheduler_error(app: &AppHandle, message: &str) {
+    eprintln!("[Solayge] {message}");
+    let path = {
+        let st = app.state::<AppState>();
+        st.logs_dir().join("scheduler.log")
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "[{}] {message}", now());
+    }
+    notify(app, "Solayge", message);
+}
+
+/// Mark the given task interrupted and explain why in its log.
+fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
+    let st = app.state::<AppState>();
+    let mut title: Option<String> = None;
+    {
+        let mut inner = crate::state::lock(&st.inner);
+        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+            if t.status != TaskStatus::Running {
+                return;
+            }
+            t.status = TaskStatus::Interrupted;
+            t.error = Some(reason.to_string());
+            t.finished_at = Some(
+                last_activity(app, id)
+                    .or(t.started_at)
+                    .unwrap_or_else(now),
+            );
+            title = Some(t.title.clone());
+        }
+    }
+    // Drop any half-registered child so it cannot be reaped as this task.
+    if let Some(mut child) = crate::state::lock(&st.running).remove(id) {
+        let _ = child.start_kill();
+    }
+    if let Some(mut child) = crate::state::lock(&st.merging).remove(id) {
+        let _ = child.start_kill();
+    }
+    crate::state::lock(&st.heartbeat).remove(id);
+    log_note(app, id, &format!("Interrupted: {reason}"));
+    st.save();
+    emit_state(app);
+    if let Some(title) = title {
+        notify(app, "Solayge needs you", &format!("{title} was interrupted"));
+    }
+}
+
+/// Which running tasks and running reviews have gone silent. Pure so it can be
+/// tested without an app handle.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StallSweep {
+    tasks: Vec<String>,
+    reviews: Vec<String>,
+}
+
+fn stall_sweep(
+    tasks: &[Task],
+    heartbeat: &HashMap<String, i64>,
+    now: i64,
+    stall_secs: i64,
+) -> StallSweep {
+    let mut out = StallSweep::default();
+    for t in tasks {
+        let last = heartbeat.get(&t.id).copied().or(t.started_at).unwrap_or(now);
+        if now - last <= stall_secs {
+            continue;
+        }
+        if t.status == TaskStatus::Running {
+            out.tasks.push(t.id.clone());
+        } else if t
+            .review
+            .as_ref()
+            .is_some_and(|r| r.status == ReviewStatus::Running)
+        {
+            out.reviews.push(t.id.clone());
+        }
+    }
+    out
+}
+
+/// For every `running` task (or running review) whose last sign of life is older
+/// than [`STALL_SECS`], mark it interrupted so the UI can recover and retry.
+fn reap_stalled(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let now = now();
+    let sweep = {
+        let inner = crate::state::lock(&st.inner);
+        let beat = crate::state::lock(&st.heartbeat);
+        stall_sweep(&inner.tasks, &beat, now, STALL_SECS)
+    };
+    for id in sweep.tasks {
+        let reason = format!(
+            "No activity for over {} minutes; the run appears to have stalled or lost its \
+             process. Retry to run it again.",
+            STALL_SECS / 60
+        );
+        finish_interrupted(app, &id, &reason);
+    }
+    for id in sweep.reviews {
+        finish_review_failed(
+            app,
+            &id,
+            format!(
+                "The review stopped responding for over {} minutes and was abandoned.",
+                STALL_SECS / 60
+            ),
+        );
+    }
+}
+
+/// Claim every succeeded task whose review is queued, returning their ids and
+/// flipping the review to running. Pure so the selection can be tested.
+fn reviews_to_start(tasks: &mut [Task]) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in tasks {
+        if t.status != TaskStatus::Succeeded {
+            continue;
+        }
+        if let Some(r) = t.review.as_mut() {
+            if r.mode != ReviewMode::Off && r.status == ReviewStatus::Pending {
+                r.status = ReviewStatus::Running;
+                out.push(t.id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Start (or restart) reviews left queued by a previous tick or session. This is
+/// the single path that launches a review, so there is no race at success time.
+fn resume_reviews(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let to_start: Vec<String> = {
+        let mut inner = crate::state::lock(&st.inner);
+        reviews_to_start(&mut inner.tasks)
+    };
+    if to_start.is_empty() {
+        return;
+    }
+    {
+        let mut beat = crate::state::lock(&st.heartbeat);
+        for id in &to_start {
+            beat.insert(id.clone(), now());
+        }
+    }
+    st.save();
+    emit_state(app);
+    for id in to_start {
+        let a = app.clone();
+        tauri::async_runtime::spawn(async move {
+            start_review(a, id).await;
+        });
+    }
+}
+
+async fn step(app: &AppHandle) {
+    reap(app);
     reap_reviews(app);
+    resume_reviews(app);
+    reap_stalled(app);
     let (started, mutated) = {
         let st = app.state::<AppState>();
         let out = dispatch(&st);
@@ -70,8 +259,10 @@ async fn step(app: &AppHandle) {
 fn reap(app: &AppHandle) -> bool {
     let st = app.state::<AppState>();
     let mut finished: Vec<(String, Option<i32>)> = Vec::new();
+    let now = now();
+    let mut alive: Vec<String> = Vec::new();
     {
-        let mut running = st.running.lock().expect("running lock");
+        let mut running = crate::state::lock(&st.running);
         let ids: Vec<String> = running.keys().cloned().collect();
         for id in ids {
             let mut done = false;
@@ -82,7 +273,8 @@ fn reap(app: &AppHandle) -> bool {
                         done = true;
                         code = status.code();
                     }
-                    Ok(None) => {}
+                    // Still alive: that is a definitive liveness signal.
+                    Ok(None) => alive.push(id.clone()),
                     Err(_) => {
                         done = true;
                     }
@@ -94,6 +286,12 @@ fn reap(app: &AppHandle) -> bool {
         }
         for (id, _) in &finished {
             running.remove(id);
+        }
+    }
+    if !alive.is_empty() {
+        let mut beat = crate::state::lock(&st.heartbeat);
+        for id in alive {
+            beat.insert(id, now);
         }
     }
     if finished.is_empty() {
@@ -108,10 +306,9 @@ fn reap(app: &AppHandle) -> bool {
 fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     let st = app.state::<AppState>();
     let mut outcome: Option<(String, bool)> = None;
-    let mut start_review_now = false;
     let mut retry_note: Option<(PathBuf, String)> = None;
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = crate::state::lock(&st.inner);
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if t.status == TaskStatus::Running {
                 let ok = code == Some(0);
@@ -119,10 +316,15 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
                     t.exit_code = code;
                     t.finished_at = Some(now());
                     t.status = TaskStatus::Succeeded;
+                    // The review is queued here; `resume_reviews` picks it up on
+                    // the next scheduler tick. Dependents stay held until the
+                    // review reaches a terminal status (see `review_clear`).
                     if let Some(r) = t.review.as_mut() {
                         if r.mode != ReviewMode::Off {
                             r.status = ReviewStatus::Pending;
-                            start_review_now = true;
+                            r.summary = None;
+                            r.started_at = None;
+                            r.finished_at = None;
                         }
                     }
                     outcome = Some((t.title.clone(), true));
@@ -178,14 +380,6 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
         }
     }
 
-    if start_review_now {
-        let a = app.clone();
-        let tid = id.to_string();
-        tauri::async_runtime::spawn(async move {
-            start_review(a, tid).await;
-        });
-    }
-
     if let Some((title, ok)) = outcome {
         let body = if ok {
             format!("{title} — finished")
@@ -196,17 +390,27 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     }
 }
 
+/// Whether a succeeded task has fully finished, including its auto review, so
+/// its dependents may start. A pending or running review holds them back.
+fn review_clear(t: &Task) -> bool {
+    match t.review.as_ref() {
+        Some(r) => !matches!(r.status, ReviewStatus::Pending | ReviewStatus::Running),
+        None => true,
+    }
+}
+
 /// Promote waiting tasks and dispatch ready ones. Returns (started ids, mutated).
 fn dispatch(st: &AppState) -> (Vec<String>, bool) {
     let mut started = Vec::new();
     let mut mutated = false;
-    let mut inner = st.inner.lock().expect("state lock");
+    let mut inner = crate::state::lock(&st.inner);
     let now = now();
 
+    // Only a task that succeeded *and* cleared its review satisfies dependents.
     let succeeded: HashSet<String> = inner
         .tasks
         .iter()
-        .filter(|t| t.status == TaskStatus::Succeeded)
+        .filter(|t| t.status == TaskStatus::Succeeded && review_clear(t))
         .map(|t| t.id.clone())
         .collect();
     let failed: HashSet<String> = inner
@@ -215,7 +419,10 @@ fn dispatch(st: &AppState) -> (Vec<String>, bool) {
         .filter(|t| {
             matches!(
                 t.status,
-                TaskStatus::Failed | TaskStatus::Canceled | TaskStatus::Blocked
+                TaskStatus::Failed
+                    | TaskStatus::Canceled
+                    | TaskStatus::Blocked
+                    | TaskStatus::Interrupted
             )
         })
         .map(|t| t.id.clone())
@@ -291,6 +498,13 @@ fn dispatch(st: &AppState) -> (Vec<String>, bool) {
         started.push(inner.tasks[i].id.clone());
     }
 
+    if !started.is_empty() {
+        let mut beat = crate::state::lock(&st.heartbeat);
+        for id in &started {
+            beat.insert(id.clone(), now);
+        }
+    }
+
     (started, mutated)
 }
 
@@ -325,7 +539,7 @@ async fn prepare_worktree(
 fn fail_task(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             t.status = TaskStatus::Failed;
             t.error = Some(msg);
@@ -354,6 +568,8 @@ struct TaskRun {
     merge: Option<MergeSpec>,
     branch_mode: BranchMode,
     new_branch: Option<String>,
+    /// The branch recorded on a previous run, if any (for reuse on retry).
+    branch: Option<String>,
 }
 
 /// A project's run-time context: encrypted env vars and its system prompt.
@@ -366,7 +582,7 @@ struct ProjectContext {
 
 fn load_run(app: &AppHandle, id: &str) -> Option<TaskRun> {
     let st = app.state::<AppState>();
-    let inner = st.inner.lock().expect("state lock");
+    let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
     let t = inner.tasks.iter().find(|t| t.id == id)?;
     Some(TaskRun {
         id: t.id.clone(),
@@ -385,13 +601,14 @@ fn load_run(app: &AppHandle, id: &str) -> Option<TaskRun> {
         merge: t.merge.clone(),
         branch_mode: t.branch_mode,
         new_branch: t.new_branch.clone(),
+        branch: t.branch.clone(),
     })
 }
 
 fn project_context(app: &AppHandle, project: &str) -> ProjectContext {
     let st = app.state::<AppState>();
     let (name, system_prompt, keys, kind, conflict_mode) = {
-        let inner = st.inner.lock().expect("state lock");
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let p = inner.projects.iter().find(|p| p.path == project);
         (
             p.map(|p| p.name.clone()).unwrap_or_default(),
@@ -421,13 +638,28 @@ fn command_templates(app: &AppHandle) -> CommandTemplates {
         .unwrap_or_default()
 }
 
+/// Prepare a log file for a new attempt without destroying the previous one. If
+/// it already has content, a separator is appended so the earlier attempt (often
+/// the only evidence of what failed) is kept.
+async fn reset_log(path: &Path) {
+    let existing = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+    if existing > 0 {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path).await {
+            let sep = format!("\n[Solayge] ---- new attempt (unix {}) ----\n", now());
+            let _ = f.write_all(sep.as_bytes()).await;
+        }
+    } else {
+        let _ = tokio::fs::write(path, b"").await;
+    }
+}
+
 async fn init_log(app: &AppHandle, id: &str) {
     let (log_path, logs_dir) = {
         let st = app.state::<AppState>();
         (st.log_path(id), st.logs_dir())
     };
     let _ = tokio::fs::create_dir_all(&logs_dir).await;
-    let _ = tokio::fs::write(&log_path, b"").await;
+    reset_log(&log_path).await;
 }
 
 /// Append a `[Solayge]` line to the task log and stream it to the UI.
@@ -452,9 +684,35 @@ fn log_note(app: &AppHandle, id: &str, message: &str) {
     );
 }
 
+/// When this task's log was last written, as unix seconds. Best-effort.
+fn last_activity(app: &AppHandle, id: &str) -> Option<i64> {
+    let st = app.state::<AppState>();
+    let modified = std::fs::metadata(st.log_path(id)).and_then(|m| m.modified()).ok()?;
+    modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// Record that a task is still making progress, so the stall watchdog leaves it
+/// alone.
+fn touch(app: &AppHandle, id: &str) {
+    let st = app.state::<AppState>();
+    crate::state::lock(&st.heartbeat).insert(id.to_string(), now());
+}
+
 /// Spawn a child, stream its output to the task log, and register it so it can
 /// be cancelled. Finalization is left to `reap`.
 fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
+    let program = cmd
+        .as_std()
+        .get_program()
+        .to_string_lossy()
+        .to_string();
+    let cwd = cmd
+        .as_std()
+        .get_current_dir()
+        .map(|p| p.to_string_lossy().to_string());
     match cmd.spawn() {
         Ok(mut child) => {
             let stdout = child.stdout.take();
@@ -463,7 +721,7 @@ fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
                 let st = app.state::<AppState>();
                 st.running
                     .lock()
-                    .expect("running lock")
+                    .unwrap_or_else(|e| e.into_inner())
                     .insert(id.to_string(), child);
             }
             if let Some(out) = stdout {
@@ -474,7 +732,11 @@ fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
             }
             emit_state(app);
         }
-        Err(e) => fail_task(app, id, format!("failed to launch: {e}")),
+        Err(e) => fail_task(
+            app,
+            id,
+            format!("failed to launch \"{program}\"{cwd}: {e}", cwd = cwd.map(|c| format!(" in {c}")).unwrap_or_default()),
+        ),
     }
 }
 
@@ -487,11 +749,12 @@ async fn prepare_or_reuse(
     if let Some(wt) = run.existing_wt.as_ref().filter(|w| Path::new(w).exists()) {
         return Ok(PathBuf::from(wt));
     }
+    touch(app, &run.id);
     match prepare_worktree(project_path, &run.id, run.base_ref.as_deref()).await {
         Ok((wt, branch)) => {
             {
                 let st = app.state::<AppState>();
-                let mut inner = st.inner.lock().expect("state lock");
+                let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == run.id) {
                     t.worktree_path = Some(wt.to_string_lossy().to_string());
                     t.branch = Some(branch);
@@ -503,35 +766,45 @@ async fn prepare_or_reuse(
     }
 }
 
-/// Create and check out the task's new branch, returning its name. A blank
-/// requested name is chosen by the agent and de-duplicated.
+/// Create (or reuse) the task's new branch, returning its name. A blank
+/// requested name is chosen by the agent and de-duplicated; a branch recorded on
+/// a previous attempt is reused so retries don't pile up new branches.
 async fn ensure_new_branch(
     app: &AppHandle,
     run: &TaskRun,
     project_path: &Path,
 ) -> Result<String, String> {
+    touch(app, &run.id);
     let requested = run.new_branch.as_deref().map(str::trim).unwrap_or("");
+    let reuse = run.branch.clone().filter(|b| !b.trim().is_empty());
 
-    let name = if !requested.is_empty() {
+    // Resolve the branch name and whether it already exists.
+    let (name, exists) = if !requested.is_empty() {
         let name = agent::sanitize_branch_name(requested);
-        if git::branch_exists(project_path, &name).await {
+        let exists = git::branch_exists(project_path, &name).await;
+        if exists && reuse.as_deref() != Some(name.as_str()) {
             return Err(format!("branch \"{name}\" already exists"));
         }
-        name
+        (name, exists)
+    } else if let Some(branch) = reuse {
+        // Agent-named branch from a previous attempt: reuse it.
+        (branch, true)
     } else {
-        let mut cmd = agent::build_command(
-            run.provider,
-            run.model.as_deref(),
-            &command_templates(app),
-            &agent::branch_name_prompt(&run.title),
-            PermissionProfile::Readonly,
-            project_path,
-        )?;
-        agent::apply_env(&mut cmd, &project_context(app, &run.project).env);
-        let suggested = match tokio::time::timeout(Duration::from_secs(45), cmd.output()).await {
-            Ok(Ok(out)) => agent::sanitize_branch_name(&String::from_utf8_lossy(&out.stdout)),
-            // Fall back to a slug of the title if the agent is unavailable.
-            _ => agent::sanitize_branch_name(&run.title),
+        let suggested = {
+            let mut cmd = agent::build_command(
+                run.provider,
+                run.model.as_deref(),
+                &command_templates(app),
+                &agent::branch_name_prompt(&run.title),
+                PermissionProfile::Readonly,
+                project_path,
+            )?;
+            agent::apply_env(&mut cmd, &project_context(app, &run.project).env);
+            match tokio::time::timeout(Duration::from_secs(45), cmd.output()).await {
+                Ok(Ok(out)) => agent::sanitize_branch_name(&String::from_utf8_lossy(&out.stdout)),
+                // Fall back to a slug of the title if the agent is unavailable.
+                _ => agent::sanitize_branch_name(&run.title),
+            }
         };
         let mut name = suggested.clone();
         let mut n = 1;
@@ -539,32 +812,39 @@ async fn ensure_new_branch(
             n += 1;
             name = format!("{suggested}-{n}");
         }
-        name
+        (name, false)
     };
 
-    let mut args = vec!["checkout", "-b", name.as_str()];
-    if let Some(base) = run.base_ref.as_deref().filter(|b| !b.trim().is_empty()) {
-        if !git::valid_ref(base) {
-            return Err(format!("invalid base ref: {base}"));
+    // Check out the branch, creating it if it doesn't exist yet.
+    let output = if exists {
+        git::git_cmd(project_path, &["checkout", name.as_str()])
+            .output()
+            .await
+    } else {
+        let mut args = vec!["checkout", "-b", name.as_str()];
+        if let Some(base) = run.base_ref.as_deref().filter(|b| !b.trim().is_empty()) {
+            if !git::valid_ref(base) {
+                return Err(format!("invalid base ref: {base}"));
+            }
+            args.push(base);
         }
-        args.push(base);
+        git::git_cmd(project_path, &args).output().await
     }
-    let output = git::git_cmd(project_path, &args)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!(
-            "could not create branch {name}: {}",
+            "could not use branch {name}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
     {
         let st = app.state::<AppState>();
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == run.id) {
             t.branch = Some(name.clone());
+            // Remember the chosen name so a retry reuses the same branch.
+            t.new_branch = Some(name.clone());
         }
     }
     log_note(app, &run.id, &format!("On new branch {name}"));
@@ -575,6 +855,7 @@ async fn start_task(app: AppHandle, id: String) {
     let Some(run) = load_run(&app, &id) else {
         return;
     };
+    touch(&app, &id);
     match run.kind {
         TaskKind::Agent => start_agent_task(app, run).await,
         TaskKind::Shell => start_shell_task(app, run).await,
@@ -823,7 +1104,7 @@ async fn start_shell_task(app: AppHandle, run: TaskRun) {
 
 fn is_cancelled(app: &AppHandle, id: &str) -> bool {
     let st = app.state::<AppState>();
-    let inner = st.inner.lock().expect("state lock");
+    let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
     inner
         .tasks
         .iter()
@@ -835,10 +1116,11 @@ fn is_cancelled(app: &AppHandle, id: &str) -> bool {
 /// Spawn a child for a managed (merge) task, stream it, and wait. Returns the
 /// exit code, or `None` when the process could not start.
 async fn run_streamed(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) -> Option<i32> {
+    let program = cmd.as_std().get_program().to_string_lossy().to_string();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            log_note(app, id, &format!("failed to start command: {e}"));
+            log_note(app, id, &format!("failed to start \"{program}\": {e}"));
             return None;
         }
     };
@@ -854,13 +1136,15 @@ async fn run_streamed(app: &AppHandle, id: &str, mut cmd: tokio::process::Comman
         let st = app.state::<AppState>();
         st.merging
             .lock()
-            .expect("merging lock")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_string(), child);
     }
     loop {
         tokio::time::sleep(Duration::from_millis(150)).await;
         let st = app.state::<AppState>();
-        let mut map = st.merging.lock().expect("merging lock");
+        // A managed step is making progress while its child runs.
+        crate::state::lock(&st.heartbeat).insert(id.to_string(), now());
+        let mut map = crate::state::lock(&st.merging);
         match map.get_mut(id) {
             Some(child) => match child.try_wait() {
                 Ok(Some(status)) => {
@@ -919,7 +1203,7 @@ async fn run_agent_step(
 
 fn resolve_sources(app: &AppHandle, sources: &[String]) -> Vec<String> {
     let st = app.state::<AppState>();
-    let inner = st.inner.lock().expect("state lock");
+    let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
     sources
         .iter()
         .filter_map(|s| {
@@ -1156,7 +1440,7 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
     let st = app.state::<AppState>();
     let mut title: Option<String> = None;
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if t.status != TaskStatus::Running {
                 return; // cancelled meanwhile
@@ -1185,7 +1469,7 @@ fn finish_blocked(app: &AppHandle, id: &str, reason: String) {
     let st = app.state::<AppState>();
     let mut title: Option<String> = None;
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if t.status != TaskStatus::Running {
                 return;
@@ -1233,12 +1517,16 @@ async fn start_merge_task(app: AppHandle, run: TaskRun) {
 async fn start_review(app: AppHandle, id: String) {
     let (cwd, title, task_prompt, mode, provider, model, project) = {
         let st = app.state::<AppState>();
-        let inner = st.inner.lock().expect("state lock");
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(t) = inner.tasks.iter().find(|t| t.id == id) else {
             return;
         };
         let Some(r) = t.review.as_ref() else { return };
         if r.mode == ReviewMode::Off {
+            return;
+        }
+        // The task may have been canceled after the review was queued.
+        if t.status != TaskStatus::Succeeded {
             return;
         }
         let cwd = t
@@ -1266,7 +1554,7 @@ async fn start_review(app: AppHandle, id: String) {
     let env = {
         let st = app.state::<AppState>();
         let (keys, kind) = {
-            let inner = st.inner.lock().expect("state lock");
+            let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
             let proj = inner.projects.iter().find(|p| p.path == project);
             (
                 proj.map(|p| p.env_vars.iter().map(|e| e.key.clone()).collect::<Vec<_>>())
@@ -1284,11 +1572,11 @@ async fn start_review(app: AppHandle, id: String) {
         (st.review_log_path(&id), st.logs_dir())
     };
     let _ = tokio::fs::create_dir_all(&logs_dir).await;
-    let _ = tokio::fs::write(&log_path, b"").await;
+    reset_log(&log_path).await;
 
     {
         let st = app.state::<AppState>();
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if let Some(r) = t.review.as_mut() {
                 r.status = ReviewStatus::Running;
@@ -1297,6 +1585,12 @@ async fn start_review(app: AppHandle, id: String) {
                 r.summary = None;
             }
         }
+        crate::state::lock(&st.heartbeat).insert(id.clone(), now());
+    }
+    // Persist *after* releasing the state lock: `AppState::save` locks `inner`
+    // again, and a `std::sync::Mutex` is not reentrant.
+    {
+        let st = app.state::<AppState>();
         st.save();
     }
     emit_state(&app);
@@ -1326,7 +1620,7 @@ async fn start_review(app: AppHandle, id: String) {
                 let st = app.state::<AppState>();
                 st.reviewing
                     .lock()
-                    .expect("reviewing lock")
+                    .unwrap_or_else(|e| e.into_inner())
                     .insert(id.clone(), child);
             }
             if let Some(out) = stdout {
@@ -1350,7 +1644,7 @@ async fn start_review(app: AppHandle, id: String) {
 fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if let Some(r) = t.review.as_mut() {
                 r.status = ReviewStatus::Failed;
@@ -1359,6 +1653,7 @@ fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
             }
         }
     }
+    crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
 }
@@ -1366,8 +1661,10 @@ fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
 fn reap_reviews(app: &AppHandle) {
     let st = app.state::<AppState>();
     let mut finished: Vec<(String, Option<i32>)> = Vec::new();
+    let now = now();
+    let mut alive: Vec<String> = Vec::new();
     {
-        let mut reviewing = st.reviewing.lock().expect("reviewing lock");
+        let mut reviewing = crate::state::lock(&st.reviewing);
         let ids: Vec<String> = reviewing.keys().cloned().collect();
         for id in ids {
             let mut done = false;
@@ -1378,7 +1675,7 @@ fn reap_reviews(app: &AppHandle) {
                         done = true;
                         code = status.code();
                     }
-                    Ok(None) => {}
+                    Ok(None) => alive.push(id.clone()),
                     Err(_) => done = true,
                 }
             }
@@ -1388,6 +1685,12 @@ fn reap_reviews(app: &AppHandle) {
         }
         for (id, _) in &finished {
             reviewing.remove(id);
+        }
+    }
+    if !alive.is_empty() {
+        let mut beat = crate::state::lock(&st.heartbeat);
+        for id in alive {
+            beat.insert(id, now);
         }
     }
     for (id, code) in finished {
@@ -1400,7 +1703,7 @@ fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     let text = std::fs::read_to_string(st.review_log_path(id)).unwrap_or_default();
     let mut outcome: Option<(String, ReviewStatus, Option<String>)> = None;
     {
-        let mut inner = st.inner.lock().expect("state lock");
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             let (status, summary) = if code == Some(0) {
                 agent::parse_verdict(&text)
@@ -1435,6 +1738,7 @@ fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
             outcome = Some((t.title.clone(), status, summary));
         }
     }
+    crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
     if let Some((title, status, summary)) = outcome {
@@ -1497,10 +1801,14 @@ where
                 let _ = f.write_all(line.as_bytes()).await;
                 let _ = f.write_all(b"\n").await;
             }
+            {
+                let st = app.state::<AppState>();
+                crate::state::lock(&st.heartbeat).insert(id.clone(), now());
+            }
             if line.to_ascii_lowercase().contains("permission requested") {
                 {
                     let st = app.state::<AppState>();
-                    let mut inner = st.inner.lock().expect("state lock");
+                    let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
                         t.last_permission = Some(line.clone());
                     }
@@ -1530,8 +1838,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch, now};
-    use crate::models::{BranchMode, Isolation, PermissionProfile, Task, TaskKind, TaskStatus};
+    use super::{
+        dispatch, now, review_clear, reviews_to_start, stall_sweep, supervised_tick,
+    };
+    use crate::models::{
+        BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskKind,
+        TaskReview, TaskStatus,
+    };
     use crate::state::AppState;
 
     fn task(
@@ -1600,6 +1913,216 @@ mod tests {
             .count()
     }
 
+    fn reviewed(mut t: Task, mode: ReviewMode, status: ReviewStatus) -> Task {
+        t.review = Some(TaskReview {
+            mode,
+            status,
+            provider: None,
+            model: None,
+            summary: None,
+            started_at: None,
+            finished_at: None,
+        });
+        t
+    }
+
+    fn running(id: &str, started_at: Option<i64>) -> Task {
+        let mut t = task(id, "/p", &[], Isolation::Worktree, None);
+        t.status = TaskStatus::Running;
+        t.started_at = started_at;
+        t
+    }
+
+    fn review_is(st: &AppState, id: &str) -> ReviewStatus {
+        st.inner
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.review.as_ref())
+            .map(|r| r.status)
+            .expect("task has a review")
+    }
+
+    // ---- review gating ----
+
+    #[test]
+    fn review_clear_reflects_review_state() {
+        let plain = task("t", "/p", &[], Isolation::Worktree, None);
+        assert!(review_clear(&plain), "no review means clear");
+
+        assert!(!review_clear(&reviewed(
+            plain.clone(),
+            ReviewMode::Autofix,
+            ReviewStatus::Pending
+        )));
+        assert!(!review_clear(&reviewed(
+            plain.clone(),
+            ReviewMode::Autofix,
+            ReviewStatus::Running
+        )));
+        assert!(review_clear(&reviewed(
+            plain.clone(),
+            ReviewMode::Autofix,
+            ReviewStatus::Passed
+        )));
+        assert!(review_clear(&reviewed(
+            plain.clone(),
+            ReviewMode::Report,
+            ReviewStatus::Issues
+        )));
+        assert!(review_clear(&reviewed(
+            plain,
+            ReviewMode::Autofix,
+            ReviewStatus::Failed
+        )));
+    }
+
+    #[test]
+    fn autofix_review_releases_dependents_only_when_done() {
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Succeeded;
+        let a = reviewed(a, ReviewMode::Autofix, ReviewStatus::Running);
+        let b = task("b", "/p", &["a"], Isolation::Worktree, None);
+        let st = state_with(vec![a, b], 3);
+
+        assert!(
+            dispatch(&st).0.is_empty(),
+            "dependent started while the autofix review was running"
+        );
+
+        st.inner.lock().unwrap().tasks[0]
+            .review
+            .as_mut()
+            .unwrap()
+            .status = ReviewStatus::Passed;
+        assert_eq!(dispatch(&st).0, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn settled_review_issues_block_dependents() {
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Blocked; // review pause mode stopped it
+        let a = reviewed(a, ReviewMode::Pause, ReviewStatus::Issues);
+        let b = task("b", "/p", &["a"], Isolation::Worktree, None);
+        let st = state_with(vec![a, b], 3);
+
+        dispatch(&st);
+        let b = st
+            .inner
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|t| t.id == "b")
+            .map(|t| t.status);
+        assert_eq!(b, Some(TaskStatus::Blocked));
+        assert_eq!(count(&st, TaskStatus::Running), 0);
+    }
+
+    #[test]
+    fn reviews_to_start_claims_only_queued_reviews() {
+        let mut queued = task("queued", "/p", &[], Isolation::Worktree, None);
+        queued.status = TaskStatus::Succeeded;
+        let mut in_flight = task("in_flight", "/p", &[], Isolation::Worktree, None);
+        in_flight.status = TaskStatus::Succeeded;
+        let mut off = task("off", "/p", &[], Isolation::Worktree, None);
+        off.status = TaskStatus::Succeeded;
+        let not_done = task("not_done", "/p", &[], Isolation::Worktree, None);
+
+        let mut tasks = vec![
+            reviewed(queued, ReviewMode::Autofix, ReviewStatus::Pending),
+            reviewed(in_flight, ReviewMode::Autofix, ReviewStatus::Running),
+            reviewed(off, ReviewMode::Off, ReviewStatus::Pending),
+            reviewed(not_done, ReviewMode::Autofix, ReviewStatus::Pending),
+        ];
+
+        assert_eq!(reviews_to_start(&mut tasks), vec!["queued".to_string()]);
+        // The claimed review is flipped to running; nothing else moves.
+        assert_eq!(tasks[0].review.as_ref().unwrap().status, ReviewStatus::Running);
+        assert_eq!(
+            tasks[1].review.as_ref().unwrap().status,
+            ReviewStatus::Running
+        );
+        assert_eq!(tasks[2].review.as_ref().unwrap().status, ReviewStatus::Pending);
+        assert_eq!(tasks[3].review.as_ref().unwrap().status, ReviewStatus::Pending);
+    }
+
+    /// Reproduces the original freeze at the scheduler level: claiming a queued
+    /// review and then persisting must not deadlock on the state lock.
+    #[test]
+    fn claiming_a_review_then_saving_does_not_deadlock() {
+        let mut t = task("t", "/p", &[], Isolation::Worktree, None);
+        t.status = TaskStatus::Succeeded;
+        let st = state_with(
+            vec![reviewed(t, ReviewMode::Autofix, ReviewStatus::Pending)],
+            3,
+        );
+        let claimed = {
+            let mut inner = st.inner.lock().unwrap();
+            reviews_to_start(&mut inner.tasks)
+        }; // the guard is dropped before saving, as it must be
+        assert_eq!(claimed, vec!["t".to_string()]);
+        st.save(); // hung forever before the fix
+        assert_eq!(review_is(&st, "t"), ReviewStatus::Running);
+    }
+
+    // ---- stall detection ----
+
+    #[test]
+    fn stall_sweep_flags_only_silent_runs() {
+        let now = 10_000;
+        let tasks = vec![
+            running("fresh", Some(now - 1_000)),
+            running("stale", Some(now - 5_000)),
+            running("no_heartbeat", None),
+            task("not_running", "/p", &[], Isolation::Worktree, None),
+        ];
+        let mut hb = std::collections::HashMap::new();
+        hb.insert("fresh".to_string(), now);
+        hb.insert("stale".to_string(), now - 5_000);
+        // "no_heartbeat" has no heartbeat and no start time, so it is treated as
+        // just-started and left alone.
+
+        let sweep = stall_sweep(&tasks, &hb, now, 1_000);
+        assert_eq!(sweep.tasks, vec!["stale".to_string()]);
+        assert!(sweep.reviews.is_empty());
+    }
+
+    #[test]
+    fn stall_sweep_boundary_is_inclusive() {
+        let now = 10_000;
+        let mut hb = std::collections::HashMap::new();
+        hb.insert("edge".to_string(), now - 1_000);
+        // Exactly at the threshold is not yet stalled.
+        let sweep = stall_sweep(&[running("edge", None)], &hb, now, 1_000);
+        assert!(sweep.tasks.is_empty());
+        // One second past it, it is.
+        let sweep = stall_sweep(&[running("edge", None)], &hb, now, 999);
+        assert_eq!(sweep.tasks, vec!["edge".to_string()]);
+    }
+
+    #[test]
+    fn stall_sweep_flags_silent_reviews() {
+        let now = 10_000;
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Succeeded;
+        let mut b = task("b", "/p", &[], Isolation::Worktree, None);
+        b.status = TaskStatus::Succeeded;
+        let tasks = vec![
+            reviewed(a, ReviewMode::Autofix, ReviewStatus::Running),
+            reviewed(b, ReviewMode::Autofix, ReviewStatus::Running),
+        ];
+        let mut hb = std::collections::HashMap::new();
+        hb.insert("a".to_string(), now);
+        hb.insert("b".to_string(), now - 9_000);
+
+        let sweep = stall_sweep(&tasks, &hb, now, 1_000);
+        assert!(sweep.tasks.is_empty());
+        assert_eq!(sweep.reviews, vec!["b".to_string()]);
+    }
+
     #[test]
     fn dispatches_only_up_to_concurrency() {
         let st = state_with(
@@ -1663,6 +2186,44 @@ mod tests {
     }
 
     #[test]
+    fn pending_review_holds_dependents_until_it_finishes() {
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Succeeded;
+        a.review = Some(TaskReview {
+            mode: ReviewMode::Pause,
+            status: ReviewStatus::Pending,
+            provider: None,
+            model: None,
+            summary: None,
+            started_at: None,
+            finished_at: None,
+        });
+        let b = task("b", "/p", &["a"], Isolation::Worktree, None);
+        let st = state_with(vec![a, b], 3);
+
+        let (started, _) = dispatch(&st);
+        assert!(started.is_empty(), "dependent started before review finished");
+        assert_eq!(count(&st, TaskStatus::Waiting), 1);
+
+        // The dependent is released only once the review reaches a verdict.
+        st.inner.lock().unwrap().tasks[0].review.as_mut().unwrap().status =
+            ReviewStatus::Passed;
+        let (started, _) = dispatch(&st);
+        assert_eq!(started, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn interrupted_dependency_blocks_downstream() {
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Interrupted;
+        let b = task("b", "/p", &["a"], Isolation::Worktree, None);
+        let st = state_with(vec![a, b], 3);
+        dispatch(&st);
+        assert_eq!(count(&st, TaskStatus::Blocked), 1);
+        assert_eq!(count(&st, TaskStatus::Running), 0);
+    }
+
+    #[test]
     fn shared_tasks_in_same_project_are_serialized() {
         let st = state_with(
             vec![
@@ -1688,5 +2249,26 @@ mod tests {
         );
         let (started, _) = dispatch(&st);
         assert_eq!(started.len(), 2);
+    }
+
+    // ---- scheduler supervision (the app must never freeze if a tick breaks) ----
+
+    #[tokio::test]
+    async fn a_healthy_tick_completes_normally() {
+        assert!(supervised_tick(|| async {}).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tick_is_caught_and_reported() {
+        // Before the supervisor, a panic here silently ended the scheduler loop
+        // and every running task froze. It must now surface as an error and the
+        // caller's loop is free to keep ticking.
+        let result = supervised_tick(|| async { panic!("simulated tick failure") }).await;
+        assert!(
+            result.is_err_and(|e| e.contains("tick failed")),
+            "a panicking tick must be reported, not propagated"
+        );
+        // And the supervisor can run another tick afterwards.
+        assert!(supervised_tick(|| async {}).await.is_ok());
     }
 }

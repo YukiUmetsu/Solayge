@@ -30,6 +30,9 @@ export function Sidebar({
   const running = snapshot.tasks.filter((t) => t.status === "running").length;
   const done = snapshot.tasks.filter((t) => t.status === "succeeded").length;
   const failed = snapshot.tasks.filter((t) => t.status === "failed").length;
+  const interrupted = snapshot.tasks.filter(
+    (t) => t.status === "interrupted",
+  ).length;
   const { theme, toggle, pref } = useTheme();
   const now = useNow();
 
@@ -207,6 +210,12 @@ export function Sidebar({
             {failed} failed
           </div>
         )}
+        {interrupted > 0 && (
+          <div className="flex items-center gap-1.5 text-[11px] text-warning">
+            <Icon name="alert" className="h-3.5 w-3.5" />
+            {interrupted} interrupted
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -287,6 +296,19 @@ function ProjectStatus({ tasks, now }: { tasks: Task[]; now: number }) {
       >
         <Icon name="alert" className="h-3 w-3" />
         {blocked}
+      </span>
+    );
+  }
+
+  const interrupted = tasks.filter((t) => t.status === "interrupted").length;
+  if (interrupted > 0) {
+    return (
+      <span
+        className={`${chip} border-warning-line bg-warning-soft text-warning`}
+        title={`${interrupted} interrupted, retry to run again`}
+      >
+        <Icon name="alert" className="h-3 w-3" />
+        {interrupted}
       </span>
     );
   }

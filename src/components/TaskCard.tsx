@@ -32,7 +32,7 @@ export function TaskCard({
 }) {
   const meta = STATUS_META[task.status];
   const pm = PROFILE_META[task.profile] ?? PROFILE_META.autonomous;
-  const isTerminal = ["succeeded", "failed", "canceled", "blocked"].includes(
+  const isTerminal = ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
     task.status,
   );
   const canRun = ["draft", "waiting", "ready", "blocked"].includes(task.status);

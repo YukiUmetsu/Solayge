@@ -3,6 +3,7 @@ import type {
   AgentConfig,
   CacheStats,
   CommandTemplates,
+  EnvironmentStatus,
   PermissionProfile,
   SecretStore,
   Settings,
@@ -35,10 +36,12 @@ function formatBytes(bytes: number): string {
 
 export function SettingsModal({
   snapshot,
+  tools,
   onClose,
   onSaved,
 }: {
   snapshot: Snapshot;
+  tools: EnvironmentStatus | null;
   onClose: () => void;
   onSaved: (s: Snapshot) => void;
 }) {
@@ -220,6 +223,8 @@ export function SettingsModal({
             value={agent}
             onChange={patchAgent}
             disabled={busy}
+            tools={tools}
+            effectiveProvider={agent.provider ?? "opencode"}
           />
 
           <div className="space-y-3 rounded-lg border border-line bg-well p-3">

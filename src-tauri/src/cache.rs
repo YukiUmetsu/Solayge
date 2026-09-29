@@ -24,20 +24,14 @@ fn truncate(s: &str, max: usize) -> String {
 /// Remove prompt history and logs older than the retention window. A retention
 /// of `0` means "keep forever" (only the hard cap still applies).
 pub fn prune(st: &AppState) {
-    let days = st
-        .inner
-        .lock()
-        .map(|i| i.settings.cache_retention_days)
-        .unwrap_or(30);
+    let days = crate::state::lock(&st.inner).settings.cache_retention_days;
     if days <= 0 {
         return;
     }
     let cutoff = now() - days * 86_400;
 
     {
-        let Ok(mut inner) = st.inner.lock() else {
-            return;
-        };
+        let mut inner = crate::state::lock(&st.inner);
         inner.prompts.retain(|p| p.created_at >= cutoff);
         cap(&mut inner.prompts);
     }
@@ -55,11 +49,10 @@ fn cap(prompts: &mut Vec<PromptEntry>) {
 }
 
 fn prune_logs(st: &AppState, cutoff: i64) {
-    let running: std::collections::HashSet<String> = st
-        .running
-        .lock()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
+    let running: std::collections::HashSet<String> = crate::state::lock(&st.running)
+        .keys()
+        .cloned()
+        .collect();
     let Ok(entries) = std::fs::read_dir(st.logs_dir()) else {
         return;
     };
@@ -101,9 +94,7 @@ pub fn record_prompt(
     if text.is_empty() {
         return;
     }
-    let Ok(mut inner) = st.inner.lock() else {
-        return;
-    };
+    let mut inner = crate::state::lock(&st.inner);
     let existing = inner
         .prompts
         .iter_mut()
@@ -132,9 +123,7 @@ pub fn record_prompt(
 
 /// Most recently used prompts (optionally for one project), newest first.
 pub fn history(st: &AppState, project_path: Option<&str>, limit: Option<usize>) -> Vec<PromptEntry> {
-    let Ok(inner) = st.inner.lock() else {
-        return Vec::new();
-    };
+    let inner = crate::state::lock(&st.inner);
     let mut out: Vec<PromptEntry> = inner
         .prompts
         .iter()
@@ -150,14 +139,13 @@ pub fn history(st: &AppState, project_path: Option<&str>, limit: Option<usize>) 
 }
 
 pub fn stats(st: &AppState) -> CacheStats {
-    let (prompt_count, oldest_prompt, retention_days) = match st.inner.lock() {
-        Ok(inner) => (
-            inner.prompts.len(),
-            inner.prompts.iter().map(|p| p.created_at).min(),
-            inner.settings.cache_retention_days,
-        ),
-        Err(_) => (0, None, 0),
-    };
+    let inner = crate::state::lock(&st.inner);
+    let (prompt_count, oldest_prompt, retention_days) = (
+        inner.prompts.len(),
+        inner.prompts.iter().map(|p| p.created_at).min(),
+        inner.settings.cache_retention_days,
+    );
+    drop(inner);
 
     let mut log_count = 0usize;
     let mut log_bytes = 0u64;
@@ -186,17 +174,14 @@ pub fn stats(st: &AppState) -> CacheStats {
 /// Clear selected parts of the cache and return the fresh stats.
 pub fn clear(st: &AppState, prompts: bool, logs: bool) -> CacheStats {
     if prompts {
-        if let Ok(mut inner) = st.inner.lock() {
-            inner.prompts.clear();
-        }
+        crate::state::lock(&st.inner).prompts.clear();
         st.save();
     }
     if logs {
-        let running: std::collections::HashSet<String> = st
-            .running
-            .lock()
-            .map(|r| r.keys().cloned().collect())
-            .unwrap_or_default();
+        let running: std::collections::HashSet<String> = crate::state::lock(&st.running)
+            .keys()
+            .cloned()
+            .collect();
         if let Ok(entries) = std::fs::read_dir(st.logs_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();

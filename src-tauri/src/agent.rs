@@ -340,6 +340,51 @@ pub fn is_web_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Resolve an executable name on `PATH` (honoring `PATHEXT` on Windows), or
+/// accept an explicit path. Returns the resolved file, if any.
+pub fn which(name: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') || name.contains('\\') {
+        let p = Path::new(name);
+        return p.is_file().then(|| p.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")?;
+    let exts: Vec<String> = {
+        #[cfg(windows)]
+        {
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            let mut v = vec![String::new()];
+            v.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_string));
+            v
+        }
+        #[cfg(not(windows))]
+        {
+            vec![String::new()]
+        }
+    };
+
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &exts {
+            let candidate: PathBuf = if ext.is_empty() {
+                dir.join(name)
+            } else {
+                dir.join(format!("{name}{ext}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Open a project folder in the configured editor, falling back to the OS
 /// handler when the editor CLI is not installed. Returns the editor used.
 pub fn open_in_editor(path: &Path, editor: Option<&str>) -> Result<String, String> {

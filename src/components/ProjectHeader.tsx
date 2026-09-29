@@ -1,4 +1,5 @@
 import type {
+  EnvironmentStatus,
   GitStatus,
   PermissionProfile,
   Project,
@@ -15,6 +16,7 @@ export function ProjectHeader({
   running,
   resolved,
   remote,
+  tools,
   onNewTask,
   onPlan,
   onExecute,
@@ -26,6 +28,7 @@ export function ProjectHeader({
   onBranchDiff,
   onShip,
   onProjectSettings,
+  onCheckTools,
 }: {
   project: Project;
   status: GitStatus | null;
@@ -33,6 +36,7 @@ export function ProjectHeader({
   running: number;
   resolved: ResolvedConfig;
   remote: string | null;
+  tools: EnvironmentStatus | null;
   onNewTask: () => void;
   onPlan: () => void;
   onExecute: () => void;
@@ -44,15 +48,38 @@ export function ProjectHeader({
   onBranchDiff: () => void;
   onShip: () => void;
   onProjectSettings: () => void;
+  onCheckTools: () => void;
 }) {
   const total = tasks.length;
   const succeeded = tasks.filter((t) => t.status === "succeeded").length;
   const failed = tasks.filter((t) => t.status === "failed").length;
+  const interrupted = tasks.filter((t) => t.status === "interrupted").length;
   const drafts = tasks.filter((t) => t.status === "draft").length;
+  const retryable = tasks.filter((t) =>
+    ["failed", "canceled", "blocked", "interrupted"].includes(t.status),
+  ).length;
+  const runnable = drafts + retryable;
   const finished = tasks.filter((t) =>
-    ["succeeded", "failed", "canceled", "blocked"].includes(t.status),
+    ["succeeded", "failed", "canceled", "blocked", "interrupted"].includes(
+      t.status,
+    ),
   ).length;
   const pct = total === 0 ? 0 : Math.round((finished / total) * 100);
+
+  const providerTool = tools?.providers.find(
+    (p) => p.provider === resolved.provider,
+  );
+  let warning: string | null = null;
+  if (tools && !tools.git.found) {
+    warning =
+      "Git was not found on PATH — tasks can't run. Install git and restart the app.";
+  } else if (providerTool && !providerTool.found) {
+    warning = `The "${providerTool.command}" CLI for ${providerLabel(
+      resolved.provider,
+    )} was not found on PATH. Tasks will fail to launch with a "No such file or directory" error. Install it, or switch this project's provider (Project settings → Agent).`;
+  } else if (providerTool?.note) {
+    warning = providerTool.note;
+  }
 
   return (
     <div
@@ -129,17 +156,17 @@ export function ProjectHeader({
               Ship
             </button>
             <button
-              className={drafts > 0 ? "btn btn-primary" : "btn btn-ghost"}
+              className={runnable > 0 ? "btn btn-primary" : "btn btn-ghost"}
               onClick={onExecute}
-              disabled={drafts === 0}
+              disabled={runnable === 0}
               title={
-                drafts > 0
-                  ? `Run the ${drafts} draft task${drafts === 1 ? "" : "s"}`
-                  : "No draft tasks to run"
+                runnable > 0
+                  ? `Run ${drafts} draft${drafts === 1 ? "" : "s"} and retry ${retryable} failed/blocked task${retryable === 1 ? "" : "s"}`
+                  : "Nothing to run"
               }
             >
               <Icon name="play" className="h-3.5 w-3.5" />
-              Execute{drafts > 0 ? ` (${drafts})` : ""}
+              Execute{runnable > 0 ? ` (${runnable})` : ""}
             </button>
             <button className="btn btn-primary" onClick={onPlan}>
               <Icon name="sparkles" className="h-3.5 w-3.5" />
@@ -168,6 +195,21 @@ export function ProjectHeader({
         </div>
       </div>
 
+      {warning && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-warning-line bg-warning-soft px-3 py-2 text-[11.5px] leading-relaxed text-warning">
+          <Icon name="alert" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0 flex-1">{warning}</div>
+          <button
+            className="no-drag shrink-0 rounded p-0.5 transition hover:bg-ink-subtle-soft"
+            onClick={onCheckTools}
+            title="Re-check installed tools"
+            aria-label="Re-check installed tools"
+          >
+            <Icon name="refresh" className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       <div className="mt-4 flex items-center gap-4">
         <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-well">
           <div
@@ -181,6 +223,9 @@ export function ProjectHeader({
           <span className="text-success">{succeeded} done</span>
           {running > 0 && (
             <span className="text-warning">{running} running</span>
+          )}
+          {interrupted > 0 && (
+            <span className="text-warning">{interrupted} interrupted</span>
           )}
           {failed > 0 && <span className="text-danger">{failed} failed</span>}
           <span className="text-ink-subtle">{total} total</span>

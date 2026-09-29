@@ -71,6 +71,8 @@ Solayge turns that graph into something you can see and control:
   limit; the dependency graph is rendered as an indented tree.
 - **Drafts & Execute** — new tasks are drafts. Nothing starts until you press
   **Execute** (or start a single task); tasks with dependencies wait their turn.
+  Execute also re-queues failed, canceled, and blocked tasks, so you can retry as
+  often as you like.
 - **Separation per task** — an isolated **worktree**, a **new branch** (named by
   you or the agent), or the **current branch**.
 - **Task controls** — start now, cancel, retry, remove worktree, delete, clear
@@ -160,11 +162,19 @@ A task has a prompt (or a command), a **kind**, a **separation** mode, an option
 delay, and a `depends_on` list. Its status flows:
 
 ```
-draft → waiting → ready → running → succeeded | failed | canceled | blocked
+draft → waiting → ready → running → succeeded | failed | canceled | blocked | interrupted
 ```
 
 - **draft** — created, not yet released (the scheduler ignores it).
 - **blocked** — a dependency failed, or a conflict/review needs you.
+- **interrupted** — Solayge stopped while the task was running (crash, forced
+  quit, out of disk, or a stalled run). The task did not finish; **Retry** (or
+  **Execute**) runs it again, and the reason is written into its log. Nothing
+  downstream starts until an interrupted dependency is retried.
+
+A task that succeeds is not treated as "done" for its dependents until its
+automatic review (if enabled) has finished, so a review or auto-fix can never be
+overtaken by the next task.
 
 ### Separation
 
@@ -302,7 +312,8 @@ task is idempotent, so branches already merged report *"already up to date"*.
 
 With review enabled, a reviewer runs in the task's worktree after it succeeds and
 must end with `REVIEW: PASS` or `REVIEW: ISSUES: <summary>`. The verdict is stored
-on the task (a badge on the card, the full log on the **Review** tab). Modes:
+on the task (a badge on the card, the full log on the **Review** tab). Tasks that
+depend on it do not start until the review — and any auto-fix — has finished. Modes:
 
 - **Off** — no review.
 - **Review only** — record a verdict; never blocks.
@@ -336,7 +347,7 @@ A 1-second loop in the Rust core:
 
 1. **Reap** finished child processes and finalize their status.
 2. **Promote** waiting tasks to ready when all dependencies succeeded and the delay
-   has elapsed; mark them `blocked` if a dependency failed or was canceled.
+   has elapsed; mark them `blocked` if a dependency failed or was interrupted.
 3. **Dispatch** ready tasks in creation order while the running count is below the
    concurrency limit, serializing shared, git, and merge tasks per project.
 
@@ -346,20 +357,31 @@ and records the exit code. Integration (`merge`) tasks run a small orchestrator 
 drives one child process at a time and can hand conflicts or failing tests to an
 agent.
 
+**Recovery.** Each tick is supervised: a panic in one tick is logged to
+`logs/scheduler.log` and the loop keeps running. Locks are poison-tolerant, so one
+bad tick cannot wedge the app. Every run reports a heartbeat while its child is
+alive or its output is streaming; a run that goes silent is marked `interrupted`.
+On startup, any task left `running` is marked `interrupted` with a note in its log,
+and reviews left queued or running are re-run — so state after a crash or forced
+quit is never stuck. A new attempt appends to the log rather than truncating it, so
+the previous failure stays readable.
+
 ### Data
 
 - App state (projects, tasks, concurrency, settings, prompt cache): `state.json`
   in the platform app-data directory —
-  - macOS: `~/Library/Application Support/com.solayge.app/`
-  - Windows: `%APPDATA%\com.solayge.app\`
-  - Linux: `~/.local/share/com.solayge.app/`
+  - macOS: `~/Library/Application Support/com.solayge.desktop/`
+  - Windows: `%APPDATA%\com.solayge.desktop\`
+  - Linux: `~/.local/share/com.solayge.desktop/`
 - Per-task logs: `<app data dir>/logs/<task-id>.log`
+- Scheduler/crash log: `<app data dir>/logs/scheduler.log`
 - Worktrees: `<project>/.dev-tools/worktrees/<short-id>` (branch `devtools/<short-id>`)
 - Secrets: never in `state.json` — either the OS keychain (macOS/Windows) or
   `<app data dir>/secrets.json` (AES-256-GCM; key in `secrets.key`, mode `0600`)
 
-On first launch, if the new state is empty, the app imports the data folder from
-before the rename (`com.devtools.orchestrator`) so nothing is lost.
+On first launch, if the new state is empty, the app imports the data folder from a
+previous bundle identifier (`com.solayge.app`, or `com.devtools.orchestrator` before
+the rename) so nothing is lost.
 
 ### Planner output contract
 

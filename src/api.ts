@@ -3,6 +3,7 @@ import type {
   CacheStats,
   DiffResult,
   EnvValue,
+  EnvironmentStatus,
   GitStatus,
   Isolation,
   NewTask,
@@ -109,4 +110,7 @@ export const api = {
   // ---- provider models ----
   listModels: (provider: Provider, force = false) =>
     invoke<string[]>("list_models", { provider, force }),
+
+  // ---- preflight ----
+  environmentCheck: () => invoke<EnvironmentStatus>("environment_check"),
 };

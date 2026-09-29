@@ -33,3 +33,14 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# A Tauri dependency tree is large, and `target/debug` is dominated by debug
+# info and the incremental cache (tens of GB). Dropping debug info and the
+# incremental cache keeps it small; temporarily set `debug = true` and
+# `incremental = true` here if you need a debugger or faster edit/rebuild loops.
+[profile.dev]
+debug = false
+incremental = false
+
+[profile.dev.package."*"]
+debug = false

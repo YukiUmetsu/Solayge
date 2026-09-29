@@ -13,8 +13,38 @@ use tauri::Manager;
 
 use state::AppState;
 
+/// GUI apps on macOS/Linux are started with a minimal `PATH`, so CLIs the user
+/// installed via a shell (Homebrew, nvm, `~/.local/bin`, …) are invisible and
+/// tasks fail to launch with ENOENT. Ask the login shell for its `PATH` and adopt
+/// it. No-op on Windows (the system `PATH` is inherited normally).
+#[cfg(unix)]
+fn augment_path_from_login_shell() {
+    use std::process::Command;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let Ok(out) = Command::new(&shell)
+        .args(["-ilc", "printf '%s' \"$PATH\""])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Interactive shells may print extra lines; take the last PATH-looking one.
+    let path = stdout.lines().map(str::trim).rfind(|l| l.contains('/')).unwrap_or("");
+    if !path.is_empty() {
+        std::env::set_var("PATH", path);
+    }
+}
+
+#[cfg(not(unix))]
+fn augment_path_from_login_shell() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    augment_path_from_login_shell();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -60,6 +90,7 @@ pub fn run() {
             commands::get_project_secrets,
             commands::get_resolved_config,
             commands::get_review_log,
+            commands::environment_check,
             commands::list_models,
         ])
         .run(tauri::generate_context!())
