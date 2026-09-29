@@ -416,16 +416,26 @@ pub fn start_task_now(app: AppHandle, task_id: String) -> Result<Snapshot, Strin
     Ok(crate::state::snapshot(&app))
 }
 
+/// Mark a non-terminal task cancelled, forgetting any pending ask: the run is
+/// being torn down, so the question it was waiting on can no longer be answered.
+/// Returns whether the task changed. Pure, so the rule can be unit-tested.
+fn cancel_task_state(t: &mut Task) -> bool {
+    if t.status.is_terminal() {
+        return false;
+    }
+    t.status = TaskStatus::Canceled;
+    t.finished_at = Some(now());
+    t.ask = None;
+    true
+}
+
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
-            if !t.status.is_terminal() {
-                t.status = TaskStatus::Canceled;
-                t.finished_at = Some(now());
-            }
+            cancel_task_state(t);
         }
     }
     {
@@ -475,17 +485,21 @@ pub async fn answer_task(
     answer: serde_json::Value,
 ) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
-    let ask = {
+    let (ask, running) = {
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
-            .tasks
-            .iter()
-            .find(|t| t.id == task_id)
-            .and_then(|t| t.ask.clone())
+        match inner.tasks.iter().find(|t| t.id == task_id) {
+            Some(t) => (t.ask.clone(), t.can_answer_ask()),
+            None => (None, false),
+        }
     };
     let Some(ask) = ask else {
         return Err("this task has no pending question".into());
     };
+    // Refuse to reply once the task has stopped: the ask's session is gone (or
+    // belongs to a run that no longer exists), so the reply would go nowhere.
+    if !running {
+        return Err("this task is no longer waiting for an answer".into());
+    }
     let session = ask
         .session_id
         .clone()
@@ -1021,10 +1035,10 @@ pub async fn list_models(
 
 #[cfg(test)]
 mod tests {
-    use super::reset_for_rerun;
+    use super::{cancel_task_state, reset_for_rerun};
     use crate::models::{
-        BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskKind,
-        TaskReview, TaskStatus,
+        BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskAsk,
+        TaskKind, TaskReview, TaskStatus,
     };
 
     fn task(status: TaskStatus, isolation: Isolation) -> Task {
@@ -1063,6 +1077,16 @@ mod tests {
         }
     }
 
+    fn pending_ask() -> TaskAsk {
+        serde_json::from_value(serde_json::json!({
+            "id": "frm_1",
+            "kind": "question",
+            "title": "Which environment?",
+            "session_id": "ses_1"
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn reset_for_rerun_makes_an_interrupted_task_runnable_again() {
         let mut t = task(TaskStatus::Interrupted, Isolation::Worktree);
@@ -1073,6 +1097,8 @@ mod tests {
         t.started_at = Some(10);
         t.finished_at = Some(20);
         t.used_fallback = true;
+        // A leftover ask from the interrupted run must not survive the reset.
+        t.ask = Some(pending_ask());
         t.review = Some(TaskReview {
             mode: ReviewMode::Autofix,
             status: ReviewStatus::Running,
@@ -1093,6 +1119,7 @@ mod tests {
         // Worktree isolation gets a fresh worktree/branch on the next attempt.
         assert!(t.worktree_path.is_none());
         assert!(t.branch.is_none());
+        assert!(t.ask.is_none(), "the old run's ask must be forgotten");
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::None);
         assert!(r.summary.is_none() && r.finished_at.is_none());
@@ -1104,5 +1131,28 @@ mod tests {
         t.depends_on = vec!["dep".into()];
         reset_for_rerun(&mut t);
         assert_eq!(t.status, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn cancelling_a_running_task_clears_its_pending_ask() {
+        let mut t = task(TaskStatus::Running, Isolation::Worktree);
+        t.ask = Some(pending_ask());
+
+        assert!(cancel_task_state(&mut t));
+
+        assert_eq!(t.status, TaskStatus::Canceled);
+        assert!(t.finished_at.is_some());
+        assert!(t.ask.is_none(), "a cancelled run has no answerable ask");
+    }
+
+    #[test]
+    fn cancelling_a_terminal_task_is_a_no_op() {
+        let mut t = task(TaskStatus::Interrupted, Isolation::Worktree);
+        t.error = Some("Interrupted: ...".into());
+
+        assert!(!cancel_task_state(&mut t));
+
+        assert_eq!(t.status, TaskStatus::Interrupted);
+        assert_eq!(t.error.as_deref(), Some("Interrupted: ..."));
     }
 }

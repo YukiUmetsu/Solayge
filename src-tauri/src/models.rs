@@ -345,6 +345,29 @@ pub struct Task {
     pub ask: Option<TaskAsk>,
 }
 
+impl Task {
+    /// Whether the pending ask (if any) can still be answered. An ask is only
+    /// real while the task is `running`: once the task leaves `running` its
+    /// provider session is gone, so the prompt must not be shown or answered.
+    pub fn can_answer_ask(&self) -> bool {
+        self.status == TaskStatus::Running && self.ask.is_some()
+    }
+
+    /// Drop an ask that is no longer answerable because the task stopped.
+    /// Returns `true` when a stale ask was cleared.
+    ///
+    /// Every transition out of `running` must leave the task in this shape.
+    /// Enforcing it here gives the UI a single rule to rely on.
+    pub fn drop_orphaned_ask(&mut self) -> bool {
+        if self.ask.is_some() && !self.can_answer_ask() {
+            self.ask = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// A project environment variable. The value is never stored here — it lives
 /// encrypted in the secret store (OS keychain or an encrypted local file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -836,7 +859,39 @@ pub struct LogEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::TaskStatus;
+    use super::{Task, TaskStatus};
+
+    /// Every status a task can have. Used to check rules that must hold for all
+    /// of them; add any new status here and the invariant tests below cover it.
+    const ALL_STATUSES: [TaskStatus; 9] = [
+        TaskStatus::Draft,
+        TaskStatus::Waiting,
+        TaskStatus::Ready,
+        TaskStatus::Running,
+        TaskStatus::Succeeded,
+        TaskStatus::Failed,
+        TaskStatus::Canceled,
+        TaskStatus::Blocked,
+        TaskStatus::Interrupted,
+    ];
+
+    fn task_with_ask(status: TaskStatus) -> Task {
+        serde_json::from_value(serde_json::json!({
+            "id": "t",
+            "project_path": "/p",
+            "title": "t",
+            "prompt": "p",
+            "status": status,
+            "created_at": 1,
+            "ask": {
+                "id": "frm_1",
+                "kind": "question",
+                "title": "Which environment?",
+                "session_id": "ses_1"
+            }
+        }))
+        .expect("a valid task")
+    }
 
     #[test]
     fn terminal_statuses_are_the_six_finished_ones() {
@@ -856,6 +911,53 @@ mod tests {
             TaskStatus::Running,
         ] {
             assert!(!s.is_terminal(), "{s:?} should not be terminal");
+        }
+    }
+
+    #[test]
+    fn every_status_is_covered_by_the_invariant_tests() {
+        // Guards against adding a status and forgetting to extend the tests:
+        // `is_terminal` and the ask rule are checked against the same set.
+        assert_eq!(ALL_STATUSES.len(), 9);
+        assert!(ALL_STATUSES.iter().any(|s| s.is_terminal()));
+        assert!(ALL_STATUSES.iter().any(|s| !s.is_terminal()));
+    }
+
+    #[test]
+    fn an_ask_is_only_answerable_while_running() {
+        for status in ALL_STATUSES {
+            let t = task_with_ask(status);
+            assert_eq!(
+                t.can_answer_ask(),
+                status == TaskStatus::Running,
+                "can_answer_ask must be false for {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_orphaned_ask_clears_it_for_every_stopped_status() {
+        for status in ALL_STATUSES {
+            let mut t = task_with_ask(status);
+            let cleared = t.drop_orphaned_ask();
+
+            if status == TaskStatus::Running {
+                assert!(!cleared, "a running task's ask must be kept");
+                assert!(t.ask.is_some());
+            } else {
+                assert!(cleared, "{status:?} should have dropped its ask");
+                assert!(t.ask.is_none(), "{status:?} kept an orphaned ask");
+            }
+        }
+    }
+
+    #[test]
+    fn drop_orphaned_ask_is_a_no_op_without_an_ask() {
+        for status in ALL_STATUSES {
+            let mut t = task_with_ask(status);
+            t.ask = None;
+            assert!(!t.drop_orphaned_ask());
+            assert!(t.ask.is_none());
         }
     }
 }

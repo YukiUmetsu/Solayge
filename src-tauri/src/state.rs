@@ -195,12 +195,13 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
     let mut notes: Vec<(String, String)> = Vec::new();
 
     for t in state.tasks.iter_mut() {
+        // No provider session survives a restart, so every persisted ask is
+        // orphaned and must be dropped — including one already stuck on a task
+        // that a previous session marked interrupted. Leaving it would show a
+        // prompt that can never be answered.
+        let waiting = t.ask.take().is_some();
         if t.status == TaskStatus::Running {
-            let waiting = t.ask.is_some();
             t.status = TaskStatus::Interrupted;
-            // The provider session died with the app, so any pending question is
-            // gone too.
-            t.ask = None;
             // The last log write is the best estimate of when it actually died;
             // falling back to now would overstate the run's duration.
             let died = last_log_time(data_dir, &t.id)
@@ -216,6 +217,9 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
             });
             changed = true;
             notes.push((format!("{}.log", t.id), t.error.clone().unwrap_or_default()));
+        } else if waiting {
+            // A finished task had a stale ask; dropping it is the only change.
+            changed = true;
         }
     }
     for t in state.tasks.iter_mut() {
@@ -266,17 +270,28 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn snapshot(app: &AppHandle) -> Snapshot {
-    let st = app.state::<AppState>();
-    let inner = lock(&st.inner);
-    let running = lock(&st.running).len();
+/// Build the snapshot the UI renders, dropping any ask that belongs to a task
+/// which is no longer `running`. Sanitizing the copy here means a transition
+/// that forgets to clear its ask still cannot surface an unanswerable prompt.
+fn snapshot_of(inner: &PersistedState, running: usize) -> Snapshot {
+    let mut tasks = inner.tasks.clone();
+    for t in &mut tasks {
+        t.drop_orphaned_ask();
+    }
     Snapshot {
         projects: inner.projects.clone(),
-        tasks: inner.tasks.clone(),
+        tasks,
         concurrency: inner.concurrency,
         running,
         settings: inner.settings.clone(),
     }
+}
+
+pub fn snapshot(app: &AppHandle) -> Snapshot {
+    let st = app.state::<AppState>();
+    let inner = lock(&st.inner);
+    let running = lock(&st.running).len();
+    snapshot_of(&inner, running)
 }
 
 #[cfg(test)]
@@ -469,6 +484,61 @@ mod tests {
         assert!(!recover_interrupted(&root, &mut state));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recovery_drops_an_orphaned_ask_from_a_finished_task() {
+        // Upgrading from a build where an interrupted task kept its ask: the
+        // ask's session is long gone, so recovery must clear it.
+        let root = std::env::temp_dir().join(format!("solayge-recover3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state: PersistedState = serde_json::from_str(
+            r#"{"tasks":[
+                {"id":"int","project_path":"/p","title":"a","prompt":"p","status":"interrupted","created_at":1,
+                 "ask":{"id":"frm_1","kind":"question","title":"Which env?","session_id":"ses_1"}},
+                {"id":"cancel","project_path":"/p","title":"b","prompt":"p","status":"canceled","created_at":2,
+                 "ask":{"id":"per_1","kind":"permission","title":"Permission: bash","session_id":"ses_1"}}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert!(recover_interrupted(&root, &mut state));
+        assert!(state.tasks[0].ask.is_none(), "interrupted ask must be dropped");
+        assert!(state.tasks[1].ask.is_none(), "canceled ask must be dropped");
+        // Only the unanswerable ask is removed; the statuses are left alone.
+        assert_eq!(state.tasks[0].status, TaskStatus::Interrupted);
+        assert_eq!(state.tasks[1].status, TaskStatus::Canceled);
+
+        // Idempotent once the asks are gone.
+        assert!(!recover_interrupted(&root, &mut state));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn snapshot_never_exposes_an_ask_on_a_stopped_task() {
+        // Belt-and-suspenders for the UI contract: even if some transition fails
+        // to clear an ask, the snapshot the UI sees must not contain it.
+        let mut state = PersistedState::default();
+        state.tasks = serde_json::from_value::<Vec<crate::models::Task>>(serde_json::json!([
+            {"id":"run","project_path":"/p","title":"a","prompt":"p","status":"running","created_at":1,
+             "ask":{"id":"f1","kind":"question","title":"q","session_id":"ses_1"}},
+            {"id":"int","project_path":"/p","title":"b","prompt":"p","status":"interrupted","created_at":2,
+             "ask":{"id":"f2","kind":"question","title":"q","session_id":"ses_1"}},
+            {"id":"done","project_path":"/p","title":"c","prompt":"p","status":"succeeded","created_at":3,
+             "ask":{"id":"f3","kind":"permission","title":"p","session_id":"ses_1"}}
+        ]))
+        .unwrap();
+
+        let snap = snapshot_of(&state, 1);
+        let has_ask =
+            |id: &str| snap.tasks.iter().find(|t| t.id == id).unwrap().ask.is_some();
+
+        assert!(has_ask("run"), "a running task keeps its ask");
+        assert!(!has_ask("int"), "an interrupted task must not expose an ask");
+        assert!(!has_ask("done"), "a succeeded task must not expose an ask");
+        // Only the snapshot copy is sanitized; the persisted state is untouched.
+        assert!(state.tasks[1].ask.is_some());
     }
 
     #[test]

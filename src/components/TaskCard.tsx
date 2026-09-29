@@ -143,7 +143,9 @@ export function TaskCard({
                 {reviewMeta.label}
               </span>
             )}
-            {task.ask && (
+            {/* An ask is only real while the task is running; a stale one (e.g.
+                left by an interrupted run) must not advertise "needs input". */}
+            {task.status === "running" && task.ask && (
               <span
                 className="flex items-center gap-1 text-warning"
                 title={task.ask.title}

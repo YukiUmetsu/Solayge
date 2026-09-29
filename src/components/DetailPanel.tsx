@@ -127,7 +127,9 @@ export function DetailPanel({
         </button>
       </div>
 
-      {task?.ask && <AskPanel task={task} />}
+      {/* Only a running task can accept an answer; a leftover ask on an
+          interrupted or canceled task would render buttons that cannot work. */}
+      {task?.status === "running" && task.ask && <AskPanel task={task} />}
 
       {!task && tab !== "worktrees" ? (
         <EmptyDetail />

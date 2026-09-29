@@ -88,26 +88,39 @@ fn record_scheduler_error(app: &AppHandle, message: &str) {
     notify(app, "Solayge", message);
 }
 
+/// Move a task out of `running` into `interrupted`, forgetting any pending ask.
+///
+/// The provider session that would answer the ask dies with the run, so leaving
+/// it set would show a prompt the user cannot answer. Returns the task title if
+/// it was running, or `None` when it was already stopped.
+fn mark_interrupted(t: &mut Task, reason: &str, finished_at: i64) -> Option<String> {
+    if t.status != TaskStatus::Running {
+        return None;
+    }
+    t.status = TaskStatus::Interrupted;
+    t.error = Some(reason.to_string());
+    t.finished_at = Some(finished_at);
+    t.ask = None;
+    Some(t.title.clone())
+}
+
 /// Mark the given task interrupted and explain why in its log.
 fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
     let st = app.state::<AppState>();
-    let mut title: Option<String> = None;
-    {
+    let title = {
         let mut inner = crate::state::lock(&st.inner);
-        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
-            if t.status != TaskStatus::Running {
-                return;
-            }
-            t.status = TaskStatus::Interrupted;
-            t.error = Some(reason.to_string());
-            t.finished_at = Some(
-                last_activity(app, id)
-                    .or(t.started_at)
-                    .unwrap_or_else(now),
-            );
-            title = Some(t.title.clone());
-        }
-    }
+        inner.tasks.iter_mut().find(|t| t.id == id).and_then(|t| {
+            let finished_at = last_activity(app, id)
+                .or(t.started_at)
+                .unwrap_or_else(now);
+            mark_interrupted(t, reason, finished_at)
+        })
+    };
+    // Only a task that was actually running is ours to finalize; a task already
+    // stopped must not have its (now unrelated) children killed again.
+    let Some(title) = title else {
+        return;
+    };
     // Drop any half-registered child so it cannot be reaped as this task.
     if let Some(mut child) = crate::state::lock(&st.running).remove(id) {
         let _ = child.start_kill();
@@ -119,9 +132,7 @@ fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
     log_note(app, id, &format!("Interrupted: {reason}"));
     st.save();
     emit_state(app);
-    if let Some(title) = title {
-        notify(app, "Solayge needs you", &format!("{title} was interrupted"));
-    }
+    notify(app, "Solayge needs you", &format!("{title} was interrupted"));
 }
 
 /// Which running tasks and running reviews have gone silent. Pure so it can be
@@ -1163,7 +1174,9 @@ fn queue_review(app: &AppHandle, id: &str) {
     }
 }
 
-/// True when the task was cancelled (blocked-for-input does not stop the loop).
+/// True when the task has left `running` (cancelled, interrupted, finished) and
+/// the polling loop should stop. Waiting for input does not stop it: the task
+/// stays `running` while an ask is pending.
 fn opencode_stopped(app: &AppHandle, id: &str) -> bool {
     let st = app.state::<AppState>();
     let inner = crate::state::lock(&st.inner);
@@ -1171,7 +1184,7 @@ fn opencode_stopped(app: &AppHandle, id: &str) -> bool {
         .tasks
         .iter()
         .find(|t| t.id == id)
-        .map(|t| t.status == TaskStatus::Canceled)
+        .map(|t| t.status != TaskStatus::Running)
         .unwrap_or(true)
 }
 
@@ -1191,11 +1204,20 @@ fn task_has_ask(app: &AppHandle, id: &str) -> bool {
 fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
     let st = app.state::<AppState>();
     let title = ask.title.clone();
-    {
+    let attached = {
         let mut inner = crate::state::lock(&st.inner);
-        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
-            t.ask = Some(ask);
+        match inner.tasks.iter_mut().find(|t| t.id == id) {
+            // Never arm an ask on a task that already left `running`: the prompt
+            // would be unanswerable and linger after the task stops.
+            Some(t) if t.status == TaskStatus::Running => {
+                t.ask = Some(ask);
+                true
+            }
+            _ => false,
         }
+    };
+    if !attached {
+        return;
     }
     log_note(app, id, &format!("Waiting for you: {title}"));
     st.save();
@@ -2150,13 +2172,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_heartbeat_ids, choose_branch, dispatch, now, resolve_named_branch, review_clear,
-        reviews_to_start, stall_sweep, supervised_tick, BranchChoice,
+        active_heartbeat_ids, choose_branch, dispatch, mark_interrupted, now,
+        resolve_named_branch, review_clear, reviews_to_start, stall_sweep, supervised_tick,
+        BranchChoice,
     };
     use std::path::Path;
     use crate::models::{
-        BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskKind,
-        TaskReview, TaskStatus,
+        AskKind, BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task,
+        TaskAsk, TaskKind, TaskReview, TaskStatus,
     };
     use crate::state::AppState;
 
@@ -2435,6 +2458,48 @@ mod tests {
         let sweep = stall_sweep(&tasks, &hb, now, 1_000);
         assert!(sweep.tasks.is_empty());
         assert_eq!(sweep.reviews, vec!["b".to_string()]);
+    }
+
+    fn pending_ask() -> TaskAsk {
+        TaskAsk {
+            id: "frm_1".into(),
+            kind: AskKind::Question,
+            title: "Which environment?".into(),
+            message: None,
+            fields: Vec::new(),
+            options: Vec::new(),
+            session_id: Some("ses_1".into()),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn interrupting_a_task_forgets_its_pending_ask() {
+        // A running task that was waiting on an answer is interrupted (e.g. the
+        // stall watchdog). Its session is gone, so the ask must be dropped or the
+        // UI keeps offering an unanswerable prompt.
+        let mut t = running("t", Some(1));
+        t.ask = Some(pending_ask());
+
+        let title = mark_interrupted(&mut t, "stalled", 42);
+
+        assert_eq!(title.as_deref(), Some("t"));
+        assert_eq!(t.status, TaskStatus::Interrupted);
+        assert_eq!(t.finished_at, Some(42));
+        assert_eq!(t.error.as_deref(), Some("stalled"));
+        assert!(t.ask.is_none(), "the dead session's ask must not linger");
+    }
+
+    #[test]
+    fn interrupting_an_already_stopped_task_is_a_no_op() {
+        let mut t = task("t", "/p", &[], Isolation::Worktree, None);
+        t.status = TaskStatus::Failed;
+        t.error = Some("boom".into());
+
+        assert_eq!(mark_interrupted(&mut t, "stalled", 42), None);
+        assert_eq!(t.status, TaskStatus::Failed);
+        assert_eq!(t.error.as_deref(), Some("boom"));
+        assert_eq!(t.finished_at, None);
     }
 
     #[test]
