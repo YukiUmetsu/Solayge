@@ -497,6 +497,32 @@ pub async fn fetch_models(provider: Provider) -> Vec<String> {
     Vec::new()
 }
 
+/// The provider and model an auto-review should use.
+///
+/// An explicitly configured reviewer (project, then account) wins. Otherwise
+/// the review runs with the same provider and model as the task it reviews, so
+/// it is covered by the same account and subscription instead of the provider
+/// picking a default model — which can be on a different, unfunded account.
+pub fn resolve_reviewer(
+    project: Option<&Project>,
+    settings: &Settings,
+    task_provider: Option<Provider>,
+    task_model: Option<&str>,
+) -> (Provider, Option<String>) {
+    let explicit_provider = project
+        .and_then(|p| p.review_provider)
+        .or(settings.review_provider);
+    let explicit_model = project
+        .and_then(|p| p.review_model.clone())
+        .or_else(|| settings.review_model.clone());
+    let provider = explicit_provider
+        .or(task_provider)
+        .or(settings.provider)
+        .unwrap_or(Provider::Opencode);
+    let model = explicit_model.or_else(|| task_model.map(str::to_string));
+    (provider, model)
+}
+
 /// Merge a project's agent config over the account defaults.
 pub fn resolve(project: Option<&Project>, settings: &Settings) -> ResolvedConfig {
     let provider = project
@@ -512,13 +538,8 @@ pub fn resolve(project: Option<&Project>, settings: &Settings) -> ResolvedConfig
     let fallback_model = project
         .and_then(|p| p.fallback_model.clone())
         .or_else(|| settings.fallback_model.clone());
-    let review_provider = project
-        .and_then(|p| p.review_provider)
-        .or(settings.review_provider)
-        .unwrap_or(provider);
-    let review_model = project
-        .and_then(|p| p.review_model.clone())
-        .or_else(|| settings.review_model.clone());
+    let (review_provider, review_model) =
+        resolve_reviewer(project, settings, Some(provider), model.as_deref());
     let review_mode = project
         .and_then(|p| p.review_mode)
         .unwrap_or(settings.review_mode);
@@ -666,5 +687,46 @@ mod tests {
         assert!(!is_web_url("git@github.com:a/b"));
         assert!(!is_web_url("-a Calculator"));
         assert!(!is_web_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn a_reviewer_inherits_the_task_model_when_unset() {
+        let settings = Settings {
+            model: Some("opencode-go/deepseek-v4.1-flash".into()),
+            ..Default::default()
+        };
+        let r = resolve(None, &settings);
+        assert_eq!(
+            r.review_model.as_deref(),
+            Some("opencode-go/deepseek-v4.1-flash"),
+            "an unset reviewer must not leave the provider to pick a default model"
+        );
+        assert_eq!(r.review_provider, Provider::Opencode);
+    }
+
+    #[test]
+    fn an_explicit_reviewer_model_still_wins() {
+        let settings = Settings {
+            model: Some("opencode-go/deepseek-v4.1-flash".into()),
+            review_model: Some("opencode-go/gpt-6-luna".into()),
+            ..Default::default()
+        };
+        let r = resolve(None, &settings);
+        assert_eq!(r.review_model.as_deref(), Some("opencode-go/gpt-6-luna"));
+    }
+
+    #[test]
+    fn a_reviewer_falls_back_to_the_tasks_own_model() {
+        // Live resolution at review time: the task's snapshot is the fallback,
+        // so an existing task reviews with the same account it ran on.
+        let settings = Settings::default();
+        let (provider, model) = resolve_reviewer(
+            None,
+            &settings,
+            Some(Provider::Opencode),
+            Some("opencode-go/deepseek-v4.1-flash"),
+        );
+        assert_eq!(provider, Provider::Opencode);
+        assert_eq!(model.as_deref(), Some("opencode-go/deepseek-v4.1-flash"));
     }
 }

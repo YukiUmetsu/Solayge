@@ -278,14 +278,66 @@ pub fn session_outcome(messages: &[Value]) -> Option<String> {
     })
 }
 
-/// A short human-readable line for one streamed message part, or `None` for
-/// internal/structural messages.
-pub fn part_line(message: &Value) -> Option<String> {
-    let ty = message.get("type").and_then(Value::as_str)?;
-    if ty != "assistant" {
-        return None;
+/// Collapse whitespace so a tool line stays a single line.
+fn one_line(s: &str) -> String {
+    let mut out = String::new();
+    let mut space = false;
+    for ch in s.chars() {
+        let c = if ch.is_whitespace() { ' ' } else { ch };
+        if c == ' ' {
+            if space {
+                continue;
+            }
+            space = true;
+        } else {
+            space = false;
+        }
+        out.push(c);
     }
-    let content = message.get("content").and_then(Value::as_array)?;
+    out.trim().to_string()
+}
+
+/// Cap a string at `max` characters, marking the cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// What a tool part acted on (the command, file, or query), so the log says
+/// more than just the tool's name.
+fn tool_target(name: &str, input: &Value) -> Option<String> {
+    let field = |key: &str| input.get(key).and_then(Value::as_str);
+    match name {
+        "shell" | "bash" => field("command").map(str::to_string),
+        "read" | "write" | "edit" | "patch" => field("path").map(str::to_string),
+        "grep" => {
+            let pattern = field("pattern").unwrap_or_default();
+            let scope = field("path").or_else(|| field("include"));
+            Some(match scope {
+                Some(s) => format!("/{pattern}/ in {s}"),
+                None => format!("/{pattern}/"),
+            })
+        }
+        "glob" | "list" => field("pattern").map(str::to_string),
+        "webfetch" | "fetch" => field("url").map(str::to_string),
+        "task" | "agent" => field("description").map(str::to_string),
+        _ => None,
+    }
+}
+
+/// One short line per useful part of an assistant message: its text, or a tool
+/// call with what it acted on. Structural parts are skipped.
+pub fn part_lines(message: &Value) -> Vec<String> {
+    if message.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    let Some(content) = message.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for part in content {
         match part.get("type").and_then(Value::as_str) {
@@ -298,21 +350,45 @@ pub fn part_line(message: &Value) -> Option<String> {
             }
             Some("tool") => {
                 let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
-                let status = part
-                    .get("state")
+                let state = part.get("state");
+                let status = state
                     .and_then(|s| s.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                out.push(format!("[tool] {name} {status}").trim_end().to_string());
+                let input = state.and_then(|s| s.get("input")).cloned().unwrap_or(Value::Null);
+                let mut line = format!("[tool] {name}");
+                if let Some(target) = tool_target(name, &input).filter(|t| !t.trim().is_empty()) {
+                    line.push_str(": ");
+                    line.push_str(&clip(&one_line(&target), 160));
+                }
+                // "running" status is implied; only surface unusual states.
+                if !status.is_empty() && status != "completed" && status != "running" {
+                    line.push_str(&format!(" ({status})"));
+                }
+                out.push(line);
             }
             _ => {}
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out.join("\n"))
-    }
+    out
+}
+
+/// The agent's final assistant message as markdown text, if any. Used as the
+/// task's "result" so it can be rendered and re-read later.
+pub fn final_text(messages: &[Value]) -> Option<String> {
+    messages.iter().rev().find_map(|m| {
+        if m.get("type").and_then(Value::as_str) != Some("assistant") {
+            return None;
+        }
+        let content = m.get("content").and_then(Value::as_array)?;
+        let text = content
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!text.trim().is_empty()).then_some(text)
+    })
 }
 
 fn field_kind(s: &str) -> Option<AskFieldKind> {
@@ -497,8 +573,56 @@ mod tests {
             {"type":"text","text":"Hello"},
             {"type":"tool","name":"bash","state":{"status":"completed"}}
         ]});
-        let line = part_line(&msg).unwrap();
-        assert!(line.contains("Hello"));
-        assert!(line.contains("[tool] bash completed"));
+        let lines = part_lines(&msg);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Hello");
+        assert_eq!(lines[1], "[tool] bash");
+    }
+
+    #[test]
+    fn tool_lines_name_what_the_tool_acted_on() {
+        let msg = json!({"type":"assistant","content":[
+            {"type":"tool","name":"read","state":{"status":"completed",
+             "input":{"path":"src/main.rs"}}},
+            {"type":"tool","name":"shell","state":{"status":"completed",
+             "input":{"command":"pnpm test\n--watch"}}},
+            {"type":"tool","name":"grep","state":{"status":"completed",
+             "input":{"pattern":"TODO","include":"*.rs"}}},
+            {"type":"tool","name":"edit","state":{"status":"error",
+             "input":{"path":"src/lib.rs"}}}
+        ]});
+        let lines = part_lines(&msg);
+        assert_eq!(lines[0], "[tool] read: src/main.rs");
+        // The command is collapsed onto one line.
+        assert_eq!(lines[1], "[tool] shell: pnpm test --watch");
+        assert_eq!(lines[2], "[tool] grep: /TODO/ in *.rs");
+        // An unusual status is surfaced.
+        assert_eq!(lines[3], "[tool] edit: src/lib.rs (error)");
+    }
+
+    #[test]
+    fn ignores_non_assistant_messages() {
+        assert!(part_lines(&json!({"type":"idle","outcome":"succeeded"})).is_empty());
+    }
+
+    #[test]
+    fn reads_the_final_assistant_text_as_the_result() {
+        let msgs = vec![
+            json!({"type":"assistant","content":[{"type":"text","text":"Working on it"}]}),
+            json!({"type":"assistant","content":[
+                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"}}}
+            ]}),
+            json!({"type":"assistant","content":[{"type":"text","text":"# Done\n\nAll good."}]}),
+        ];
+        assert_eq!(final_text(&msgs).as_deref(), Some("# Done\n\nAll good."));
+    }
+
+    #[test]
+    fn no_final_text_when_there_is_none() {
+        assert_eq!(final_text(&[]), None);
+        assert_eq!(
+            final_text(&[json!({"type":"assistant","content":[]})]),
+            None
+        );
     }
 }

@@ -234,6 +234,8 @@ export interface Task {
   new_branch?: string | null;
   /** A question/permission the agent is waiting on, if any. */
   ask?: TaskAsk | null;
+  /** The agent's final markdown summary, rendered in the Result tab. */
+  result?: string | null;
 }
 
 export interface Project {

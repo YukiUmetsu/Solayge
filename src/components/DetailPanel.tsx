@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { AskField, DiffResult, Project, Task, TaskAsk, Worktree } from "../types";
 import { api } from "../api";
@@ -15,7 +15,9 @@ import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
 
-type Tab = "logs" | "diff" | "worktrees" | "review" | "details";
+type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
+
+const ResultView = lazy(() => import("./ResultView"));
 
 export function DetailPanel({
   task,
@@ -87,6 +89,13 @@ export function DetailPanel({
 
   const tabs: [Tab, string, Parameters<typeof Icon>[0]["name"]][] = [
     ["logs", "Logs", "terminal"],
+    ...(task?.result
+      ? ([["result", "Result", "sparkles"]] as [
+          Tab,
+          string,
+          Parameters<typeof Icon>[0]["name"],
+        ][])
+      : []),
     ["diff", "Diff", "diff"],
     ["worktrees", "Worktrees", "branch"],
     ...(task?.review && task.review.mode !== "off"
@@ -139,6 +148,16 @@ export function DetailPanel({
         <div className="flex min-h-0 flex-1 flex-col">
           {tab === "logs" && (
             <LogsView task={task} logs={logs} logRef={logRef} now={now} />
+          )}
+
+          {tab === "result" && task && (
+            <Suspense
+              fallback={
+                <div className="p-4 text-xs text-ink-subtle">Loading…</div>
+              }
+            >
+              <ResultView task={task} />
+            </Suspense>
           )}
 
           {tab === "diff" && (

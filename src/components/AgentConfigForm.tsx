@@ -250,7 +250,10 @@ export function AgentConfigForm({
               inheritLabel={inheritLabel}
             />
           </Field>
-          <Field label="Reviewer model">
+          <Field
+            label="Reviewer model"
+            hint="Leave blank to review with the task's model."
+          >
             <ModelField
               provider={value.review_provider ?? value.provider}
               value={value.review_model}

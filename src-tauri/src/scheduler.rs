@@ -651,11 +651,29 @@ async fn reset_log(path: &Path) {
     let existing = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
     if existing > 0 {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path).await {
-            let sep = format!("\n[Solayge] ---- new attempt (unix {}) ----\n", now());
+            let sep = format!(
+                "\n[Solayge] ---- new attempt: {} ----\n",
+                local_clock(now(), None)
+            );
             let _ = f.write_all(sep.as_bytes()).await;
         }
     } else {
         let _ = tokio::fs::write(path, b"").await;
+    }
+}
+
+/// Append a `[Solayge]` line to a task's reviewer log, with a gap timestamp.
+async fn review_note(app: &AppHandle, id: &str, message: &str) {
+    use tokio::io::AsyncWriteExt as _;
+    let stamp = log_stamp(app, &format!("review-{id}"));
+    let path = {
+        let st = app.state::<AppState>();
+        st.review_log_path(id)
+    };
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path).await {
+        let _ = f
+            .write_all(format!("{stamp}[Solayge] {message}\n").as_bytes())
+            .await;
     }
 }
 
@@ -668,26 +686,88 @@ async fn init_log(app: &AppHandle, id: &str) {
     reset_log(&log_path).await;
 }
 
-/// Append a `[Solayge]` line to the task log and stream it to the UI.
-fn log_note(app: &AppHandle, id: &str, message: &str) {
+/// Seconds of quiet after which the next log line is stamped with the time, so
+/// long pauses stand out without stamping every line.
+const LOG_STAMP_GAP_SECS: i64 = 30;
+
+/// A compact local-time prefix for the next log line, or empty when the previous
+/// line was recent. Keyed by task id, or `review-<id>` for reviewer logs.
+fn log_stamp(app: &AppHandle, key: &str) -> String {
+    let st = app.state::<AppState>();
+    let now = now();
+    let previous = crate::state::lock(&st.log_stamp).insert(key.to_string(), now);
+    if previous.is_some_and(|p| now - p < LOG_STAMP_GAP_SECS) {
+        return String::new();
+    }
+    format!("{} ", local_clock(now, previous))
+}
+
+/// `HH:MM:SS`, prefixed with `MM-DD ` when the calendar day changed since the
+/// previous stamp (and on the first line of a log). No year or sub-second noise.
+fn local_clock(secs: i64, previous: Option<i64>) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(dt) = Local.timestamp_opt(secs, 0).single() else {
+        return secs.to_string();
+    };
+    let show_date = previous
+        .and_then(|p| Local.timestamp_opt(p, 0).single())
+        .is_none_or(|prev| prev.date_naive() != dt.date_naive());
+    if show_date {
+        dt.format("%m-%d %H:%M:%S").to_string()
+    } else {
+        dt.format("%H:%M:%S").to_string()
+    }
+}
+
+/// Append one line to a task's log and stream it to the UI. `[Solayge]` marks
+/// messages the app itself generates, so agent output is not mistaken for one;
+/// a timestamp is prepended only after a quiet gap.
+fn write_log(app: &AppHandle, id: &str, line: &str, note: bool) {
     use std::io::Write;
-    let line = format!("[Solayge] {message}");
+    let body = if note {
+        format!("[Solayge] {line}")
+    } else {
+        line.to_string()
+    };
+    let rendered = format!("{}{body}", log_stamp(app, id));
     let st = app.state::<AppState>();
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(st.log_path(id))
     {
-        let _ = writeln!(f, "{line}");
+        let _ = writeln!(f, "{rendered}");
     }
     let _ = app.emit(
         "task://log",
         LogEvent {
             task_id: id.to_string(),
-            stream: "solayge".to_string(),
-            line,
+            stream: if note { "solayge" } else { "agent" }.to_string(),
+            line: rendered,
         },
     );
+}
+
+/// An app-generated note in the task log.
+fn log_note(app: &AppHandle, id: &str, message: &str) {
+    write_log(app, id, message, true);
+}
+
+/// Agent output streamed into the task log.
+fn log_agent(app: &AppHandle, id: &str, line: &str) {
+    write_log(app, id, line, false);
+}
+
+/// Store the agent's final markdown summary as the task's result.
+fn set_task_result(app: &AppHandle, id: &str, markdown: String) {
+    let st = app.state::<AppState>();
+    {
+        let mut inner = crate::state::lock(&st.inner);
+        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+            t.result = Some(markdown);
+        }
+    }
+    st.save();
 }
 
 /// When this task's log was last written, as unix seconds. Best-effort.
@@ -728,6 +808,13 @@ fn prune_heartbeat(app: &AppHandle) {
     };
     let mut beat = crate::state::lock(&st.heartbeat);
     beat.retain(|id, _| active.contains(id));
+    // Bound the timestamp map the same way: keep a review's key only while its
+    // task is active, so it cannot leak or be re-stamped every tick.
+    let mut stamps = crate::state::lock(&st.log_stamp);
+    stamps.retain(|key, _| match key.strip_prefix("review-") {
+        Some(task) => active.contains(task),
+        None => active.contains(key),
+    });
 }
 
 /// Spawn a child, stream its output to the task log, and register it so it can
@@ -1081,8 +1168,8 @@ async fn start_opencode_loop(
             if id.is_empty() || !logged.insert(id.to_string()) {
                 continue;
             }
-            if let Some(line) = opencode_server::part_line(m) {
-                log_note(&app, &run.id, &line);
+            for line in opencode_server::part_lines(m) {
+                log_agent(&app, &run.id, &line);
             }
         }
 
@@ -1133,6 +1220,11 @@ async fn start_opencode_loop(
         if let Some(outcome) = opencode_server::session_outcome(&msgs) {
             clear_task_ask(&app, &run.id);
             let ok = outcome == "succeeded";
+            // Save the agent's final message as the task result, whether it
+            // succeeded or stopped, so it can be re-read in its own tab.
+            if let Some(summary) = opencode_server::final_text(&msgs) {
+                set_task_result(&app, &run.id, summary);
+            }
             if ok {
                 // Queue the auto review, matching the CLI path's `finalize`.
                 queue_review(&app, &run.id);
@@ -1839,7 +1931,7 @@ async fn start_merge_task(app: AppHandle, run: TaskRun) {
 
 /// Run the auto code review for a finished task.
 async fn start_review(app: AppHandle, id: String) {
-    let (cwd, title, task_prompt, mode, provider, model, project) = {
+    let (cwd, title, task_prompt, mode, project, task_provider, task_model) = {
         let st = app.state::<AppState>();
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(t) = inner.tasks.iter().find(|t| t.id == id) else {
@@ -1862,11 +1954,33 @@ async fn start_review(app: AppHandle, id: String) {
             t.title.clone(),
             t.prompt.clone(),
             r.mode,
-            r.provider.unwrap_or(Provider::Opencode),
-            r.model.clone(),
             t.project_path.clone(),
+            t.provider,
+            t.model.clone(),
         )
     };
+
+    // Resolve the reviewer from the *current* project/account config, falling
+    // back to this task's own provider and model. Resolving live (instead of
+    // trusting the values snapshotted at creation) means a reviewer fix reaches
+    // tasks that already exist, and a review never silently runs on a different
+    // model-provider/account than the task it is reviewing.
+    let (provider, model) = {
+        let st = app.state::<AppState>();
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let proj = inner.projects.iter().find(|p| p.path == project);
+        agent::resolve_reviewer(proj, &inner.settings, task_provider, task_model.as_deref())
+    };
+    {
+        let st = app.state::<AppState>();
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+            if let Some(r) = t.review.as_mut() {
+                r.provider = Some(provider);
+                r.model = model.clone();
+            }
+        }
+    }
 
     let templates = {
         let st = app.state::<AppState>();
@@ -1886,6 +2000,17 @@ async fn start_review(app: AppHandle, id: String) {
     };
     let _ = tokio::fs::create_dir_all(&logs_dir).await;
     reset_log(&log_path).await;
+    // Record exactly which model is reviewing, so a provider/account mismatch is
+    // visible in the log instead of only as a provider error.
+    let model_label = model
+        .clone()
+        .unwrap_or_else(|| "provider default".to_string());
+    review_note(
+        &app,
+        &id,
+        &format!("reviewing with {} · {model_label}", provider.command_key()),
+    )
+    .await;
 
     {
         let st = app.state::<AppState>();
@@ -2085,8 +2210,9 @@ where
             .ok();
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            let rendered = format!("{}{line}", log_stamp(&app, &format!("review-{id}")));
             if let Some(f) = file.as_mut() {
-                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(rendered.as_bytes()).await;
                 let _ = f.write_all(b"\n").await;
             }
         }
@@ -2110,8 +2236,9 @@ where
             .ok();
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            let rendered = format!("{}{line}", log_stamp(&app, &id));
             if let Some(f) = file.as_mut() {
-                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(rendered.as_bytes()).await;
                 let _ = f.write_all(b"\n").await;
             }
             {
@@ -2142,7 +2269,7 @@ where
                 LogEvent {
                     task_id: id.clone(),
                     stream: stream.to_string(),
-                    line,
+                    line: rendered,
                 },
             );
         }
@@ -2152,7 +2279,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_heartbeat_ids, choose_branch, dispatch, mark_interrupted, now,
+        active_heartbeat_ids, choose_branch, dispatch, local_clock, mark_interrupted, now,
         resolve_named_branch, review_clear, reviews_to_start, stall_sweep, supervised_tick,
         BranchChoice,
     };
@@ -2206,6 +2333,7 @@ mod tests {
             branch_mode: BranchMode::Current,
             new_branch: None,
             ask: None,
+            result: None,
         }
     }
 
@@ -2260,6 +2388,26 @@ mod tests {
             .and_then(|t| t.review.as_ref())
             .map(|r| r.status)
             .expect("task has a review")
+    }
+
+    // ---- log timestamps ----
+
+    #[test]
+    fn the_first_log_stamp_includes_the_date_but_not_the_year() {
+        let out = local_clock(1_800_000_000, None);
+        assert_eq!(
+            out.len(),
+            "MM-DD HH:MM:SS".len(),
+            "unexpected stamp: {out}"
+        );
+    }
+
+    #[test]
+    fn a_same_day_stamp_shows_only_the_time() {
+        let secs = 1_800_000_000;
+        let out = local_clock(secs, Some(secs));
+        assert_eq!(out.len(), "HH:MM:SS".len(), "unexpected stamp: {out}");
+        assert_eq!(out.matches(':').count(), 2);
     }
 
     // ---- review gating ----

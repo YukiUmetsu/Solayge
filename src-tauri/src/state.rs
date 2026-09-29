@@ -28,6 +28,9 @@ pub struct AppState {
     /// Last time each task showed signs of life (a live child, streamed output,
     /// or a managed step). Used to detect a run that silently orphaned.
     pub heartbeat: Mutex<HashMap<String, i64>>,
+    /// Last unix second a timestamp was emitted into a log (keyed by task id, or
+    /// `review-<id>`), so a timestamp is only written after a quiet gap.
+    pub log_stamp: Mutex<HashMap<String, i64>>,
 }
 
 impl AppState {
@@ -49,6 +52,7 @@ impl AppState {
             merging: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             heartbeat: Mutex::new(HashMap::new()),
+            log_stamp: Mutex::new(HashMap::new()),
         };
         // Drop cache that is already past its retention window.
         crate::cache::prune(&st);

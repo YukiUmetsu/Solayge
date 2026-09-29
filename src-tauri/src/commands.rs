@@ -96,6 +96,7 @@ fn reset_for_rerun(t: &mut Task) {
     t.last_permission = None;
     t.used_fallback = false;
     t.ask = None;
+    t.result = None;
     if t.isolation == Isolation::Worktree {
         t.worktree_path = None;
         t.branch = None;
@@ -357,6 +358,7 @@ pub fn create_tasks(
             branch_mode: nt.branch_mode.unwrap_or_default(),
             new_branch: nt.new_branch.clone(),
             ask: None,
+            result: None,
         });
     }
 
@@ -1455,6 +1457,7 @@ mod tests {
             branch_mode: BranchMode::Current,
             new_branch: None,
             ask: None,
+            result: None,
         }
     }
 

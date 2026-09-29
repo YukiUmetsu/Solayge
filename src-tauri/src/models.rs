@@ -352,6 +352,10 @@ pub struct Task {
     /// set, the task is `blocked`.
     #[serde(default)]
     pub ask: Option<TaskAsk>,
+    /// The agent's final markdown summary, captured when its run ends. Rendered
+    /// as the task's Result tab and persisted so it can be re-read later.
+    #[serde(default)]
+    pub result: Option<String>,
 }
 
 impl Task {

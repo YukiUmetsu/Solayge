@@ -226,7 +226,7 @@ Agent**):
 | --- | --- |
 | Provider + model | Which CLI runs tasks, and the model id passed to it. |
 | Backup provider + model | Used **once** if a run exits non-zero (credits, outage, crash). |
-| Reviewer provider + model | Which agent reviews (defaults to the task's provider). |
+| Reviewer provider + model | Which agent reviews (defaults to the task's provider and model). |
 | Editor | Which editor the "Open in …" button launches. |
 
 Command templates are editable in **Settings → Agent defaults → Command
@@ -337,7 +337,9 @@ task is idempotent, so branches already merged report *"already up to date"*.
 With review enabled, a reviewer runs in the task's worktree after it succeeds and
 must end with `REVIEW: PASS` or `REVIEW: ISSUES: <summary>`. The verdict is stored
 on the task (a badge on the card, the full log on the **Review** tab). Tasks that
-depend on it do not start until the review — and any auto-fix — has finished. Modes:
+depend on it do not start until the review — and any auto-fix — has finished. The
+reviewer uses the same provider and model as the task unless you configure a
+different one, so it runs under the same account and subscription. Modes:
 
 - **Off** — no review.
 - **Review only** — record a verdict; never blocks.

@@ -25,6 +25,8 @@ anyhow = "1"
 # Local HTTP client for the opencode v2 server API (interactive questions and
 # permission prompts). Plain HTTP to 127.0.0.1, so no TLS backend is needed.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Local wall-clock timestamps in task logs (already in the dependency tree).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Encrypted-at-rest storage for per-project environment variables.
 aes-gcm = "0.10"
 rand = "0.8"

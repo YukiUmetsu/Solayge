@@ -286,7 +286,12 @@ export function effectiveConfig(
       project.fallback_provider ?? settings.fallback_provider ?? null,
     fallback_model: project.fallback_model ?? settings.fallback_model ?? null,
     review_provider: reviewProvider,
-    review_model: project.review_model ?? settings.review_model ?? null,
+    review_model:
+      project.review_model ??
+      settings.review_model ??
+      project.model ??
+      settings.model ??
+      null,
     review_mode: project.review_mode ?? settings.review_mode ?? "off",
     editor: project.editor ?? settings.editor ?? null,
   };
