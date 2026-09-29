@@ -10,6 +10,7 @@ mod permissions;
 mod scheduler;
 mod secrets;
 mod state;
+mod summary;
 
 use tauri::Manager;
 
@@ -75,6 +76,7 @@ pub fn run() {
             commands::start_task_now,
             commands::cancel_task,
             commands::retry_task,
+            commands::retry_review,
             commands::answer_task,
             commands::remove_task_worktree,
             commands::clear_finished,

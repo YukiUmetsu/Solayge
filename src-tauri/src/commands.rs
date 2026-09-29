@@ -768,6 +768,43 @@ fn cancel_task_state(t: &mut Task) -> bool {
     true
 }
 
+/// Re-queue a succeeded task's auto-review so the scheduler runs it again,
+/// without re-running the (already finished) task. Errors when there is nothing
+/// to re-run. Pure, so the rule can be unit-tested.
+fn requeue_review(t: &mut Task) -> Result<(), String> {
+    if t.status != TaskStatus::Succeeded {
+        return Err("only a succeeded task's review can be re-run".into());
+    }
+    let Some(r) = t.review.as_mut() else {
+        return Err("this task has no review".into());
+    };
+    if r.mode == ReviewMode::Off {
+        return Err("this task has no review".into());
+    }
+    r.status = ReviewStatus::Pending;
+    r.summary = None;
+    r.started_at = None;
+    r.finished_at = None;
+    Ok(())
+}
+
+/// Re-run a finished task's review (e.g. after it failed for an environmental
+/// reason) without re-running the task itself.
+#[tauri::command]
+pub fn retry_review(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
+    let st = app.state::<AppState>();
+    {
+        let mut inner = crate::state::lock(&st.inner);
+        let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) else {
+            return Err("task not found".into());
+        };
+        requeue_review(t)?;
+    }
+    st.save();
+    emit_state(&app);
+    Ok(crate::state::snapshot(&app))
+}
+
 #[tauri::command]
 pub fn cancel_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
@@ -950,6 +987,12 @@ pub fn get_task_log(app: AppHandle, task_id: String) -> Result<String, String> {
         return Err("invalid task id".into());
     }
     let st = app.state::<AppState>();
+    // A finished task whose result was never captured (it ran before capture
+    // existed, or via the CLI path) gets one derived from its log the first time
+    // its log is opened, so the Result tab can appear.
+    if st.backfill_result(&task_id) {
+        emit_state(&app);
+    }
     std::fs::read_to_string(st.log_path(&task_id)).map_err(|e| e.to_string())
 }
 
@@ -1415,8 +1458,8 @@ pub async fn list_models(
 mod tests {
     use super::{
         apply_draft_patch, archive_task, cancel_task_state, has_dependency_cycle, is_clearable,
-        log_tail, render_diff, reset_for_rerun, restore_task_state, rewire_after_removal,
-        valid_task_id,
+        log_tail, render_diff, requeue_review, reset_for_rerun, restore_task_state,
+        rewire_after_removal, valid_task_id,
     };
     use crate::models::{
         BranchMode, DeletedTask, DiffResult, FileDiff, GitOp, Isolation, PermissionProfile,
@@ -1902,6 +1945,26 @@ mod tests {
             .iter()
             .map(|(id, deps)| (id.to_string(), deps.iter().map(|d| d.to_string()).collect()))
             .collect()
+    }
+
+    #[test]
+    fn a_failed_review_can_be_requeued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Failed);
+        requeue_review(&mut t).unwrap();
+        let r = t.review.as_ref().unwrap();
+        assert_eq!(r.status, ReviewStatus::Pending);
+        assert!(r.summary.is_none() && r.finished_at.is_none());
+    }
+
+    #[test]
+    fn a_review_cannot_be_requeued_unless_the_task_succeeded() {
+        let mut t = task(TaskStatus::Running, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Running);
+        assert!(requeue_review(&mut t).is_err());
+
+        let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
+        assert!(requeue_review(&mut t).is_err(), "no review to re-run");
     }
 
     #[test]

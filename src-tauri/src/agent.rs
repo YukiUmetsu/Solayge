@@ -519,8 +519,41 @@ pub fn resolve_reviewer(
         .or(task_provider)
         .or(settings.provider)
         .unwrap_or(Provider::Opencode);
-    let model = explicit_model.or_else(|| task_model.map(str::to_string));
+    let model = choose_review_model(explicit_model, task_model);
     (provider, model)
+}
+
+/// Pick the reviewer model.
+///
+/// An explicitly configured reviewer wins — but not when it is the *same model
+/// as the task on a different account* (e.g. `opencode/x` while the task ran
+/// `opencode-go/x`). The mixed provider list makes that mistake easy to make,
+/// and it sends the review to the wrong — often unfunded — account. In that case
+/// follow the task, so the review runs where the task ran.
+fn choose_review_model(explicit: Option<String>, task_model: Option<&str>) -> Option<String> {
+    let Some(review) = explicit else {
+        return task_model.map(str::to_string);
+    };
+    if let Some(task) = task_model {
+        let same_model = model_id(&review) == model_id(task);
+        let different_account = model_provider(&review) != model_provider(task);
+        if same_model && different_account {
+            return Some(task.to_string());
+        }
+    }
+    Some(review)
+}
+
+/// The provider segment of a `provider/model` id (`opencode-go` in
+/// `opencode-go/deepseek-v4.1-flash`).
+fn model_provider(model: &str) -> &str {
+    model.split_once('/').map(|(provider, _)| provider).unwrap_or("")
+}
+
+/// The model segment of a `provider/model` id (`deepseek-v4.1-flash` in
+/// `opencode-go/deepseek-v4.1-flash`).
+fn model_id(model: &str) -> &str {
+    model.split_once('/').map(|(_, id)| id).unwrap_or(model)
 }
 
 /// Merge a project's agent config over the account defaults.
@@ -720,6 +753,51 @@ mod tests {
         // Live resolution at review time: the task's snapshot is the fallback,
         // so an existing task reviews with the same account it ran on.
         let settings = Settings::default();
+        let (provider, model) = resolve_reviewer(
+            None,
+            &settings,
+            Some(Provider::Opencode),
+            Some("opencode-go/deepseek-v4.1-flash"),
+        );
+        assert_eq!(provider, Provider::Opencode);
+        assert_eq!(model.as_deref(), Some("opencode-go/deepseek-v4.1-flash"));
+    }
+
+    #[test]
+    fn a_reviewer_on_a_different_account_of_the_same_model_follows_the_task() {
+        let settings = Settings {
+            model: Some("opencode-go/deepseek-v4.1-flash".into()),
+            review_model: Some("opencode/deepseek-v4.1-flash".into()),
+            ..Default::default()
+        };
+        let r = resolve(None, &settings);
+        assert_eq!(
+            r.review_model.as_deref(),
+            Some("opencode-go/deepseek-v4.1-flash"),
+            "the same model on a different account must not review the task"
+        );
+    }
+
+    #[test]
+    fn a_reviewer_with_a_different_model_is_kept() {
+        let settings = Settings {
+            model: Some("opencode-go/deepseek-v4.1-flash".into()),
+            review_model: Some("anthropic/claude-sonnet-4-5".into()),
+            ..Default::default()
+        };
+        let r = resolve(None, &settings);
+        assert_eq!(
+            r.review_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn review_time_resolution_repairs_a_wrong_account() {
+        let settings = Settings {
+            review_model: Some("opencode/deepseek-v4.1-flash".into()),
+            ..Default::default()
+        };
         let (provider, model) = resolve_reviewer(
             None,
             &settings,

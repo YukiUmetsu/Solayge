@@ -26,6 +26,7 @@ export function DetailPanel({
   width,
   onEdit,
   onRemoveWorktree,
+  onRetryReview,
   onCollapse,
 }: {
   task: Task | null;
@@ -34,6 +35,7 @@ export function DetailPanel({
   width: number;
   onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
+  onRetryReview: (id: string) => void;
   onCollapse: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("logs");
@@ -238,7 +240,9 @@ export function DetailPanel({
             </div>
           )}
 
-          {tab === "review" && task && <ReviewView task={task} />}
+          {tab === "review" && task && (
+            <ReviewView task={task} onRetryReview={onRetryReview} />
+          )}
 
           {tab === "details" && task && (
             <DetailsView
@@ -528,7 +532,13 @@ function LogsView({
   );
 }
 
-function ReviewView({ task }: { task: Task }) {
+function ReviewView({
+  task,
+  onRetryReview,
+}: {
+  task: Task;
+  onRetryReview: (id: string) => void;
+}) {
   const review = task.review && task.review.mode !== "off" ? task.review : null;
   const [log, setLog] = useState("");
   const [loading, setLoading] = useState(false);
@@ -536,6 +546,7 @@ function ReviewView({ task }: { task: Task }) {
   const now = useNow();
 
   const status = review?.status ?? "none";
+  const settled = status !== "pending" && status !== "running";
   // Reload on task/verdict changes only. Depending on the `review` object made
   // this refetch on every snapshot poll; the rendered body keys off `log`, so
   // this alone avoids the "Loading…" flash.
@@ -582,12 +593,24 @@ function ReviewView({ task }: { task: Task }) {
         )}
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-ink-subtle">Reviewer log</span>
-          {review.status === "running" && (
-            <span className="flex items-center gap-1 text-[11px] text-warning">
-              <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
-              reviewing
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {review.status === "running" && (
+              <span className="flex items-center gap-1 text-[11px] text-warning">
+                <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
+                reviewing
+              </span>
+            )}
+            {task.status === "succeeded" && settled && (
+              <button
+                className="btn btn-ghost !px-2 !py-1"
+                onClick={() => onRetryReview(task.id)}
+                title="Run the review again (does not re-run the task)"
+              >
+                <Icon name="retry" className="h-3 w-3" />
+                Re-run review
+              </button>
+            )}
+          </div>
         </div>
       </div>
       <div className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed text-ink-muted">

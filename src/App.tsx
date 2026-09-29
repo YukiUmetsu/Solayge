@@ -471,6 +471,9 @@ export default function App() {
                     onRemoveWorktree={(id) =>
                       void runAction(() => api.removeWorktree(id))
                     }
+                    onRetryReview={(id) =>
+                      void runAction(() => api.retryReview(id))
+                    }
                     onCollapse={() => setRightOpen(false)}
                   />
                 </>
