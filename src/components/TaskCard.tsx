@@ -143,6 +143,15 @@ export function TaskCard({
                 {reviewMeta.label}
               </span>
             )}
+            {task.ask && (
+              <span
+                className="flex items-center gap-1 text-warning"
+                title={task.ask.title}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
+                needs input
+              </span>
+            )}
             {task.exit_code !== null && task.exit_code !== undefined && (
               <span className="mono">exit {task.exit_code}</span>
             )}

@@ -4,6 +4,7 @@ mod commands;
 mod git;
 mod models;
 mod opencode;
+mod opencode_server;
 mod permissions;
 mod scheduler;
 mod secrets;
@@ -72,6 +73,7 @@ pub fn run() {
             commands::start_task_now,
             commands::cancel_task,
             commands::retry_task,
+            commands::answer_task,
             commands::remove_task_worktree,
             commands::clear_finished,
             commands::get_task_log,
@@ -93,6 +95,12 @@ pub fn run() {
             commands::environment_check,
             commands::list_models,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Don't leave the opencode server running after the app quits.
+                opencode_server::shutdown();
+            }
+        });
 }

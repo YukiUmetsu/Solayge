@@ -35,6 +35,7 @@ fn reset_for_rerun(t: &mut Task) {
     t.finished_at = None;
     t.last_permission = None;
     t.used_fallback = false;
+    t.ask = None;
     if t.isolation == Isolation::Worktree {
         t.worktree_path = None;
         t.branch = None;
@@ -293,6 +294,7 @@ pub fn create_tasks(
             merge: nt.merge.clone(),
             branch_mode: nt.branch_mode.unwrap_or_default(),
             new_branch: nt.new_branch.clone(),
+            ask: None,
         });
     }
     drop(inner);
@@ -459,6 +461,58 @@ pub fn retry_task(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
                 return Err("task is already active".into());
             }
             reset_for_rerun(t);
+        }
+    }
+    st.save();
+    emit_state(&app);
+    Ok(crate::state::snapshot(&app))
+}
+
+#[tauri::command]
+pub async fn answer_task(
+    app: AppHandle,
+    task_id: String,
+    answer: serde_json::Value,
+) -> Result<Snapshot, String> {
+    let st = app.state::<AppState>();
+    let ask = {
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.ask.clone())
+    };
+    let Some(ask) = ask else {
+        return Err("this task has no pending question".into());
+    };
+    let session = ask
+        .session_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "the question is not attached to a live session".to_string())?;
+
+    let conn = crate::opencode_server::ensure_server().await?;
+    match ask.kind {
+        AskKind::Question => {
+            crate::opencode_server::reply_form(&conn, &session, &ask.id, answer).await?;
+        }
+        AskKind::Permission => {
+            let decision = answer
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("reject");
+            crate::opencode_server::reply_permission(&conn, &session, &ask.id, decision, None)
+                .await?;
+        }
+    }
+
+    {
+        let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
+            if t.ask.as_ref().map(|a| a.id.as_str()) == Some(ask.id.as_str()) {
+                t.ask = None;
+            }
         }
     }
     st.save();
@@ -1005,6 +1059,7 @@ mod tests {
             merge: None,
             branch_mode: BranchMode::Current,
             new_branch: None,
+            ask: None,
         }
     }
 

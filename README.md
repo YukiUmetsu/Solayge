@@ -107,6 +107,9 @@ Solayge turns that graph into something you can see and control:
   tests, and land the result.
 - **Automatic code review** — a reviewer reports, auto-fixes, or stops a task for
   your attention.
+- **Interactive questions** — when an agent asks a question or requests
+  permission, the task notifies you, shows the question and its options in the
+  side panel, and sends your answer back to the live session.
 
 ## Requirements
 
@@ -239,10 +242,15 @@ Hard **rails** apply to every profile as non-overridable policies, so neither
 `--auto` nor an "Allow always" can lift them: no `sudo`, no `rm -rf /`, no
 force-push, and no reads from `~/.ssh`.
 
-Interactive approve/reject is not available yet; it needs the authenticated
-opencode server API (see the [roadmap](#roadmap)). Until then, supervised permission
-requests are auto-rejected with a notification and the request text is shown on the
-task.
+Interactive approve/reject is implemented for **opencode**: its tasks run through
+the opencode v2 server (`opencode serve`), so the agent's `question` tool and
+permission requests are surfaced to Solayge. A question appears in the task's side
+panel (option buttons, checkboxes, or free text); a permission request offers
+**Allow once / Always allow / Reject**, and `autonomous` tasks auto-approve while
+`readonly` tasks auto-reject. The task stays `running` while it waits, so dependents
+keep waiting without being failed; a notification fires, and the answer is posted
+back to the live session. Other providers still run non-interactively until they
+gain adapters (see the [roadmap](#roadmap)).
 
 ## Project context
 
@@ -355,7 +363,10 @@ Starting a task prepares its worktree/branch, spawns the provider CLI (or a shel
 command, or the built-in git op), streams stdout/stderr to a log file and the UI,
 and records the exit code. Integration (`merge`) tasks run a small orchestrator that
 drives one child process at a time and can hand conflicts or failing tests to an
-agent.
+agent. opencode agent tasks instead run through a managed `opencode serve`
+process: the scheduler creates a session, sends the prompt, polls for output, and
+surfaces questions or permission asks (see [Permissions & safety](#permissions--safety)).
+It falls back to the non-interactive `opencode run` CLI if the server cannot start.
 
 **Recovery.** Each tick is supervised: a panic in one tick is logged to
 `logs/scheduler.log` and the loop keeps running. Locks are poison-tolerant, so one
@@ -432,7 +443,8 @@ src-tauri/            Tauri app (Rust)
 1. ~~Permission profiles, rails, and notifications~~ — done.
 2. **Server runner** — drive tasks through the opencode server API for interactive
    approve/reject and steerable sessions (interrupt, queue prompts), and apply
-   permission profiles to providers other than opencode.
+   permission profiles to providers other than opencode. *opencode is done; Claude
+   Code (stream-json control protocol) and the remaining providers are next.*
 3. **Control plane** — an authenticated HTTP/WS API, bound to the Tailscale
    interface, for a mobile client.
 4. **Mobile client** — monitor, steer, and approve over the tailnet.

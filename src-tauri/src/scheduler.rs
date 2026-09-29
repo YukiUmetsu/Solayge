@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 
 use crate::agent;
 use crate::git;
+use crate::opencode_server;
 use crate::models::{
     BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSpec,
     MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt, Task,
@@ -856,6 +857,24 @@ async fn start_task(app: AppHandle, id: String) {
         return;
     };
     touch(&app, &id);
+    // opencode agent tasks run through the server so the agent can ask questions
+    // and request permission. If the server cannot be reached we fall back to the
+    // non-interactive CLI rather than failing the task.
+    if run.kind == TaskKind::Agent && run.provider == Provider::Opencode {
+        match opencode_setup(&app, &run).await {
+            Ok((conn, session)) => {
+                start_opencode_loop(app, run, conn, session).await;
+                return;
+            }
+            Err(e) => {
+                log_note(
+                    &app,
+                    &id,
+                    &format!("interactive mode unavailable ({e}); running non-interactively"),
+                );
+            }
+        }
+    }
     match run.kind {
         TaskKind::Agent => start_agent_task(app, run).await,
         TaskKind::Shell => start_shell_task(app, run).await,
@@ -910,6 +929,225 @@ async fn start_agent_task(app: AppHandle, run: TaskRun) {
     };
     agent::apply_env(&mut cmd, &ctx.env);
     spawn_simple(&app, &run.id, cmd);
+}
+
+/// Prepare an opencode agent task: worktree/branch, prompt, server session, and
+/// the initial prompt. Returns the connection and session id. Any error here is
+/// safe to fall back from (nothing has been committed to yet).
+async fn opencode_setup(
+    app: &AppHandle,
+    run: &TaskRun,
+) -> Result<(opencode_server::Connection, String), String> {
+    let project_path = PathBuf::from(&run.project);
+    let mut cwd = project_path.clone();
+    if run.isolation == Isolation::Worktree {
+        cwd = prepare_or_reuse(app, run, &project_path).await?;
+    }
+    init_log(app, &run.id).await;
+    maybe_new_branch(app, run, &project_path).await?;
+
+    let ctx = project_context(app, &run.project);
+    let branch = git::current_branch(&project_path).await;
+    let pctx = agent::PromptContext {
+        project_name: &ctx.name,
+        project_path: &run.project,
+        current_branch: branch.as_deref(),
+        env: &ctx.env,
+    };
+    let prompt = agent::apply_system_prompt(&run.prompt, ctx.system_prompt.as_ref(), &pctx);
+
+    let conn = opencode_server::ensure_server().await?;
+    let session = opencode_server::create_session(
+        &conn,
+        &cwd.to_string_lossy(),
+        &run.title,
+        run.model.as_deref(),
+    )
+    .await?;
+    log_note(app, &run.id, &format!("opencode session {session}"));
+    opencode_server::prompt(&conn, &session, &prompt).await?;
+    Ok((conn, session))
+}
+
+/// Poll an opencode session: stream output to the task log, surface questions
+/// and permission requests, and finalize when the session goes idle.
+async fn start_opencode_loop(
+    app: AppHandle,
+    run: TaskRun,
+    conn: opencode_server::Connection,
+    session: String,
+) {
+    use std::collections::HashSet;
+    let mut logged: HashSet<String> = HashSet::new();
+    let mut surfaced: Option<String> = None;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if opencode_stopped(&app, &run.id) {
+            let _ = opencode_server::interrupt(&conn, &session).await;
+            return;
+        }
+        touch(&app, &run.id);
+
+        let msgs = match opencode_server::messages(&conn, &session).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        // Log each completed assistant message once.
+        for m in &msgs {
+            if m.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+                continue;
+            }
+            if m.get("time").and_then(|t| t.get("completed")).is_none() {
+                continue;
+            }
+            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            if id.is_empty() || !logged.insert(id.to_string()) {
+                continue;
+            }
+            if let Some(line) = opencode_server::part_line(m) {
+                log_note(&app, &run.id, &line);
+            }
+        }
+
+        // If a surfaced ask was answered, allow the next one to surface.
+        if surfaced.is_some() && !task_has_ask(&app, &run.id) {
+            surfaced = None;
+        }
+
+        // A question (form) or a supervised permission request pauses for input.
+        if surfaced.is_none() {
+            if let Ok(forms) = opencode_server::forms(&conn, &session).await {
+                if let Some(ask) = forms
+                    .first()
+                    .and_then(|f| opencode_server::form_to_ask(&session, f))
+                {
+                    surfaced = Some(ask.id.clone());
+                    set_task_ask(&app, &run.id, ask);
+                }
+            }
+        }
+        if surfaced.is_none() {
+            if let Ok(perms) = opencode_server::permissions(&conn, &session).await {
+                if let Some(ask) =
+                    perms.first().and_then(|p| opencode_server::permission_to_ask(&session, p))
+                {
+                    match run.profile {
+                        PermissionProfile::Autonomous => {
+                            let _ = opencode_server::reply_permission(
+                                &conn, &session, &ask.id, "always", None,
+                            )
+                            .await;
+                        }
+                        PermissionProfile::Readonly => {
+                            let _ = opencode_server::reply_permission(
+                                &conn, &session, &ask.id, "reject", None,
+                            )
+                            .await;
+                        }
+                        PermissionProfile::Supervised => {
+                            surfaced = Some(ask.id.clone());
+                            set_task_ask(&app, &run.id, ask);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(outcome) = opencode_server::session_outcome(&msgs) {
+            clear_task_ask(&app, &run.id);
+            let ok = outcome == "succeeded";
+            if ok {
+                // Queue the auto review, matching the CLI path's `finalize`.
+                queue_review(&app, &run.id);
+            }
+            finish_managed(
+                &app,
+                &run.id,
+                ok,
+                if ok {
+                    None
+                } else {
+                    Some(format!("the agent session {outcome}"))
+                },
+            );
+            return;
+        }
+    }
+}
+
+/// Set a succeeded task's review to `pending` so `resume_reviews` runs it.
+fn queue_review(app: &AppHandle, id: &str) {
+    let st = app.state::<AppState>();
+    let mut inner = crate::state::lock(&st.inner);
+    if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+        if let Some(r) = t.review.as_mut() {
+            if r.mode != ReviewMode::Off {
+                r.status = ReviewStatus::Pending;
+                r.summary = None;
+                r.started_at = None;
+                r.finished_at = None;
+            }
+        }
+    }
+}
+
+/// True when the task was cancelled (blocked-for-input does not stop the loop).
+fn opencode_stopped(app: &AppHandle, id: &str) -> bool {
+    let st = app.state::<AppState>();
+    let inner = crate::state::lock(&st.inner);
+    inner
+        .tasks
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.status == TaskStatus::Canceled)
+        .unwrap_or(true)
+}
+
+/// Whether the task currently has an unanswered ask.
+fn task_has_ask(app: &AppHandle, id: &str) -> bool {
+    let st = app.state::<AppState>();
+    let inner = crate::state::lock(&st.inner);
+    inner
+        .tasks
+        .iter()
+        .find(|t| t.id == id)
+        .is_some_and(|t| t.ask.is_some())
+}
+
+/// Attach a pending question/permission to a task and notify the user. The task
+/// stays `running`, so dependents wait without becoming permanently blocked.
+fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
+    let st = app.state::<AppState>();
+    let title = ask.title.clone();
+    {
+        let mut inner = crate::state::lock(&st.inner);
+        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+            t.ask = Some(ask);
+        }
+    }
+    log_note(app, id, &format!("Waiting for you: {title}"));
+    st.save();
+    emit_state(app);
+    notify(app, "Solayge needs you", &title);
+}
+
+fn clear_task_ask(app: &AppHandle, id: &str) {
+    let st = app.state::<AppState>();
+    let changed = {
+        let mut inner = crate::state::lock(&st.inner);
+        match inner.tasks.iter_mut().find(|t| t.id == id) {
+            Some(t) if t.ask.is_some() => {
+                t.ask = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        st.save();
+        emit_state(app);
+    }
 }
 
 /// Create a new branch before the task runs, when the task asked for one and is
@@ -1889,6 +2127,7 @@ mod tests {
             merge: None,
             branch_mode: BranchMode::Current,
             new_branch: None,
+            ask: None,
         }
     }
 

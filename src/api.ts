@@ -52,6 +52,8 @@ export const api = {
     invoke<Snapshot>("start_task_now", { taskId }),
   cancel: (taskId: string) => invoke<Snapshot>("cancel_task", { taskId }),
   retry: (taskId: string) => invoke<Snapshot>("retry_task", { taskId }),
+  answerTask: (taskId: string, answer: Record<string, unknown>) =>
+    invoke<Snapshot>("answer_task", { taskId, answer }),
   removeWorktree: (taskId: string) =>
     invoke<Snapshot>("remove_task_worktree", { taskId }),
   clearFinished: (projectPath: string) =>

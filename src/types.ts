@@ -25,6 +25,46 @@ export type ReviewStatus =
   | "issues"
   | "failed";
 
+/** Whether an agent is asking a question or requesting permission. */
+export type AskKind = "question" | "permission";
+
+/** The widget type for one question field. */
+export type AskFieldKind =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "multiselect";
+
+export interface AskOption {
+  value: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface AskField {
+  key: string;
+  label: string;
+  description?: string | null;
+  kind: AskFieldKind;
+  required: boolean;
+  options: AskOption[];
+  default?: unknown;
+  placeholder?: string | null;
+}
+
+/** A pending question or permission request from an agent. */
+export interface TaskAsk {
+  id: string;
+  kind: AskKind;
+  title: string;
+  message?: string | null;
+  fields: AskField[];
+  options: string[];
+  session_id?: string | null;
+  created_at?: number | null;
+}
+
 export interface TaskReview {
   mode: ReviewMode;
   status: ReviewStatus;
@@ -192,6 +232,8 @@ export interface Task {
   merge?: MergeSpec | null;
   branch_mode?: BranchMode | null;
   new_branch?: string | null;
+  /** A question/permission the agent is waiting on, if any. */
+  ask?: TaskAsk | null;
 }
 
 export interface Project {

@@ -19,9 +19,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["process", "io-util", "fs", "time", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["process", "io-util", "fs", "time", "sync", "net", "macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
+# Local HTTP client for the opencode v2 server API (interactive questions and
+# permission prompts). Plain HTTP to 127.0.0.1, so no TLS backend is needed.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # Encrypted-at-rest storage for per-project environment variables.
 aes-gcm = "0.10"
 rand = "0.8"

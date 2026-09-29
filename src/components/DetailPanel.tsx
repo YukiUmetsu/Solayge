@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { DiffResult, Project, Task, Worktree } from "../types";
+import type { AskField, DiffResult, Project, Task, TaskAsk, Worktree } from "../types";
 import { api } from "../api";
 import {
   STATUS_META,
@@ -127,6 +127,8 @@ export function DetailPanel({
         </button>
       </div>
 
+      {task?.ask && <AskPanel task={task} />}
+
       {!task && tab !== "worktrees" ? (
         <EmptyDetail />
       ) : (
@@ -223,6 +225,226 @@ export function DetailPanel({
             />
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function defaultAnswer(ask: TaskAsk): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of ask.fields) {
+    if (f.kind === "multiselect") out[f.key] = Array.isArray(f.default) ? f.default : [];
+    else if (f.kind === "boolean") out[f.key] = typeof f.default === "boolean" ? f.default : false;
+    else out[f.key] = f.default ?? "";
+  }
+  return out;
+}
+
+const PERMISSION_LABELS: Record<string, string> = {
+  once: "Allow once",
+  always: "Always allow",
+  reject: "Reject",
+};
+
+/** A pending question or permission request, answered in place. */
+function AskPanel({ task }: { task: Task }) {
+  const ask = task.ask as TaskAsk;
+  const [answer, setAnswer] = useState<Record<string, unknown>>(() => defaultAnswer(ask));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAnswer(defaultAnswer(ask));
+    setErr(null);
+    // Reset only when the ask itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ask.id]);
+
+  const set = (key: string, value: unknown) =>
+    setAnswer((a) => ({ ...a, [key]: value }));
+
+  const missing = ask.fields.some((f) => {
+    if (!f.required) return false;
+    const v = answer[f.key];
+    return v === "" || v === undefined || v === null || (Array.isArray(v) && v.length === 0);
+  });
+
+  async function send(value: Record<string, unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.answerTask(task.id, value);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="border-b border-warning-line bg-warning-soft px-3 py-3">
+      <div className="mb-2 flex items-center gap-2 text-[12px] text-warning">
+        <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
+        <span className="font-medium">{ask.title}</span>
+        <span className="rounded bg-warning-soft px-1.5 text-[10px] uppercase tracking-wide">
+          {ask.kind === "permission" ? "permission" : "question"}
+        </span>
+      </div>
+
+      {ask.message && (
+        <pre className="mono mb-2 whitespace-pre-wrap rounded-lg border border-line bg-well p-2 text-[11px] leading-relaxed text-ink-muted">
+          {ask.message}
+        </pre>
+      )}
+
+      {ask.kind === "permission" ? (
+        <div className="flex flex-wrap gap-2">
+          {ask.options.map((o) => (
+            <button
+              key={o}
+              className="btn btn-ghost !py-1"
+              disabled={busy}
+              onClick={() => void send({ decision: o })}
+            >
+              {PERMISSION_LABELS[o] ?? o}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {ask.fields.map((f) => (
+            <AskFieldInput
+              key={f.key}
+              field={f}
+              value={answer[f.key]}
+              onChange={(v) => set(f.key, v)}
+            />
+          ))}
+          <div className="flex items-center gap-2">
+            <button
+              className="btn btn-primary !py-1"
+              disabled={busy || missing}
+              onClick={() => void send(answer)}
+            >
+              <Icon name="check" className="h-3.5 w-3.5" />
+              Send answer
+            </button>
+            {missing && (
+              <span className="text-[11px] text-ink-subtle">
+                Fill in the required fields
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {err && <p className="mt-2 text-[11px] text-danger">{err}</p>}
+    </div>
+  );
+}
+
+function AskFieldInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: AskField;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const label = (
+    <div className="mb-1 text-[11px] font-medium text-ink">
+      {field.label}
+      {field.required && <span className="text-danger"> *</span>}
+    </div>
+  );
+
+  if (field.options.length > 0) {
+    return (
+      <div>
+        {label}
+        <div className="flex flex-wrap gap-1.5">
+          {field.options.map((o) => {
+            const on = Array.isArray(value)
+              ? (value as string[]).includes(o.value)
+              : value === o.value;
+            return (
+              <button
+                key={o.value}
+                title={o.description ?? undefined}
+                className={`rounded-lg border px-2 py-1 text-[11.5px] transition ${
+                  on
+                    ? "border-accent-line bg-accent-soft text-accent-text"
+                    : "border-line bg-well text-ink-muted hover:border-accent-line"
+                }`}
+                onClick={() => {
+                  if (field.kind === "multiselect") {
+                    const arr = Array.isArray(value) ? [...(value as string[])] : [];
+                    const i = arr.indexOf(o.value);
+                    if (i >= 0) arr.splice(i, 1);
+                    else arr.push(o.value);
+                    onChange(arr);
+                  } else {
+                    onChange(o.value);
+                  }
+                }}
+              >
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  if (field.kind === "boolean") {
+    return (
+      <div>
+        {label}
+        <div className="flex gap-1.5">
+          {[
+            { l: "Yes", v: true },
+            { l: "No", v: false },
+          ].map((b) => (
+            <button
+              key={b.l}
+              className={`rounded-lg border px-2 py-1 text-[11.5px] ${
+                value === b.v
+                  ? "border-accent-line bg-accent-soft text-accent-text"
+                  : "border-line bg-well text-ink-muted"
+              }`}
+              onClick={() => onChange(b.v)}
+            >
+              {b.l}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const numeric = field.kind === "number" || field.kind === "integer";
+  return (
+    <div>
+      {label}
+      <input
+        className="w-full rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
+        type={numeric ? "number" : "text"}
+        placeholder={field.placeholder ?? ""}
+        value={typeof value === "string" || typeof value === "number" ? value : ""}
+        onChange={(e) =>
+          onChange(
+            numeric
+              ? e.target.value === ""
+                ? ""
+                : Number(e.target.value)
+              : e.target.value,
+          )
+        }
+      />
+      {field.description && (
+        <p className="mt-1 text-[10.5px] text-ink-subtle">{field.description}</p>
       )}
     </div>
   );

@@ -202,6 +202,75 @@ pub struct TaskReview {
     pub finished_at: Option<i64>,
 }
 
+/// Whether an agent is asking a question or requesting permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskKind {
+    /// The agent asked the user a question (opencode's `question` tool).
+    Question,
+    /// The agent wants to run a tool/command and needs approval.
+    Permission,
+}
+
+/// The widget type for one question field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskFieldKind {
+    String,
+    Number,
+    Integer,
+    Boolean,
+    Multiselect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One field of a question, mapped from opencode's form schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub kind: AskFieldKind,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Vec<AskOption>,
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+}
+
+/// A pending question or permission request from an agent. While one is set the
+/// task is `blocked` (waiting for the user), not failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAsk {
+    /// Provider-side id (opencode form id / permission request id).
+    pub id: String,
+    pub kind: AskKind,
+    pub title: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<AskField>,
+    /// Permission decisions offered by the provider (`once`, `always`, `reject`).
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// The provider session this ask belongs to (for opencode, `ses_…`).
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -270,6 +339,10 @@ pub struct Task {
     /// Requested new-branch name; empty lets the agent choose one.
     #[serde(default)]
     pub new_branch: Option<String>,
+    /// A question or permission request the agent is waiting on, if any. While
+    /// set, the task is `blocked`.
+    #[serde(default)]
+    pub ask: Option<TaskAsk>,
 }
 
 /// A project environment variable. The value is never stored here — it lives

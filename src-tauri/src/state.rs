@@ -196,16 +196,26 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
 
     for t in state.tasks.iter_mut() {
         if t.status == TaskStatus::Running {
+            let waiting = t.ask.is_some();
             t.status = TaskStatus::Interrupted;
+            // The provider session died with the app, so any pending question is
+            // gone too.
+            t.ask = None;
             // The last log write is the best estimate of when it actually died;
             // falling back to now would overstate the run's duration.
             let died = last_log_time(data_dir, &t.id)
                 .or(t.started_at)
                 .unwrap_or_else(now);
             t.finished_at = Some(died);
-            t.error = Some(reason.to_string());
+            t.error = Some(if waiting {
+                "Interrupted: Solayge stopped while this task was waiting for your answer. \
+                 The question is gone; retry the task to run it again."
+                    .to_string()
+            } else {
+                reason.to_string()
+            });
             changed = true;
-            notes.push((format!("{}.log", t.id), reason.to_string()));
+            notes.push((format!("{}.log", t.id), t.error.clone().unwrap_or_default()));
         }
     }
     for t in state.tasks.iter_mut() {
