@@ -1,0 +1,35 @@
+[package]
+name = "solayge"
+version = "0.1.0"
+description = "Solayge — plan and run sequential/parallel opencode tasks"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "solayge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "fs", "time", "sync", "macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+# Encrypted-at-rest storage for per-project environment variables.
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

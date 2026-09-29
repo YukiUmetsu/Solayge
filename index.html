@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Solayge</title>
+    <script>
+      (function () {
+        // Platform class for window chrome. The macOS overlay titlebar needs
+        // room for the traffic lights; Windows and Linux use a normal title bar.
+        try {
+          var ua = navigator.userAgent || "";
+          document.documentElement.dataset.os = /Mac/i.test(ua)
+            ? "macos"
+            : /Win/i.test(ua)
+              ? "windows"
+              : "linux";
+        } catch (e) {
+          document.documentElement.dataset.os = "linux";
+        }
+
+        // Apply the saved (or system) theme before first paint to avoid a flash.
+        try {
+          var t = localStorage.getItem("solayge.theme");
+          if (t !== "light" && t !== "dark") {
+            t =
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          }
+          document.documentElement.classList.add(
+            t === "dark" ? "theme-dark" : "theme-light",
+          );
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.classList.add("theme-dark");
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

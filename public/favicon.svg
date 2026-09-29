@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.55" y2="1">
+      <stop offset="0%" stop-color="#2d2752"/>
+      <stop offset="42%" stop-color="#161230"/>
+      <stop offset="100%" stop-color="#08060f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.18" r="0.85">
+      <stop offset="0%" stop-color="#8b7bff" stop-opacity="0.62"/>
+      <stop offset="55%" stop-color="#8b7bff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pink" cx="0.86" cy="0.96" r="0.8">
+      <stop offset="0%" stop-color="#e14e6d" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#e14e6d" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="42%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="58%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#f2f5fa"/>
+      <stop offset="78%" stop-color="#d5dce7"/>
+      <stop offset="100%" stop-color="#aab5c8"/>
+    </linearGradient>
+    <filter id="ds" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#04020a" flood-opacity="0.65"/>
+    </filter>
+  </defs>
+  <rect x="52" y="52" width="920" height="920" rx="212" fill="url(#bg)"/>
+  <rect x="52" y="52" width="920" height="920" rx="212" fill="url(#glow)"/>
+  <rect x="52" y="52" width="920" height="920" rx="212" fill="url(#pink)"/>
+  <rect x="52" y="52" width="920" height="920" rx="212" fill="url(#sheen)"/>
+  <rect x="55" y="55" width="914" height="914" rx="209" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="3"/>
+  <g transform="translate(512 512) scale(7.9) rotate(-8 50 50) translate(-50 -54)" filter="url(#ds)">
+    <path fill="url(#silver)" fill-rule="evenodd"
+      d="M50 14 C60 12 68 17 70 25 C71 28 74 31 78 33 C87 36 93 43 95 51 C96 56 94 60 90 63 C87 60 82 56 78 53 C74 50 71 49 68 50 L74 59 L63 63 C59 67 56 73 54 80 L42 94 L30 74 L10 68 L28 58 L14 50 L32 44 L22 34 L38 31 Z M49 31 L61 27 L63 33 L51 38 Z"/>
+  </g>
+</svg>
