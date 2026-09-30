@@ -3,13 +3,13 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { AskField, DiffResult, Project, Task, TaskAsk, Worktree } from "../types";
 import { api } from "../api";
 import {
-  STATUS_META,
   PROFILE_META,
   clock,
   isLive,
   runDuration,
   shortId,
 } from "../lib/format";
+import { displayStatus, statusMeta } from "../lib/tasks";
 import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskSeparation } from "../lib/providers";
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
@@ -116,23 +116,25 @@ export function DetailPanel({
       className="panel flex h-full shrink-0 flex-col rounded-none border-y-0 border-r-0"
     >
       <div className="flex gap-1 border-b border-line px-3 pt-3">
-        {tabs.map(([id, label, icon]) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-[12px] transition ${
-              tab === id
-                ? "border-b-2 border-accent text-ink"
-                : "text-ink-muted hover:text-ink"
-            }`}
-          >
-            <Icon name={icon} className="h-3.5 w-3.5" />
-            {label}
-          </button>
-        ))}
+        <div className="scroll-x flex min-w-0 flex-1 items-center gap-1 overflow-x-auto whitespace-nowrap">
+          {tabs.map(([id, label, icon]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`flex shrink-0 items-center gap-1.5 rounded-t-lg px-3 py-2 text-[12px] transition ${
+                tab === id
+                  ? "border-b-2 border-accent text-ink"
+                  : "text-ink-muted hover:text-ink"
+              }`}
+            >
+              <Icon name={icon} className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
         <button
           onClick={onCollapse}
-          className="mb-1 ml-auto self-center rounded-lg p-1.5 text-ink-subtle transition hover:bg-hover hover:text-ink"
+          className="mb-1 ml-2 shrink-0 self-center rounded-lg p-1.5 text-ink-subtle transition hover:bg-hover hover:text-ink"
           title="Hide details"
           aria-label="Hide details"
         >
@@ -635,7 +637,7 @@ function DetailsView({
   onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
 }) {
-  const meta = STATUS_META[task.status];
+  const meta = statusMeta(displayStatus(task));
   const pm = PROFILE_META[task.profile] ?? PROFILE_META.autonomous;
   const review = task.review && task.review.mode !== "off" ? task.review : null;
   const reviewMeta = review ? reviewStatusMeta(review.status) : null;

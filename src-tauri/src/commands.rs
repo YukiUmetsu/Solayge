@@ -214,15 +214,172 @@ pub async fn project_default_branch(path: String) -> String {
     git::default_branch(Path::new(&path)).await
 }
 
-/// Diff of the working tree against the default branch, including uncommitted
-/// and untracked changes.
+/// Diff of the current branch against the default branch. Only committed work is
+/// shown by default; `include_local` adds staged, unstaged, and untracked
+/// changes.
 #[tauri::command]
-pub async fn project_branch_diff(path: String) -> Result<DiffResult, String> {
+pub async fn project_branch_diff(
+    path: String,
+    include_local: Option<bool>,
+) -> Result<DiffResult, String> {
     let dir = Path::new(&path);
     let base = git::default_branch(dir).await;
-    git::diff_against(dir, &base)
+    git::diff_against(dir, &base, include_local.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Stage changes: `files` empty/absent stages everything (`git add -A`),
+/// otherwise only the named paths are staged. Errors when the tree is clean.
+#[tauri::command]
+pub async fn git_stage(path: String, files: Option<Vec<String>>) -> Result<String, String> {
+    let dir = Path::new(&path);
+    if !git::has_changes(dir).await {
+        return Err("nothing to stage".into());
+    }
+    let files = files.unwrap_or_default();
+    if files.is_empty() {
+        git::git(dir, &["add", "-A"])
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok("Staged all changes.".into())
+    } else {
+        let mut args: Vec<&str> = vec!["add", "--"];
+        args.extend(files.iter().map(String::as_str));
+        git::git(dir, &args).await.map_err(|e| e.to_string())?;
+        Ok(format!("Staged {} file(s).", files.len()))
+    }
+}
+
+/// Commit staged changes. An empty message falls back to `chore: update`.
+#[tauri::command]
+pub async fn git_commit(path: String, message: String) -> Result<String, String> {
+    let dir = Path::new(&path);
+    let message = message.trim();
+    let message = if message.is_empty() {
+        "chore: update"
+    } else {
+        message
+    };
+    if !git::has_staged_changes(dir).await {
+        return Err("nothing staged to commit".into());
+    }
+    git::git(dir, &["commit", "-m", message])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Committed: {message}"))
+}
+
+/// Push the current branch to `origin`, setting its upstream.
+#[tauri::command]
+pub async fn git_push(path: String) -> Result<String, String> {
+    let dir = Path::new(&path);
+    git::git(dir, &["push", "-u", "origin", "HEAD"])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("Pushed to origin.".into())
+}
+
+/// Open a pull request against the repository's default branch. Uses `gh` when
+/// available, otherwise opens the host's compare page in the browser.
+#[tauri::command]
+pub async fn git_create_pr(path: String, title: Option<String>) -> Result<String, String> {
+    let dir = Path::new(&path);
+    let base = git::default_branch(dir).await;
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            let name = dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("changes");
+            format!("Ship: {name}")
+        });
+    let body = "Automated by Solayge.".to_string();
+
+    let repo = agent::normalize_remote(&git::remote_url(dir).await.unwrap_or_default());
+    if repo.is_empty() {
+        return Err("no git remote to create a PR against".into());
+    }
+    if git::gh_available().await {
+        let out = git::gh(
+            dir,
+            &[
+                "pr",
+                "create",
+                "--base",
+                base.as_str(),
+                "--title",
+                title.as_str(),
+                "--body",
+                body.as_str(),
+            ],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let url = out
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("http"))
+            .unwrap_or("");
+        Ok(if url.is_empty() {
+            format!("Opened a PR against {base}.")
+        } else {
+            format!("Created PR: {url}")
+        })
+    } else if agent::is_web_url(&repo) {
+        let url = format!("{repo}/compare/{base}...HEAD");
+        agent::open_with_system(Path::new(&url)).map_err(|e| e.to_string())?;
+        Ok(format!("gh not found; opened {url}"))
+    } else {
+        Err("gh is not installed and the remote is not an http(s) URL".into())
+    }
+}
+
+/// Merge the current branch's PR. `method` is `merge`, `rebase`, or anything
+/// else for a squash merge. Falls back to the host's PRs page without `gh`.
+#[tauri::command]
+pub async fn git_merge_pr(path: String, method: Option<String>) -> Result<String, String> {
+    let dir = Path::new(&path);
+    let repo = agent::normalize_remote(&git::remote_url(dir).await.unwrap_or_default());
+    if repo.is_empty() {
+        return Err("no git remote to merge a PR against".into());
+    }
+    let flag = match method.unwrap_or_default().trim() {
+        "merge" => "--merge",
+        "rebase" => "--rebase",
+        _ => "--squash",
+    };
+    if git::gh_available().await {
+        git::gh(dir, &["pr", "merge", flag, "--delete-branch"])
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Merged the PR ({flag})."))
+    } else if agent::is_web_url(&repo) {
+        let url = format!("{repo}/pulls");
+        agent::open_with_system(Path::new(&url)).map_err(|e| e.to_string())?;
+        Ok(format!("gh not found; opened {url}"))
+    } else {
+        Err("gh is not installed and the remote is not an http(s) URL".into())
+    }
+}
+
+/// Check out the default branch and pull it.
+#[tauri::command]
+pub async fn git_checkout_pull(path: String) -> Result<String, String> {
+    let dir = Path::new(&path);
+    let branch = git::default_branch(dir).await;
+    if !git::valid_ref(&branch) {
+        return Err(format!("invalid branch name: {branch}"));
+    }
+    git::git(dir, &["checkout", branch.as_str()])
+        .await
+        .map_err(|e| format!("git checkout failed: {e}"))?;
+    git::git(dir, &["pull"])
+        .await
+        .map_err(|e| format!("git pull failed: {e}"))?;
+    Ok(format!("Checked out and pulled {branch}."))
 }
 
 /// Release every draft task in a project, and re-queue failed / canceled /

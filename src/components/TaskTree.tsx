@@ -18,6 +18,7 @@ export function TaskTree({
   onClearFinished,
   deletedCount,
   onShowDeleted,
+  onShowPast,
 }: {
   tasks: Task[];
   selectedId: string | null;
@@ -32,6 +33,7 @@ export function TaskTree({
   onClearFinished: () => void;
   deletedCount: number;
   onShowDeleted: () => void;
+  onShowPast: () => void;
 }) {
   const rows = buildTree(tasks);
   const now = useNow();
@@ -55,6 +57,10 @@ export function TaskTree({
           <button className="btn btn-ghost" onClick={onCombine}>
             <Icon name="diff" className="h-3.5 w-3.5" />
             Combine branches
+          </button>
+          <button className="btn btn-ghost" onClick={onShowPast}>
+            <Icon name="clock" className="h-3.5 w-3.5" />
+            Show past tasks
           </button>
           {deletedCount > 0 && (
             <button className="btn btn-ghost" onClick={onShowDeleted}>

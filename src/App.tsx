@@ -22,6 +22,7 @@ import { PlannerModal } from "./components/PlannerModal";
 import { NewTaskModal } from "./components/NewTaskModal";
 import { EditTaskModal } from "./components/EditTaskModal";
 import { DeletedTasksModal } from "./components/DeletedTasksModal";
+import { PastTasksModal } from "./components/PastTasksModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { ShipModal } from "./components/ShipModal";
@@ -146,6 +147,7 @@ export default function App() {
   const [showMerge, setShowMerge] = useState(false);
   const [showBranchDiff, setShowBranchDiff] = useState(false);
   const [showDeleted, setShowDeleted] = useState(false);
+  const [showPast, setShowPast] = useState(false);
   const [remote, setRemote] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
@@ -283,6 +285,7 @@ export default function App() {
     setSelectedTaskId(null);
     setEditingTaskId(null);
     setShowDeleted(false);
+    setShowPast(false);
   }, [selectedProject]);
 
   const project = snapshot?.projects.find((p) => p.path === selectedProject) ?? null;
@@ -451,6 +454,7 @@ export default function App() {
                   }
                   deletedCount={deletedTasks.length}
                   onShowDeleted={() => setShowDeleted(true)}
+                  onShowPast={() => setShowPast(true)}
                 />
               </div>
 
@@ -514,6 +518,13 @@ export default function App() {
           deleted={deletedTasks}
           onClose={() => setShowDeleted(false)}
           onRestore={(id) => void runAction(() => api.restoreTask(id))}
+        />
+      )}
+      {showPast && project && (
+        <PastTasksModal
+          deleted={deletedTasks}
+          projectName={project.name}
+          onClose={() => setShowPast(false)}
         />
       )}
       {showSettings && snapshot && (

@@ -97,13 +97,23 @@ Solayge turns that graph into something you can see and control:
 ### Visibility
 
 - **Streaming logs** — stdout/stderr is streamed from the running process live.
-- **Diffs** — per-file diffs of a task's worktree, the project working tree, and
-  the current local changes against the default branch (including uncommitted and
-  untracked files).
+- **Diffs** — a wide, tabbed viewer: per-file diffs of a task's worktree, the
+  project working tree, and the current branch against the default branch. Local
+  changes is the default tab; the branch tab shows committed work (with an option
+  to include uncommitted and untracked files) and each view reports add/modify/
+  delete counts. A **Git** tab stages selected or all changed files, commits,
+  pushes, creates a PR against the default branch, merges it, and checks out and
+  pulls the default branch.
 - **Live progress** — status chips, a completion bar, running counters, and
   ticking durations.
+- **Past task history** — from a project's empty state, **Show past tasks**
+  opens a read-only history of its soft-deleted tasks, grouped by dependency,
+  with each task's prompt, output, diff, and result.
 - **Project status at a glance** — the project list shows a spinner and elapsed
   time while tasks run, then failed / blocked / pending / done counts.
+- **In review** — a task whose run succeeded but whose automatic code review is
+  still queued or running is shown as **In review** (blue, with a pulsing dot)
+  and is not counted as done until the review settles.
 - **Desktop notifications** when a task finishes, fails, or requests permission.
 
 ### Projects

@@ -1,4 +1,5 @@
 import type { Task, TaskStatus } from "../types";
+import { STATUS_META, type StatusMeta } from "./format";
 
 /**
  * Status rules shared by the task card, the tree, the project header, and the
@@ -57,4 +58,39 @@ export function isClearable(task: Task): boolean {
     );
   }
   return false;
+}
+
+/**
+ * UI-only statuses: the persisted statuses plus `in_review`, shown while a
+ * success's automatic review is still queued or running.
+ */
+export type TaskDisplayStatus = TaskStatus | "in_review";
+
+/**
+ * A run that succeeded but whose review has not settled yet. The backend holds
+ * dependents back until it does (`scheduler::review_clear`), so the UI shows it
+ * as a distinct in-progress state and does not count it as done.
+ */
+export function isReviewInProgress(task: Task): boolean {
+  return (
+    task.status === "succeeded" &&
+    !!task.review &&
+    task.review.mode !== "off" &&
+    (task.review.status === "pending" || task.review.status === "running")
+  );
+}
+
+export function displayStatus(task: Task): TaskDisplayStatus {
+  return isReviewInProgress(task) ? "in_review" : task.status;
+}
+
+export const IN_REVIEW_META: StatusMeta = {
+  label: "In review",
+  dot: "bg-info running-dot",
+  chip: "bg-info-soft border-info-line",
+  text: "text-info",
+};
+
+export function statusMeta(status: TaskDisplayStatus): StatusMeta {
+  return status === "in_review" ? IN_REVIEW_META : STATUS_META[status];
 }

@@ -24,7 +24,7 @@ export function DiffFile({
           className={`h-3 w-3 text-ink-subtle transition ${open ? "rotate-90" : ""}`}
         />
         <span className="mono truncate text-ink">{path}</span>
-        <span className="mono ml-auto text-[10px] text-ink-subtle">{status}</span>
+        <span className="mono ml-auto text-[10px] text-ink-subtle">{status.trim()}</span>
       </button>
       {open && (
         <pre className="mono max-h-72 overflow-auto bg-well-strong p-2 text-[11px] leading-relaxed">
@@ -46,6 +46,41 @@ export function DiffFile({
           ))}
         </pre>
       )}
+    </div>
+  );
+}
+
+/** Count a diff's files as added, modified, or deleted. */
+export function summarizeDiff(files: { status: string }[]): {
+  added: number;
+  modified: number;
+  deleted: number;
+} {
+  let added = 0;
+  let modified = 0;
+  let deleted = 0;
+  for (const f of files) {
+    const status = f.status.trim();
+    if (status.startsWith("A") || status === "??" || status === "?") {
+      added += 1;
+    } else if (status.startsWith("D")) {
+      deleted += 1;
+    } else {
+      modified += 1;
+    }
+  }
+  return { added, modified, deleted };
+}
+
+/** The "N files changed / X added / Y modified / Z deleted" summary row. */
+export function DiffStats({ files }: { files: { status: string }[] }) {
+  const { added, modified, deleted } = summarizeDiff(files);
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+      <span className="text-ink-muted">{files.length} files changed</span>
+      <span className="text-success">{added} added</span>
+      <span className="text-accent-text">{modified} modified</span>
+      {deleted > 0 && <span className="text-danger">{deleted} deleted</span>}
     </div>
   );
 }

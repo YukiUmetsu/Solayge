@@ -30,8 +30,19 @@ export const api = {
     invoke<DiffResult>("git_diff", { path, target: target ?? null }),
   projectDefaultBranch: (path: string) =>
     invoke<string>("project_default_branch", { path }),
-  branchDiff: (path: string) =>
-    invoke<DiffResult>("project_branch_diff", { path }),
+  branchDiff: (path: string, includeLocal = false) =>
+    invoke<DiffResult>("project_branch_diff", { path, includeLocal }),
+  gitStage: (path: string, files?: string[] | null) =>
+    invoke<string>("git_stage", { path, files: files ?? null }),
+  gitCommit: (path: string, message: string) =>
+    invoke<string>("git_commit", { path, message }),
+  gitPush: (path: string) => invoke<string>("git_push", { path }),
+  gitCreatePr: (path: string, title?: string | null) =>
+    invoke<string>("git_create_pr", { path, title: title ?? null }),
+  gitMergePr: (path: string, method?: string | null) =>
+    invoke<string>("git_merge_pr", { path, method: method ?? null }),
+  gitCheckoutPull: (path: string) =>
+    invoke<string>("git_checkout_pull", { path }),
   executeProject: (projectPath: string) =>
     invoke<Snapshot>("execute_project", { projectPath }),
   createTasks: (

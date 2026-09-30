@@ -1,12 +1,17 @@
 import type { Task } from "../types";
 import {
-  STATUS_META,
   PROFILE_META,
   isLive,
   runDuration,
   shortId,
 } from "../lib/format";
-import { canCancel, canRun, isTerminalStatus } from "../lib/tasks";
+import {
+  canCancel,
+  canRun,
+  displayStatus,
+  isTerminalStatus,
+  statusMeta,
+} from "../lib/tasks";
 import { providerLabel, reviewStatusMeta, taskKindLabel, taskSeparationDisplay } from "../lib/providers";
 import { Icon } from "./Icons";
 
@@ -33,7 +38,7 @@ export function TaskCard({
   onDelete: () => void;
   onShowDiff: () => void;
 }) {
-  const meta = STATUS_META[task.status];
+  const meta = statusMeta(displayStatus(task));
   const pm = PROFILE_META[task.profile] ?? PROFILE_META.autonomous;
   const live = isLive(task);
   const review =

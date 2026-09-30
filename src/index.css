@@ -318,6 +318,27 @@ html[data-os="macos"] .titlebar-pad {
   background-clip: content-box;
 }
 
+.scroll-x {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+.scroll-x::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.scroll-x::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-x::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  background-clip: content-box;
+}
+
 .mono {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }

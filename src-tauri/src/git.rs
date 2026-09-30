@@ -23,6 +23,25 @@ pub async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Run `gh` in `dir` and capture its stdout. Mirrors [`git`]: an unsuccessful
+/// exit becomes an error carrying the trimmed stderr.
+pub async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("gh")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| anyhow!("failed to run gh: {e}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "gh {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 async fn git_ok(dir: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .current_dir(dir)
@@ -38,13 +57,17 @@ pub async fn is_repo(dir: &Path) -> bool {
 }
 
 /// Parse `git status --porcelain=v1` output into changed files.
+///
+/// The two-character porcelain code is kept verbatim (`" M"` = modified but
+/// unstaged, `"M "` = staged, `"??"` = untracked) so callers can tell staged
+/// from unstaged changes by inspecting the first column.
 fn parse_status(output: &str) -> Vec<ChangedFile> {
     let mut files = Vec::new();
     for line in output.lines() {
         if line.len() < 4 {
             continue;
         }
-        let status = line[..2].trim().to_string();
+        let status = line[..2].to_string();
         let mut path = line[3..].to_string();
         if let Some(idx) = path.find(" -> ") {
             path = path[idx + 4..].to_string();
@@ -252,9 +275,50 @@ fn read_untracked(dir: &Path, path: &str) -> String {
     body
 }
 
+/// Committed work on the current branch since it diverged from `base`: the
+/// changes `base...HEAD` introduces, with no staged, unstaged, or untracked
+/// files.
+pub async fn diff_committed(dir: &Path, base: &str) -> Result<DiffResult> {
+    if !is_repo(dir).await {
+        return Err(anyhow!("not a git repository"));
+    }
+    let range = format!("{base}...HEAD");
+    let stat = git(dir, &["diff", &range, "--stat", "--no-color"])
+        .await
+        .unwrap_or_default();
+    let name_status = git(dir, &["diff", &range, "--name-status", "--no-color"])
+        .await
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    for line in name_status.lines() {
+        let mut parts = line.split('\t');
+        let Some(status) = parts.next() else { continue };
+        let rest: Vec<&str> = parts.collect();
+        let Some(path) = rest.last() else { continue };
+        if path.is_empty() {
+            continue;
+        }
+        let diff = git(dir, &["diff", &range, "--no-color", "--", path])
+            .await
+            .unwrap_or_default();
+        files.push(FileDiff {
+            path: path.to_string(),
+            status: status.trim().to_string(),
+            diff,
+        });
+    }
+
+    Ok(DiffResult { stat, files })
+}
+
 /// Everything the working tree differs from `base` by — committed work on the
 /// current branch plus staged and unstaged local changes and untracked files.
-pub async fn diff_against(dir: &Path, base: &str) -> Result<DiffResult> {
+/// With `include_local` false it narrows to `diff_committed`.
+pub async fn diff_against(dir: &Path, base: &str, include_local: bool) -> Result<DiffResult> {
+    if !include_local {
+        return diff_committed(dir, base).await;
+    }
     if !is_repo(dir).await {
         return Err(anyhow!("not a git repository"));
     }
@@ -471,7 +535,7 @@ mod tests {
         let files = parse_status(out);
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].path, "src/main.rs");
-        assert_eq!(files[0].status, "M");
+        assert_eq!(files[0].status, " M");
         assert_eq!(files[1].status, "??");
         assert_eq!(files[2].path, "b.rs");
     }

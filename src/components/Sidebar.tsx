@@ -1,5 +1,6 @@
 import type { Project, Snapshot, Task } from "../types";
 import { compactDuration } from "../lib/format";
+import { displayStatus, isReviewInProgress } from "../lib/tasks";
 import { useTheme } from "../theme";
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
@@ -29,7 +30,10 @@ export function Sidebar({
 }) {
   const total = snapshot.tasks.length;
   const running = snapshot.tasks.filter((t) => t.status === "running").length;
-  const done = snapshot.tasks.filter((t) => t.status === "succeeded").length;
+  const done = snapshot.tasks.filter(
+    (t) => displayStatus(t) === "succeeded",
+  ).length;
+  const inReview = snapshot.tasks.filter(isReviewInProgress).length;
   const failed = snapshot.tasks.filter((t) => t.status === "failed").length;
   const interrupted = snapshot.tasks.filter(
     (t) => t.status === "interrupted",
@@ -217,6 +221,12 @@ export function Sidebar({
             {interrupted} interrupted
           </div>
         )}
+        {inReview > 0 && (
+          <div className="flex items-center gap-1.5 text-[11px] text-info">
+            <span className="h-1.5 w-1.5 rounded-full bg-info running-dot" />
+            {inReview} in review
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -243,7 +253,8 @@ function Stat({
 
 /**
  * A small always-visible status chip for a project: a spinner and elapsed time
- * while anything runs, then failures, blocked, pending, or a done check.
+ * while anything runs, then a pending review, failures, blocked, pending, or a
+ * done check.
  */
 function ProjectStatus({ tasks, now }: { tasks: Task[]; now: number }) {
   const chip =
@@ -262,6 +273,19 @@ function ProjectStatus({ tasks, now }: { tasks: Task[]; now: number }) {
       >
         <Icon name="refresh" className="h-3 w-3 animate-spin" />
         {compactDuration(elapsed)}
+      </span>
+    );
+  }
+
+  const inReview = tasks.filter(isReviewInProgress).length;
+  if (inReview > 0) {
+    return (
+      <span
+        className={`${chip} border-info-line bg-info-soft text-info`}
+        title={`${inReview} in review`}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-info running-dot" />
+        {inReview} in review
       </span>
     );
   }
@@ -320,7 +344,7 @@ function ProjectStatus({ tasks, now }: { tasks: Task[]; now: number }) {
     );
   }
 
-  const done = tasks.filter((t) => t.status === "succeeded").length;
+  const done = tasks.filter((t) => displayStatus(t) === "succeeded").length;
   if (done > 0) {
     return (
       <span
