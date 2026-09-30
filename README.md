@@ -107,8 +107,9 @@ Solayge turns that graph into something you can see and control:
 - **Live progress** — status chips, a completion bar, running counters, and
   ticking durations.
 - **Past task history** — from a project's empty state, **Show past tasks**
-  opens a read-only history of its soft-deleted tasks, grouped by dependency,
-  with each task's prompt, output, diff, and result.
+  opens a read-only history of the project's removed tasks — those you delete
+  and those **Clear finished** retires — grouped by dependency, with each task's
+  prompt, output, diff, and result.
 - **Project status at a glance** — the project list shows a spinner and elapsed
   time while tasks run, then failed / blocked / pending / done counts.
 - **In review** — a task whose run succeeded but whose automatic code review is

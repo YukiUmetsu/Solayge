@@ -1142,15 +1142,6 @@ fn is_clearable(t: &Task) -> bool {
     }
 }
 
-/// Drop cleared ids from the survivors' dependency lists, so a task that only
-/// waited on a cleared task becomes runnable instead of waiting forever on an
-/// id that no longer exists.
-fn rewire_after_removal(tasks: &mut [Task], removed: &HashSet<String>) {
-    for t in tasks.iter_mut() {
-        t.depends_on.retain(|d| !removed.contains(d));
-    }
-}
-
 #[tauri::command]
 pub async fn clear_finished(app: AppHandle, project_path: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
@@ -1163,7 +1154,30 @@ pub async fn clear_finished(app: AppHandle, project_path: String) -> Result<Snap
             .map(|t| (t.id.clone(), t.worktree_path.clone(), t.branch.clone()))
             .collect()
     };
+
+    // Archive each cleared task into the project's history (like Delete) instead
+    // of dropping it, so it stays viewable and restorable from Past tasks. Keep
+    // the log tail and working-tree diff before the worktree and log are removed.
+    let mut archived: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     for (id, wt, branch) in &ids {
+        let summary = {
+            let text = std::fs::read_to_string(st.log_path(id)).unwrap_or_default();
+            let tail = log_tail(&text, LOG_TAIL_LINES);
+            (!tail.trim().is_empty()).then_some(tail)
+        };
+        let diff = {
+            let dir = wt
+                .clone()
+                .filter(|w| Path::new(w).exists())
+                .unwrap_or_else(|| project_path.clone());
+            git::diff(Path::new(&dir))
+                .await
+                .ok()
+                .map(|d| render_diff(&d, MAX_STORED_DIFF))
+                .filter(|s| !s.trim().is_empty())
+        };
+        archived.insert(id.clone(), (summary, diff));
+
         if let Some(w) = wt {
             let _ = git::worktree_remove(Path::new(&project_path), Path::new(w)).await;
         }
@@ -1172,11 +1186,23 @@ pub async fn clear_finished(app: AppHandle, project_path: String) -> Result<Snap
         }
         let _ = std::fs::remove_file(st.log_path(id));
     }
-    let removed: HashSet<String> = ids.into_iter().map(|(id, _, _)| id).collect();
+
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.tasks.retain(|t| !removed.contains(&t.id));
-        rewire_after_removal(&mut inner.tasks, &removed);
+        let state = &mut *inner;
+        let at = now();
+        for (id, _, _) in &ids {
+            let (summary, diff) = archived.remove(id).unwrap_or((None, None));
+            archive_task(
+                &mut state.tasks,
+                &mut state.deleted_tasks,
+                id,
+                summary,
+                diff,
+                MAX_DELETED_PER_PROJECT,
+                at,
+            );
+        }
     }
     st.save();
     emit_state(&app);
@@ -1660,14 +1686,12 @@ pub async fn list_models(
 mod tests {
     use super::{
         apply_draft_patch, archive_task, cancel_task_state, has_dependency_cycle, is_clearable,
-        log_tail, render_diff, requeue_review, reset_for_rerun, restore_task_state,
-        rewire_after_removal, valid_task_id,
+        log_tail, render_diff, requeue_review, reset_for_rerun, restore_task_state, valid_task_id,
     };
     use crate::models::{
         BranchMode, DeletedTask, DiffResult, FileDiff, GitOp, Isolation, PermissionProfile,
         ReviewMode, ReviewStatus, Task, TaskAsk, TaskKind, TaskPatch, TaskReview, TaskStatus,
     };
-    use std::collections::HashSet;
 
     fn task(status: TaskStatus, isolation: Isolation) -> Task {
         Task {
@@ -1949,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_rewires_dependents_onto_cleared_tasks() {
+    fn clearing_archives_and_rewires_dependents() {
         let done = {
             let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
             t.id = "done".into();
@@ -1960,9 +1984,9 @@ mod tests {
         child.depends_on = vec!["done".into(), "other".into()];
 
         let mut tasks = vec![done, child];
-        let removed: HashSet<String> = ["done".to_string()].into_iter().collect();
-        tasks.retain(|t| !removed.contains(&t.id));
-        rewire_after_removal(&mut tasks, &removed);
+        let mut deleted: Vec<DeletedTask> = Vec::new();
+        // Clear finished archives into the history instead of dropping the task.
+        archive_task(&mut tasks, &mut deleted, "done", None, None, 50, 9).expect("archived");
 
         assert_eq!(tasks.len(), 1);
         assert_eq!(
@@ -1970,6 +1994,8 @@ mod tests {
             vec!["other".to_string()],
             "only the cleared id is dropped"
         );
+        assert_eq!(deleted.len(), 1, "a cleared task lands in the history");
+        assert_eq!(deleted[0].task.id, "done");
     }
 
     // ---- soft delete / restore ----
