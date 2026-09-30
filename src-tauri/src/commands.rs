@@ -524,7 +524,11 @@ pub fn create_tasks(
                 .or(global_default)
                 .unwrap_or_default(),
             last_permission: None,
-            base_ref: nt.base_ref.clone(),
+            base_ref: nt
+                .base_ref
+                .clone()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             branch: None,
             worktree_path: None,
             not_before,
@@ -626,7 +630,10 @@ fn apply_draft_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
         t.profile = v;
     }
     if let Some(v) = patch.base_ref {
-        t.base_ref = Some(v);
+        // A blank base ref means "unset" (start from HEAD), not an empty ref
+        // that would later fail worktree creation.
+        let v = v.trim();
+        t.base_ref = if v.is_empty() { None } else { Some(v.to_string()) };
     }
     if let Some(v) = patch.delay_seconds {
         t.not_before = if v > 0 { Some(now() + v) } else { None };
@@ -1871,6 +1878,32 @@ mod tests {
         assert_eq!(t.command.as_deref(), Some("echo hi"));
         assert_eq!(t.branch_mode, BranchMode::New);
         assert_eq!(t.new_branch.as_deref(), Some("feat/x"));
+    }
+
+    #[test]
+    fn a_blank_base_ref_patch_clears_it() {
+        // An empty/whitespace base ref from a form must mean "unset", not a
+        // stored empty string that later fails worktree creation.
+        let mut t = task(TaskStatus::Draft, Isolation::Worktree);
+        t.base_ref = Some("main".into());
+        apply_draft_patch(
+            &mut t,
+            TaskPatch {
+                title: None,
+                prompt: None,
+                isolation: None,
+                profile: None,
+                base_ref: Some("   ".into()),
+                delay_seconds: None,
+                depends_on: None,
+                command: None,
+                branch_mode: None,
+                new_branch: None,
+                kind: None,
+            },
+        )
+        .unwrap();
+        assert!(t.base_ref.is_none(), "a blank base ref means unset");
     }
 
     #[test]

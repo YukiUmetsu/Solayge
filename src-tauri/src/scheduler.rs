@@ -531,6 +531,9 @@ async fn prepare_worktree(
     let root = git::worktree_root(project);
     let wt = root.join(short_id(id));
     let branch = format!("devtools/{}", short_id(id));
+    // A blank base ref (e.g. a form field left empty and saved by an older
+    // build) means "no base", not an invalid one; treat it like an absent value.
+    let base_ref = base_ref.map(str::trim).filter(|b| !b.is_empty());
     if let Some(base) = base_ref {
         if !git::valid_ref(base) {
             anyhow::bail!("invalid base ref: {base}");
@@ -2402,8 +2405,8 @@ where
 mod tests {
     use super::{
         active_heartbeat_ids, choose_branch, dispatch, local_clock, mark_interrupted, now,
-        resolve_named_branch, review_clear, reviews_to_start, source_statuses, stall_sweep,
-        supervised_tick, BranchChoice,
+        prepare_worktree, resolve_named_branch, review_clear, reviews_to_start, source_statuses,
+        stall_sweep, supervised_tick, BranchChoice,
     };
     use std::path::Path;
     use crate::models::{
@@ -3138,6 +3141,26 @@ mod tests {
         assert!(!none[0].dirty);
         assert!(none[0].worktree.is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn worktree_treats_a_blank_base_ref_as_head() {
+        let dir = std::env::temp_dir().join(format!("solayge-blankbase-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        let id = "abcdef12-0000-0000-0000-000000000000";
+
+        // A blank base ref must fall back to HEAD instead of failing.
+        let (wt, branch) = prepare_worktree(&dir, id, Some(""))
+            .await
+            .expect("a blank base ref should fall back to HEAD");
+        assert!(wt.exists());
+        assert_eq!(branch, "devtools/abcdef12");
+
+        // A genuinely invalid ref is still rejected.
+        assert!(prepare_worktree(&dir, id, Some("-x")).await.is_err());
+
+        let _ = crate::git::worktree_remove(&dir, &wt).await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
