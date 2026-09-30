@@ -382,6 +382,51 @@ pub async fn git_checkout_pull(path: String) -> Result<String, String> {
     Ok(format!("Checked out and pulled {branch}."))
 }
 
+/// Inspect each combine source before a merge: the branch and worktree it names,
+/// and whether that worktree holds uncommitted work the merge would miss. The UI
+/// warns on this and offers to commit before combining.
+#[tauri::command]
+pub async fn merge_preflight(
+    app: AppHandle,
+    path: String,
+    sources: Vec<String>,
+) -> Result<Vec<MergeSourceStatus>, String> {
+    Ok(crate::scheduler::merge_source_statuses(&app, &path, &sources).await)
+}
+
+/// Stage and commit any uncommitted work in the given worktrees so a subsequent
+/// merge actually includes it. Worktrees that are missing, not repositories, or
+/// already clean are skipped. Returns a short summary.
+#[tauri::command]
+pub async fn commit_worktrees(
+    worktrees: Vec<String>,
+    message: Option<String>,
+) -> Result<String, String> {
+    let message = message
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "chore: commit uncommitted work before combining".to_string());
+    let mut committed = 0usize;
+    for wt in &worktrees {
+        let dir = Path::new(wt);
+        if !dir.is_dir() || !git::is_repo(dir).await || !git::has_changes(dir).await {
+            continue;
+        }
+        git::git(dir, &["add", "-A"])
+            .await
+            .map_err(|e| format!("{wt}: {e}"))?;
+        git::git(dir, &["commit", "-m", message.as_str()])
+            .await
+            .map_err(|e| format!("{wt}: {e}"))?;
+        committed += 1;
+    }
+    Ok(if committed == 0 {
+        "No uncommitted work to commit.".to_string()
+    } else {
+        format!("Committed uncommitted work in {committed} worktree(s).")
+    })
+}
+
 /// Release every draft task in a project, and re-queue failed / canceled /
 /// blocked ones, so the scheduler runs them again.
 #[tauri::command]

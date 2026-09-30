@@ -10,9 +10,9 @@ use crate::agent;
 use crate::git;
 use crate::opencode_server;
 use crate::models::{
-    BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSpec,
-    MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt, Task,
-    TaskKind, TaskStatus,
+    BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSourceStatus,
+    MergeSpec, MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt,
+    Task, TaskKind, TaskStatus,
 };
 use crate::state::AppState;
 use tauri_plugin_notification::NotificationExt;
@@ -1632,6 +1632,76 @@ fn resolve_sources(app: &AppHandle, sources: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Resolve each combine source to the branch and worktree it names, together
+/// with that worktree's uncommitted state. A source that is a task id uses the
+/// task's recorded branch and worktree; a bare branch name is matched to the
+/// worktree that has it checked out (if any). A branch with no worktree has
+/// nothing to commit.
+pub(crate) async fn merge_source_statuses(
+    app: &AppHandle,
+    project: &str,
+    sources: &[String],
+) -> Vec<MergeSourceStatus> {
+    let tasks: Vec<(String, Option<String>, Option<String>)> = {
+        let st = app.state::<AppState>();
+        let inner = crate::state::lock(&st.inner);
+        inner
+            .tasks
+            .iter()
+            .filter(|t| t.project_path == project)
+            .map(|t| (t.id.clone(), t.branch.clone(), t.worktree_path.clone()))
+            .collect()
+    };
+    source_statuses(&tasks, project, sources).await
+}
+
+/// Core of [`merge_source_statuses`], taking candidate tasks as plain data so it
+/// can be exercised without an `AppHandle`.
+async fn source_statuses(
+    tasks: &[(String, Option<String>, Option<String>)],
+    project: &str,
+    sources: &[String],
+) -> Vec<MergeSourceStatus> {
+    let worktrees = git::worktrees(Path::new(project)).await.unwrap_or_default();
+
+    let mut out = Vec::with_capacity(sources.len());
+    for source in sources {
+        let source = source.trim().to_string();
+        let task = tasks.iter().find(|(id, _, _)| *id == source);
+        let branch = match task {
+            Some((_, branch, _)) => branch.clone(),
+            None if !source.is_empty() => Some(source.clone()),
+            None => None,
+        };
+        let worktree = match task.and_then(|(_, _, wt)| wt.clone()) {
+            Some(wt) => Some(wt),
+            None => branch.as_ref().and_then(|b| {
+                worktrees
+                    .iter()
+                    .find(|w| w.branch.as_deref() == Some(b.as_str()))
+                    .map(|w| w.path.clone())
+            }),
+        }
+        .filter(|w| Path::new(w).is_dir());
+
+        let changed = match worktree.as_deref() {
+            Some(wt) => git::status(Path::new(wt))
+                .await
+                .map(|s| s.changed_files.len())
+                .unwrap_or(0),
+            None => 0,
+        };
+        out.push(MergeSourceStatus {
+            source,
+            branch,
+            worktree,
+            dirty: changed > 0,
+            changed,
+        });
+    }
+    out
+}
+
 /// A managed-step failure: pause for the user (`Attention`) or hard-fail.
 enum StepError {
     Attention(String),
@@ -1778,6 +1848,58 @@ async fn run_merge_steps(
             return Err(format!("invalid source branch: {source}").into());
         }
     }
+
+    // Uncommitted work in a source worktree is not on its branch, so the merge
+    // would silently leave it out. Commit it first when the task asks, otherwise
+    // warn loudly so the user knows it is excluded.
+    let dirty: Vec<MergeSourceStatus> = merge_source_statuses(app, &run.project, &spec.sources)
+        .await
+        .into_iter()
+        .filter(|s| s.dirty)
+        .collect();
+    if !dirty.is_empty() {
+        if spec.commit_sources {
+            for s in &dirty {
+                let Some(wt) = s.worktree.as_deref() else { continue };
+                ensure_running(app, &run.id)?;
+                log_note(
+                    app,
+                    &run.id,
+                    &format!("Committing {} uncommitted file(s) in {wt}", s.changed),
+                );
+                if run_git(app, run, Path::new(wt), &["add", "-A"], env).await != 0 {
+                    return Err(format!("could not stage changes in {wt}").into());
+                }
+                ensure_running(app, &run.id)?;
+                if run_git(
+                    app,
+                    run,
+                    Path::new(wt),
+                    &["commit", "-m", "chore: commit uncommitted work before combining"],
+                    env,
+                )
+                .await != 0
+                {
+                    return Err(format!("could not commit changes in {wt}").into());
+                }
+            }
+        } else {
+            let names: Vec<String> = dirty
+                .iter()
+                .map(|s| s.worktree.clone().unwrap_or_else(|| s.source.clone()))
+                .collect();
+            log_note(
+                app,
+                &run.id,
+                &format!(
+                    "Warning: uncommitted changes in {} are not part of the source branches and \
+                     will be left out of the combine.",
+                    names.join(", ")
+                ),
+            );
+        }
+    }
+
     log_note(
         app,
         &run.id,
@@ -2280,8 +2402,8 @@ where
 mod tests {
     use super::{
         active_heartbeat_ids, choose_branch, dispatch, local_clock, mark_interrupted, now,
-        resolve_named_branch, review_clear, reviews_to_start, stall_sweep, supervised_tick,
-        BranchChoice,
+        resolve_named_branch, review_clear, reviews_to_start, source_statuses, stall_sweep,
+        supervised_tick, BranchChoice,
     };
     use std::path::Path;
     use crate::models::{
@@ -2948,6 +3070,73 @@ mod tests {
         assert!(resolve_named_branch(&dir, "feat", false).await.is_err());
         // ...but the same name recorded from a previous attempt is allowed.
         assert!(resolve_named_branch(&dir, "feat", true).await.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- combine preflight (source worktree status) ----
+
+    #[tokio::test]
+    async fn preflight_flags_dirty_source_worktrees_by_task_and_branch() {
+        let dir = std::env::temp_dir().join(format!("solayge-preflight-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        let dir = std::fs::canonicalize(&dir).unwrap();
+
+        // A source branch checked out in its own worktree, with one untracked file.
+        let wt = dir.join("wt");
+        let wt_arg = wt.to_string_lossy().to_string();
+        let out = crate::git::git_cmd(&dir, &["worktree", "add", "-q", "-b", "feat", &wt_arg])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let wt = std::fs::canonicalize(&wt).unwrap();
+        let wt_s = wt.to_string_lossy().to_string();
+        std::fs::write(wt.join("dirty.txt"), "work in progress").unwrap();
+
+        let dir_s = dir.to_string_lossy().to_string();
+
+        // A source that is a task id uses the task's recorded branch and worktree.
+        let tasks = vec![(
+            "t1".to_string(),
+            Some("feat".to_string()),
+            Some(wt_s.clone()),
+        )];
+        let by_task = source_statuses(&tasks, &dir_s, &["t1".to_string()]).await;
+        assert_eq!(by_task.len(), 1);
+        assert!(by_task[0].dirty, "a dirty source worktree must be flagged");
+        assert_eq!(by_task[0].changed, 1);
+        assert_eq!(by_task[0].branch.as_deref(), Some("feat"));
+
+        // A bare branch name resolves to the worktree that has it checked out.
+        let by_branch = source_statuses(&[], &dir_s, &["feat".to_string()]).await;
+        assert!(by_branch[0].dirty);
+        assert_eq!(by_branch[0].worktree.as_deref(), Some(wt_s.as_str()));
+
+        // Once committed, the source is clean.
+        assert!(
+            crate::git::git_cmd(&wt, &["add", "-A"])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            crate::git::git_cmd(&wt, &["commit", "-qm", "wip"])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+        let clean = source_statuses(&[], &dir_s, &["feat".to_string()]).await;
+        assert!(!clean[0].dirty, "a committed source worktree is clean");
+
+        // A branch with no worktree has nothing to commit.
+        let none = source_statuses(&[], &dir_s, &["no-such-branch".to_string()]).await;
+        assert!(!none[0].dirty);
+        assert!(none[0].worktree.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

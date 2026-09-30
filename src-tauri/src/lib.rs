@@ -74,6 +74,8 @@ pub fn run() {
             commands::git_create_pr,
             commands::git_merge_pr,
             commands::git_checkout_pull,
+            commands::merge_preflight,
+            commands::commit_worktrees,
             commands::execute_project,
             commands::create_tasks,
             commands::update_task,

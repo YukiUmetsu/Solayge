@@ -329,6 +329,12 @@ target (the default branch by default), merges each source (merge / octopus /
 rebase), runs the test command, and can push the target. A failed test can be handed
 to an agent to fix and re-run.
 
+Only committed work is merged, so before it lands the combine inspects every
+source's worktree. If any of them has uncommitted work, the dialog warns you and
+offers to stage and commit it first (on by default) — otherwise those changes would
+be silently left out. The same check runs again when the task starts; a source that
+is still dirty and not being committed is called out in the task log.
+
 ### Conflict policy
 
 Set per project (**Project settings → Git**):

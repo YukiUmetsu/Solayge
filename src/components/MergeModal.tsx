@@ -1,5 +1,13 @@
-import { useState } from "react";
-import type { MergeSpec, MergeStrategy, NewTask, Project, Snapshot, Task } from "../types";
+import { useEffect, useState } from "react";
+import type {
+  MergeSourceStatus,
+  MergeSpec,
+  MergeStrategy,
+  NewTask,
+  Project,
+  Snapshot,
+  Task,
+} from "../types";
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Field, SectionLabel } from "./AgentConfigForm";
@@ -35,6 +43,9 @@ export function MergeModal({
   const [pushTarget, setPushTarget] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [commitSources, setCommitSources] = useState(true);
+  const [sourcesStatus, setSourcesStatus] = useState<MergeSourceStatus[]>([]);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
 
   const extraBranches = extra
     .split(",")
@@ -42,6 +53,40 @@ export function MergeModal({
     .filter(Boolean);
   const sources = [...selected, ...extraBranches];
   const skills = project.skills ?? [];
+  const dirty = sourcesStatus.filter((s) => s.dirty);
+
+  // Ask the backend which chosen source worktrees have uncommitted work. Those
+  // changes are not on their branches, so a combine would leave them out unless
+  // we commit first. Debounced because the "other branches" field changes per
+  // keystroke.
+  const sourceKey = sources.join("\u0000");
+  useEffect(() => {
+    if (sources.length === 0) {
+      setSourcesStatus([]);
+      setPreflightError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      api
+        .mergePreflight(project.path, sources)
+        .then((next) => {
+          if (cancelled) return;
+          setSourcesStatus(next);
+          setPreflightError(null);
+        })
+        .catch((e) => {
+          if (!cancelled) setPreflightError(String(e));
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // `sources` is derived from `sourceKey`; re-running on the joined key avoids
+    // a fetch on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey, project.path]);
 
   async function submit() {
     setError(null);
@@ -51,6 +96,19 @@ export function MergeModal({
     }
     setBusy(true);
     try {
+      if (commitSources) {
+        // Re-check at submit time: the selection may have changed since the
+        // debounced preflight, and a stale set could commit the wrong worktrees.
+        const fresh = await api.mergePreflight(project.path, sources);
+        const dirtyNow = fresh.filter((s) => s.dirty);
+        if (dirtyNow.length > 0) {
+          await api.commitWorktrees(
+            dirtyNow
+              .map((s) => s.worktree)
+              .filter((w): w is string => typeof w === "string"),
+          );
+        }
+      }
       const spec: MergeSpec = {
         sources,
         target: target.trim() || null,
@@ -58,6 +116,7 @@ export function MergeModal({
         test_command: testCommand.trim() || null,
         fix_on_failure: fixOnFailure,
         push_target: pushTarget,
+        commit_sources: commitSources,
       };
       const task: NewTask = {
         title: `Combine ${sources.length} branch${sources.length === 1 ? "" : "es"}`,
@@ -88,7 +147,11 @@ export function MergeModal({
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={busy}>
             <Icon name="diff" className="h-3.5 w-3.5" />
-            {busy ? "Creating…" : "Create combine task"}
+            {busy
+              ? "Creating…"
+              : commitSources && dirty.length > 0
+                ? "Commit & combine"
+                : "Create combine task"}
           </button>
         </>
       }
@@ -136,6 +199,44 @@ export function MergeModal({
             />
           </Field>
         </section>
+
+        {dirty.length > 0 && (
+          <section className="space-y-2 rounded-lg border border-warning-line bg-warning-soft p-3">
+            <div className="flex items-start gap-2">
+              <Icon name="alert" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+              <div className="min-w-0 space-y-1 text-[11.5px] text-ink-muted">
+                <div className="font-medium text-warning">
+                  {dirty.length} source worktree
+                  {dirty.length === 1 ? "" : "s"} have uncommitted work
+                </div>
+                <ul className="space-y-0.5">
+                  {dirty.map((s) => (
+                    <li key={s.source} className="mono truncate text-[10.5px]">
+                      {s.worktree ?? s.source} · {s.changed} file
+                      {s.changed === 1 ? "" : "s"}
+                    </li>
+                  ))}
+                </ul>
+                <p>
+                  Only committed work on a source branch is combined, so these
+                  changes would be left out. Commit them first, or they stay
+                  uncommitted.
+                </p>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-[11.5px] text-ink-muted">
+              <input
+                type="checkbox"
+                checked={commitSources}
+                onChange={(e) => setCommitSources(e.target.checked)}
+              />
+              Stage and commit this work before combining
+            </label>
+          </section>
+        )}
+        {preflightError && (
+          <p className="text-[11px] text-danger">{preflightError}</p>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Land on" hint="Blank uses the default branch.">

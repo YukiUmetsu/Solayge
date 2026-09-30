@@ -167,6 +167,19 @@ export interface MergeSpec {
   test_command?: string | null;
   fix_on_failure: boolean;
   push_target: boolean;
+  /** Commit uncommitted work in each source worktree before combining. */
+  commit_sources: boolean;
+}
+
+/** The pre-combine state of one source selected for a merge. */
+export interface MergeSourceStatus {
+  /** The source as given (a task id or a branch name). */
+  source: string;
+  branch?: string | null;
+  worktree?: string | null;
+  /** Whether the worktree has uncommitted work the merge would otherwise miss. */
+  dirty: boolean;
+  changed: number;
 }
 
 export interface CommandTemplates {

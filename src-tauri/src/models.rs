@@ -113,6 +113,29 @@ pub struct MergeSpec {
     /// Push the target branch after landing.
     #[serde(default)]
     pub push_target: bool,
+    /// Stage and commit uncommitted work in each source's worktree before
+    /// combining, so it is actually part of the branch that gets merged.
+    #[serde(default)]
+    pub commit_sources: bool,
+}
+
+/// The pre-combine state of one source: the branch and worktree it refers to,
+/// and whether that worktree holds uncommitted work the merge would otherwise
+/// leave out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeSourceStatus {
+    /// The source as given (a task id or a branch name).
+    pub source: String,
+    /// The branch the source resolves to, when known.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The worktree checked out to that branch, when one exists.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// Whether the worktree has staged, unstaged, or untracked changes.
+    pub dirty: bool,
+    /// How many files are changed in the worktree.
+    pub changed: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

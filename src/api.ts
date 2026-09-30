@@ -6,6 +6,7 @@ import type {
   EnvironmentStatus,
   GitStatus,
   Isolation,
+  MergeSourceStatus,
   NewTask,
   PermissionProfile,
   PlanResult,
@@ -43,6 +44,13 @@ export const api = {
     invoke<string>("git_merge_pr", { path, method: method ?? null }),
   gitCheckoutPull: (path: string) =>
     invoke<string>("git_checkout_pull", { path }),
+  mergePreflight: (path: string, sources: string[]) =>
+    invoke<MergeSourceStatus[]>("merge_preflight", { path, sources }),
+  commitWorktrees: (worktrees: string[], message?: string | null) =>
+    invoke<string>("commit_worktrees", {
+      worktrees,
+      message: message ?? null,
+    }),
   executeProject: (projectPath: string) =>
     invoke<Snapshot>("execute_project", { projectPath }),
   createTasks: (
