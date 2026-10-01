@@ -179,7 +179,7 @@ export function ProjectHeader({
           <div className="flex items-center gap-1">
             <IconButton
               name="diff"
-              title="Diff local changes against the default branch"
+              title="Git: changes, branches, and worktrees"
               onClick={onBranchDiff}
             />
             {remote && <IconButton name="github" title={remote} onClick={onOpenRemote} />}

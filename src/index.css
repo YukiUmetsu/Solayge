@@ -465,3 +465,118 @@ html[data-os="macos"] .titlebar-pad {
   max-width: 100%;
   border-radius: 6px;
 }
+
+/* ------------------------------------------------------------------ *
+ * Diff view + syntax highlighting
+ * ------------------------------------------------------------------ */
+.diff-view {
+  display: block;
+}
+.diff-line {
+  display: block;
+  /* Span the full width for the row tint, but grow for long lines so the
+     background never cuts off mid-line. */
+  width: max-content;
+  min-width: 100%;
+  padding: 0 0.35rem;
+  border-radius: 3px;
+  white-space: pre;
+}
+.diff-line .diff-marker {
+  display: inline-block;
+  width: 0.9rem;
+  text-align: center;
+  user-select: none;
+  color: var(--color-ink-faint);
+}
+.diff-line code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+}
+.diff-add {
+  background: var(--color-success-soft);
+}
+.diff-add .diff-marker {
+  color: var(--color-success);
+}
+.diff-del {
+  background: var(--color-danger-soft);
+}
+.diff-del .diff-marker {
+  color: var(--color-danger);
+}
+.diff-hunk {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+}
+.diff-meta {
+  color: var(--color-ink-subtle);
+}
+.diff-blank {
+  min-height: 1em;
+}
+
+/* highlight.js tokens, mapped to the app palette so both themes read well. */
+.hljs {
+  color: var(--color-ink);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--color-ink-subtle);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link,
+.hljs-tag .hljs-name {
+  color: var(--color-violet);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: var(--color-success);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr {
+  color: var(--color-info);
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-built_in,
+.hljs-type {
+  color: var(--color-accent-text);
+}
+.hljs-attr,
+.hljs-property,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-selector-pseudo {
+  color: var(--color-warning);
+}
+.hljs-deletion {
+  color: var(--color-danger);
+}
+.hljs-meta {
+  color: var(--color-ink-subtle);
+}
+.hljs-tag {
+  color: var(--color-ink-muted);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}

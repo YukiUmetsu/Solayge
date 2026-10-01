@@ -138,6 +138,34 @@ pub struct MergeSourceStatus {
     pub changed: usize,
 }
 
+/// One branch's landing state relative to the repository's default branch.
+/// Powers the Git management view, so it carries the extra bits the list needs
+/// (default/current flags, remote existence, and the worktree using it) rather
+/// than making the UI re-derive them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchInfo {
+    /// Short name: `foo` for both `refs/heads/foo` and `origin/foo`.
+    pub name: String,
+    /// True for a remote-tracking branch with no local counterpart.
+    pub is_remote: bool,
+    /// True for the repository's resolved default branch.
+    pub is_default: bool,
+    /// True when this is the branch currently checked out in the project folder.
+    pub is_current: bool,
+    /// True when the default branch already contains every commit here, so the
+    /// branch has nothing left to land.
+    pub merged: bool,
+    /// Commits on this branch that the default branch does not have.
+    pub ahead: i64,
+    /// Commits on the default branch that this branch does not have.
+    pub behind: i64,
+    /// Worktree where this branch is checked out, when one exists.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// A remote-tracking branch `origin/<name>` exists.
+    pub has_remote: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Isolation {

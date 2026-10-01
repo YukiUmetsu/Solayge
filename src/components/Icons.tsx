@@ -26,7 +26,9 @@ export type IconName =
   | "settings"
   | "github"
   | "code"
-  | "eye";
+  | "eye"
+  | "expand"
+  | "collapse";
 
 const PATHS: Record<IconName, ReactNode> = {
   play: <polygon points="6 4 20 12 6 20 6 4" />,
@@ -153,6 +155,18 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  expand: (
+    <>
+      <polyline points="7 7 12 12 17 7" />
+      <polyline points="7 13 12 18 17 13" />
+    </>
+  ),
+  collapse: (
+    <>
+      <polyline points="7 11 12 6 17 11" />
+      <polyline points="7 17 12 12 17 17" />
     </>
   ),
 };

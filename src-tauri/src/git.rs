@@ -1,10 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{anyhow, Result};
 use tokio::process::Command;
 
-use crate::models::{ChangedFile, DiffResult, FileDiff, GitStatus, Worktree};
+use crate::models::{BranchInfo, ChangedFile, DiffResult, FileDiff, GitStatus, Worktree};
 
 pub async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
@@ -525,9 +526,237 @@ pub async fn merge_abort(dir: &Path) {
     let _ = git(dir, &["rebase", "--abort"]).await;
 }
 
+/// Whether `ancestor` is reachable from `descendant` (i.e. `descendant` already
+/// contains `ancestor`). Used to tell "landed on the default branch" from
+/// "sitting on a branch".
+pub async fn is_ancestor(dir: &Path, ancestor: &str, descendant: &str) -> bool {
+    git_ok(dir, &["merge-base", "--is-ancestor", ancestor, descendant]).await
+}
+
+/// `(behind, ahead)` of `branch` relative to `base`: how many commits each side
+/// has that the other does not.
+pub async fn ahead_behind(dir: &Path, base: &str, branch: &str) -> (i64, i64) {
+    let range = format!("{base}...{branch}");
+    match git(dir, &["rev-list", "--left-right", "--count", &range]).await {
+        Ok(out) => {
+            let parts: Vec<&str> = out.split_whitespace().collect();
+            if parts.len() == 2 {
+                (
+                    parts[0].parse().unwrap_or(0),
+                    parts[1].parse().unwrap_or(0),
+                )
+            } else {
+                (0, 0)
+            }
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+/// Local branches (plus remote-only branches) with their landing state against
+/// the repository's default branch. This is what lets the UI say "not merged
+/// into main" and offer to land or delete a branch, so stranded `devtools/*`
+/// work is visible instead of silently succeeding in isolation.
+pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
+    if !is_repo(repo).await {
+        return Ok(Vec::new());
+    }
+    let default = default_branch(repo).await;
+    let current = current_branch(repo).await;
+    let worktree_for: HashMap<String, String> = worktrees(repo)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|w| w.branch.map(|b| (b, w.path)))
+        .collect();
+
+    let local_out = git(repo, &["for-each-ref", "refs/heads", "--format=%(refname:short)"])
+        .await
+        .unwrap_or_default();
+    let remote_out = git(
+        repo,
+        &["for-each-ref", "refs/remotes/origin", "--format=%(refname:short)"],
+    )
+    .await
+    .unwrap_or_default();
+
+    let local: Vec<String> = local_out
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
+
+    let mut out = Vec::new();
+    for name in &local {
+        let is_default = name == &default;
+        let merged = is_default || is_ancestor(repo, name, &default).await;
+        let (behind, ahead) = if is_default {
+            (0, 0)
+        } else {
+            ahead_behind(repo, &default, name).await
+        };
+        out.push(BranchInfo {
+            name: name.clone(),
+            is_remote: false,
+            is_default,
+            is_current: current.as_deref() == Some(name.as_str()),
+            merged,
+            ahead,
+            behind,
+            worktree: worktree_for.get(name).cloned(),
+            has_remote: remote_exists(repo, name).await,
+        });
+    }
+
+    // Remote-tracking branches with no local counterpart: they can still be
+    // landed or deleted from here.
+    for r in remote_out
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Some(name) = r.strip_prefix("origin/") else {
+            continue;
+        };
+        if name == "HEAD" || local_set.contains(name) {
+            continue;
+        }
+        let remote_ref = format!("origin/{name}");
+        let is_default = name == default;
+        let merged = is_default || is_ancestor(repo, &remote_ref, &default).await;
+        let (behind, ahead) = if is_default {
+            (0, 0)
+        } else {
+            ahead_behind(repo, &default, &remote_ref).await
+        };
+        out.push(BranchInfo {
+            name: name.to_string(),
+            is_remote: true,
+            is_default,
+            is_current: false,
+            merged,
+            ahead,
+            behind,
+            worktree: None,
+            has_remote: true,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether `origin/<branch>` exists locally (i.e. the branch was pushed).
+pub async fn remote_exists(repo: &Path, branch: &str) -> bool {
+    git_ok(
+        repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{branch}"),
+        ],
+    )
+    .await
+}
+
+/// Staged or unstaged changes only (untracked files don't block a checkout).
+async fn has_tracked_changes(dir: &Path) -> bool {
+    !git_ok(dir, &["diff", "--quiet"]).await || !git_ok(dir, &["diff", "--cached", "--quiet"]).await
+}
+
+/// Merge `branch` into `target` (the default branch when not given) and leave
+/// `target` checked out. Aborts and reports on conflict so the project folder is
+/// never left mid-merge without a resolution UI.
+pub async fn merge_branch_into(repo: &Path, branch: &str, target: Option<&str>) -> Result<String> {
+    if !is_repo(repo).await {
+        return Err(anyhow!("not a git repository"));
+    }
+    if !valid_ref(branch) {
+        return Err(anyhow!("invalid branch name: {branch}"));
+    }
+    let target = match target.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => t.to_string(),
+        None => default_branch(repo).await,
+    };
+    if !valid_ref(&target) {
+        return Err(anyhow!("invalid target branch: {target}"));
+    }
+    if branch == target {
+        return Err(anyhow!("cannot merge {branch} into itself"));
+    }
+    if has_tracked_changes(repo).await {
+        return Err(anyhow!(
+            "the working tree has uncommitted changes; commit or stash them first"
+        ));
+    }
+    git(repo, &["checkout", &target])
+        .await
+        .map_err(|e| anyhow!("could not check out {target}: {e}"))?;
+    match git(repo, &["merge", "--no-edit", branch]).await {
+        Ok(_) => Ok(format!("Merged {branch} into {target}.")),
+        Err(e) => {
+            merge_abort(repo).await;
+            Err(anyhow!("could not merge {branch} into {target}: {e}"))
+        }
+    }
+}
+
+/// Force-delete a local branch. Refuses the checked-out branch and any branch
+/// that a worktree still has checked out (git refuses those anyway; this turns
+/// the failure into a clear message).
+pub async fn delete_local_branch(repo: &Path, branch: &str) -> Result<String> {
+    if !valid_ref(branch) {
+        return Err(anyhow!("invalid branch name: {branch}"));
+    }
+    if current_branch(repo).await.as_deref() == Some(branch) {
+        return Err(anyhow!("cannot delete the checked-out branch {branch}"));
+    }
+    if let Some(wt) = worktrees(repo)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+    {
+        return Err(anyhow!("branch {branch} is checked out in {}", wt.path));
+    }
+    git(repo, &["branch", "-D", branch]).await?;
+    Ok(format!("Deleted local branch {branch}."))
+}
+
+/// Delete `origin/<branch>` on the remote.
+pub async fn delete_remote_branch(repo: &Path, branch: &str) -> Result<String> {
+    if !valid_ref(branch) {
+        return Err(anyhow!("invalid branch name: {branch}"));
+    }
+    git(repo, &["push", "origin", "--delete", branch]).await?;
+    Ok(format!("Deleted origin/{branch}."))
+}
+
+/// Remove a linked worktree by path. Refuses the main worktree; prunes stale
+/// metadata afterwards.
+pub async fn remove_worktree(repo: &Path, worktree: &str) -> Result<String> {
+    let path = Path::new(worktree);
+    if worktrees(repo)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|w| w.is_main && Path::new(&w.path) == path)
+    {
+        return Err(anyhow!("cannot remove the main worktree"));
+    }
+    worktree_remove(repo, path).await?;
+    let _ = git(repo, &["worktree", "prune"]).await;
+    Ok(format!("Removed worktree {worktree}."))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_status, valid_ref};
+    use super::{
+        branch_exists, branches, default_branch, delete_local_branch, merge_branch_into,
+        parse_status, remove_worktree, valid_ref,
+    };
+    use std::path::Path;
 
     #[test]
     fn parses_porcelain_status() {
@@ -555,5 +784,89 @@ mod tests {
         assert!(!valid_ref("-x"));
         assert!(!valid_ref("a b"));
         assert!(!valid_ref("a\nb"));
+    }
+
+    async fn init_repo(dir: &Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "test"],
+            // Don't inherit a global commit-signing config from this machine.
+            vec!["config", "commit.gpgsign", "false"],
+            vec!["commit", "--allow-empty", "-qm", "init"],
+        ] {
+            let out = crate::git::git_cmd(dir, &args).output().await.unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        default_branch(dir).await
+    }
+
+    async fn run(dir: &Path, args: &[&str]) {
+        let out = crate::git::git_cmd(dir, args).output().await.unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn branches_flags_unmerged_then_merged_after_landing() {
+        let dir = std::env::temp_dir().join(format!("solayge-branches-{}", uuid::Uuid::new_v4()));
+        let default = init_repo(&dir).await;
+        assert_eq!(default, "main");
+
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        run(&dir, &["checkout", "-q", "-b", "feat"]).await;
+        run(&dir, &["add", "-A"]).await;
+        run(&dir, &["commit", "-qm", "feat work"]).await;
+
+        let list = branches(&dir).await.unwrap();
+        let feat = list.iter().find(|b| b.name == "feat").expect("feat listed");
+        assert!(!feat.merged, "unlanded branch must be marked not merged");
+        assert_eq!(feat.ahead, 1);
+        assert!(feat.is_current);
+        let main = list.iter().find(|b| b.name == "main").unwrap();
+        assert!(main.merged && main.is_default);
+
+        // Land it locally, then the branch reports as merged with nothing ahead.
+        merge_branch_into(&dir, "feat", None).await.unwrap();
+        let list = branches(&dir).await.unwrap();
+        let feat = list.iter().find(|b| b.name == "feat").unwrap();
+        assert!(feat.merged, "a landed branch must be marked merged");
+        assert_eq!(feat.ahead, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_helpers_refuse_checked_out_and_worktree_branches() {
+        let dir = std::env::temp_dir().join(format!("solayge-delbranch-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+
+        // The checked-out default branch is never deletable.
+        assert!(delete_local_branch(&dir, "main").await.is_err());
+
+        // A plain branch is.
+        run(&dir, &["branch", "throwaway"]).await;
+        delete_local_branch(&dir, "throwaway").await.unwrap();
+        assert!(!branch_exists(&dir, "throwaway").await);
+
+        // A branch a worktree holds is not deletable, and the main worktree
+        // cannot be removed; the linked worktree can.
+        let wt = dir.join("wt");
+        let wt_arg = wt.to_string_lossy().to_string();
+        run(&dir, &["worktree", "add", "-q", "-b", "held", &wt_arg]).await;
+        assert!(delete_local_branch(&dir, "held").await.is_err());
+        let main_arg = dir.to_string_lossy().to_string();
+        assert!(remove_worktree(&dir, &main_arg).await.is_err());
+        remove_worktree(&dir, &wt_arg).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

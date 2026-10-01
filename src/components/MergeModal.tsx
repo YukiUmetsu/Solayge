@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type {
+  BranchInfo,
   MergeSourceStatus,
   MergeSpec,
   MergeStrategy,
@@ -46,6 +47,31 @@ export function MergeModal({
   const [commitSources, setCommitSources] = useState(true);
   const [sourcesStatus, setSourcesStatus] = useState<MergeSourceStatus[]>([]);
   const [preflightError, setPreflightError] = useState<string | null>(null);
+
+  // The landing branch is explicit: the resolved default branch is preselected,
+  // but the user always sees and confirms exactly where the combine lands.
+  const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<BranchInfo[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      api.projectDefaultBranch(project.path),
+      api.projectBranches(project.path).catch(() => [] as BranchInfo[]),
+    ])
+      .then(([def, list]) => {
+        if (cancelled) return;
+        setDefaultBranch(def);
+        setBranches(list);
+        setTarget((cur) => cur || def);
+      })
+      .catch(() => {
+        /* target falls back to the default branch at run time */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.path]);
 
   const extraBranches = extra
     .split(",")
@@ -239,13 +265,33 @@ export function MergeModal({
         )}
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Land on" hint="Blank uses the default branch.">
-            <input
-              className="input mono !text-[11.5px]"
-              placeholder="main"
+          <Field
+            label="Land on"
+            hint={
+              defaultBranch
+                ? `Default branch: ${defaultBranch}.`
+                : "The repository's default branch."
+            }
+          >
+            <select
+              className="select mono !text-[11.5px]"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
-            />
+            >
+              {target &&
+                !branches.some((b) => !b.is_remote && b.name === target) && (
+                  <option value={target}>{target}</option>
+                )}
+              {branches
+                .filter((b) => !b.is_remote)
+                .map((b) => (
+                  <option key={b.name} value={b.name}>
+                    {b.name}
+                    {b.is_default ? " (default)" : ""}
+                    {b.is_current ? " (current)" : ""}
+                  </option>
+                ))}
+            </select>
           </Field>
           <Field label="Strategy">
             <select
@@ -314,6 +360,18 @@ export function MergeModal({
           Conflicts follow this project's <span className="text-ink">Git</span>{" "}
           setting. The combine task waits for every selected task to succeed, then
           runs on its own.
+        </p>
+
+        <p className="rounded-lg border border-accent-line bg-accent-soft p-3 text-[11.5px] leading-relaxed text-ink-muted">
+          This will merge{" "}
+          <span className="text-ink">
+            {sources.length > 0 ? sources.join(", ") : "the selected sources"}
+          </span>{" "}
+          into{" "}
+          <span className="mono text-ink">
+            {target || defaultBranch || "the default branch"}
+          </span>
+          {pushTarget ? " and push it." : "."}
         </p>
 
         <ErrorNote error={error} />

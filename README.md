@@ -131,7 +131,11 @@ Solayge turns that graph into something you can see and control:
 - **Ship** — compose an ordered release chain (commit → push → pull request →
   merge → sync) with optional test and CI gates, plus skills and commands.
 - **Combine** — merge worktrees/branches in the graph, resolve conflicts, run
-  tests, and land the result.
+  tests, and land the result. The landing branch is explicit and shown before you
+  create the task.
+- **Manage branches & worktrees** — one Git view lists every branch (and every
+  worktree) with whether it is merged into the default branch, and lets you land
+  a stranded branch, delete it locally or on the remote, or remove a worktree.
 - **Automatic code review** — a reviewer reports, auto-fixes, or stops a task for
   your attention.
 - **Interactive questions** — when an agent asks a question or requests
@@ -325,10 +329,11 @@ folder.
 
 **Combine** lives in the graph: use *Combine branches* above the task tree (or the
 dashed node at its end) to create one `merge` task from selected task branches plus
-any branch names you type. It waits for those tasks to succeed, then checks out the
-target (the default branch by default), merges each source (merge / octopus /
-rebase), runs the test command, and can push the target. A failed test can be handed
-to an agent to fix and re-run.
+any branch names you type. The dialog shows exactly where it will land — the target
+branch is a real dropdown with the default branch preselected, not a blank that
+silently resolves at run time. It waits for those tasks to succeed, then checks out
+the target, merges each source (merge / octopus / rebase), runs the test command,
+and can push the target. A failed test can be handed to an agent to fix and re-run.
 
 Only committed work is merged, so before it lands the combine inspects every
 source's worktree. If any of them has uncommitted work, the dialog warns you and
@@ -348,6 +353,31 @@ Set per project (**Project settings → Git**):
 
 Blocked tasks hold back anything that depends on them. Retrying is safe: a combine
 task is idempotent, so branches already merged report *"already up to date"*.
+
+### Managing branches & worktrees
+
+The **Git** view (the diff/branch icon in the project header) is a small Git
+manager with tabs for local changes, the current branch's diff, **Branches**,
+**Worktrees**, and **Changes** (stage, commit, push, ship). Diffs are
+syntax-highlighted by file type, with added/deleted lines tinted and marked, and
+**Open all** / **Close all** controls for the file list.
+
+- **Branches** lists every local branch (plus remote-only ones) and answers the one
+  question a worktree-based workflow can silently get wrong: *has this landed?*
+  Each row shows **Merged** or **Not merged** against the default branch, with how
+  far it is ahead/behind and any worktree using it. A branch that has not landed
+  gets a **Merge into `<default>`** button (a local merge into the default branch).
+  Branches can be deleted locally, on the remote, or both at once; **Delete
+  merged** removes every merged branch in one go. The default branch never shows
+  delete controls, and deletions refuse the checked-out branch and any branch a
+  worktree holds.
+- **Worktrees** lists the linked worktrees with the same landing state and offers
+  **Remove worktree**, **Delete branch**, **Delete remote**, and **Delete local +
+  remote**, plus **Remove merged** to clear every merged worktree (and its merged
+  branch) at once.
+
+Merging from here checks out the target first, refuses a dirty working tree, and
+aborts (rather than leaving the project mid-conflict) if the merge conflicts.
 
 ## Automatic code review
 

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BranchInfo,
   CacheStats,
   DiffResult,
   EnvValue,
@@ -27,6 +28,16 @@ export const api = {
   projectStatus: (path: string) => invoke<GitStatus>("project_status", { path }),
   projectWorktrees: (path: string) =>
     invoke<Worktree[]>("project_worktrees", { path }),
+  projectBranches: (path: string) =>
+    invoke<BranchInfo[]>("project_branches", { path }),
+  gitMergeBranch: (path: string, branch: string, target?: string | null) =>
+    invoke<string>("git_merge_branch", { path, branch, target: target ?? null }),
+  gitDeleteBranch: (path: string, branch: string) =>
+    invoke<string>("git_delete_branch", { path, branch }),
+  gitDeleteRemoteBranch: (path: string, branch: string) =>
+    invoke<string>("git_delete_remote_branch", { path, branch }),
+  gitRemoveWorktree: (path: string, worktree: string) =>
+    invoke<string>("git_remove_worktree", { path, worktree }),
   gitDiff: (path: string, target?: string | null) =>
     invoke<DiffResult>("git_diff", { path, target: target ?? null }),
   projectDefaultBranch: (path: string) =>

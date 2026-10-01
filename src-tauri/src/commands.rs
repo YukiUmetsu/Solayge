@@ -202,6 +202,52 @@ pub async fn project_worktrees(path: String) -> Result<Vec<Worktree>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Local (and remote-only) branches with their landing state against the default
+/// branch, so the Git view can flag work that never reached `main`.
+#[tauri::command]
+pub async fn project_branches(path: String) -> Result<Vec<BranchInfo>, String> {
+    git::branches(Path::new(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Merge a branch into `target` (the default branch when absent), leaving the
+/// target checked out. Refuses a dirty working tree and aborts on conflict.
+#[tauri::command]
+pub async fn git_merge_branch(
+    path: String,
+    branch: String,
+    target: Option<String>,
+) -> Result<String, String> {
+    git::merge_branch_into(Path::new(&path), &branch, target.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Force-delete a local branch (never the checked-out or a worktree-held one).
+#[tauri::command]
+pub async fn git_delete_branch(path: String, branch: String) -> Result<String, String> {
+    git::delete_local_branch(Path::new(&path), &branch)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete `origin/<branch>` on the remote.
+#[tauri::command]
+pub async fn git_delete_remote_branch(path: String, branch: String) -> Result<String, String> {
+    git::delete_remote_branch(Path::new(&path), &branch)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove a linked worktree by path (refuses the main worktree).
+#[tauri::command]
+pub async fn git_remove_worktree(path: String, worktree: String) -> Result<String, String> {
+    git::remove_worktree(Path::new(&path), &worktree)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn git_diff(path: String, target: Option<String>) -> Result<DiffResult, String> {
     let dir = target.unwrap_or(path);

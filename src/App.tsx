@@ -27,7 +27,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { ShipModal } from "./components/ShipModal";
 import { MergeModal } from "./components/MergeModal";
-import { BranchDiffModal } from "./components/BranchDiffModal";
+import { GitModal } from "./components/GitModal";
 
 const MAX_LOG_LINES = 4000;
 
@@ -563,7 +563,7 @@ export default function App() {
         />
       )}
       {showBranchDiff && project && (
-        <BranchDiffModal
+        <GitModal
           project={project}
           onClose={() => setShowBranchDiff(false)}
         />

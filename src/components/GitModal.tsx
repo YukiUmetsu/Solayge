@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import type { DiffResult, GitStatus, Project } from "../types";
+import type { BranchInfo, DiffResult, GitStatus, Project } from "../types";
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Icon } from "./Icons";
 import { DiffBody, DiffStats } from "./DiffView";
+import { GitBranches, GitWorktrees } from "./GitPanels";
 
-type Tab = "local" | "branch" | "git";
+type Tab = "local" | "branch" | "branches" | "worktrees" | "git";
 type MergeMethod = "squash" | "merge" | "rebase";
 
 const MERGE_METHODS: { value: MergeMethod; label: string }[] = [
@@ -22,11 +23,12 @@ function tabClass(active: boolean): string {
 }
 
 /**
- * A wide, tabbed view of a project's changes: local working-tree changes,
- * committed work on the current branch since it diverged from the base branch,
- * and a Git panel to stage, commit, push, ship, and refresh the branch.
+ * A wide, tabbed Git management view for a project: local working-tree changes,
+ * committed work on the current branch, every branch and worktree with its
+ * landing state (merged into the default branch or not), and a Git panel to
+ * stage, commit, push, ship, and refresh.
  */
-export function BranchDiffModal({
+export function GitModal({
   project,
   onClose,
 }: {
@@ -36,6 +38,10 @@ export function BranchDiffModal({
   const [tab, setTab] = useState<Tab>("local");
   const [base, setBase] = useState<string | null>(null);
   const [current, setCurrent] = useState<string | null>(null);
+
+  const [branches, setBranches] = useState<BranchInfo[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(true);
+  const [branchesError, setBranchesError] = useState<string | null>(null);
 
   const [local, setLocal] = useState<DiffResult | null>(null);
   const [localLoading, setLocalLoading] = useState(true);
@@ -113,11 +119,24 @@ export function BranchDiffModal({
     }
   }, [project.path]);
 
+  const loadBranches = useCallback(async () => {
+    setBranchesLoading(true);
+    setBranchesError(null);
+    try {
+      setBranches(await api.projectBranches(project.path));
+    } catch (e) {
+      setBranchesError(String(e));
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, [project.path]);
+
   useEffect(() => {
     void loadLabels();
     void loadLocal();
     void loadStatus();
-  }, [loadLabels, loadLocal, loadStatus]);
+    void loadBranches();
+  }, [loadLabels, loadLocal, loadStatus, loadBranches]);
 
   useEffect(() => {
     void loadBranch(includeLocal);
@@ -128,7 +147,8 @@ export function BranchDiffModal({
     void loadStatus();
     void loadLocal();
     void loadBranch(includeLocal);
-  }, [loadLabels, loadStatus, loadLocal, loadBranch, includeLocal]);
+    void loadBranches();
+  }, [loadLabels, loadStatus, loadLocal, loadBranch, includeLocal, loadBranches]);
 
   const refresh = useCallback(() => {
     if (tab === "git") {
@@ -138,10 +158,12 @@ export function BranchDiffModal({
     void loadLabels();
     if (tab === "local") {
       void loadLocal();
-    } else {
+    } else if (tab === "branch") {
       void loadBranch(includeLocal);
+    } else {
+      void loadBranches();
     }
-  }, [tab, refreshAll, loadLabels, loadLocal, loadBranch, includeLocal]);
+  }, [tab, refreshAll, loadLabels, loadLocal, loadBranch, includeLocal, loadBranches]);
 
   /** Run a Git action, reporting its message or error and refreshing on success. */
   const runGitAction = async (label: string, action: () => Promise<string>) => {
@@ -200,7 +222,7 @@ export function BranchDiffModal({
 
   return (
     <Modal
-      title="Changes"
+      title="Git"
       subtitle={project.name}
       onClose={onClose}
       width="max-w-6xl"
@@ -225,10 +247,28 @@ export function BranchDiffModal({
             {branchLabel}
           </button>
           <button
+            className={tabClass(tab === "branches")}
+            onClick={() => setTab("branches")}
+          >
+            Branches
+            {branches.some((b) => !b.merged && !b.is_default) && (
+              <span
+                className="ml-auto h-1.5 w-1.5 rounded-full bg-warning"
+                title="Some branches are not merged into the default branch"
+              />
+            )}
+          </button>
+          <button
+            className={tabClass(tab === "worktrees")}
+            onClick={() => setTab("worktrees")}
+          >
+            Worktrees
+          </button>
+          <button
             className={tabClass(tab === "git")}
             onClick={() => setTab("git")}
           >
-            Git
+            Changes
           </button>
         </nav>
 
@@ -244,6 +284,19 @@ export function BranchDiffModal({
                   <span className="mono">{current ?? "the current branch"}</span>{" "}
                   since it diverged from{" "}
                   <span className="mono">{base ?? "the base branch"}</span>.
+                </>
+              )}
+              {tab === "branches" && (
+                <>
+                  Every branch with its landing state against{" "}
+                  <span className="mono">{base ?? "the default branch"}</span>.
+                  Land unmerged work or remove stale branches.
+                </>
+              )}
+              {tab === "worktrees" && (
+                <>
+                  Linked worktrees and the branch each holds. Remove one when its
+                  work is landed.
                 </>
               )}
               {tab === "git" && (
@@ -273,7 +326,7 @@ export function BranchDiffModal({
             </label>
           )}
 
-          {tab !== "git" && (
+          {(tab === "local" || tab === "branch") && (
             <>
               {loading && <p className="text-xs text-ink-subtle">Loading…</p>}
               {error && <p className="text-xs text-danger">{error}</p>}
@@ -291,6 +344,26 @@ export function BranchDiffModal({
                 </>
               )}
             </>
+          )}
+
+          {tab === "branches" && (
+            <GitBranches
+              project={project}
+              branches={branches}
+              defaultBranch={base}
+              loading={branchesLoading}
+              error={branchesError}
+              onChanged={refreshAll}
+            />
+          )}
+
+          {tab === "worktrees" && (
+            <GitWorktrees
+              project={project}
+              branches={branches}
+              defaultBranch={base}
+              onChanged={refreshAll}
+            />
           )}
 
           {tab === "git" && (

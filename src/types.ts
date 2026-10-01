@@ -356,6 +356,21 @@ export interface Worktree {
   is_main: boolean;
 }
 
+/** A branch's landing state against the project's default branch. */
+export interface BranchInfo {
+  name: string;
+  /** A remote-tracking branch with no local counterpart. */
+  is_remote: boolean;
+  is_default: boolean;
+  is_current: boolean;
+  /** The default branch already contains every commit here. */
+  merged: boolean;
+  ahead: number;
+  behind: number;
+  worktree?: string | null;
+  has_remote: boolean;
+}
+
 export interface FileDiff {
   path: string;
   status: string;
