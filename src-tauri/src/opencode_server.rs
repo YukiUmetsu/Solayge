@@ -487,11 +487,30 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         kind: AskKind::Question,
         title,
         message: None,
+        action: None,
+        resource: None,
+        purpose: None,
         fields,
         options: Vec::new(),
         created_at: None,
         session_id: Some(session.to_string()),
     })
+}
+
+/// A short, human purpose for a provider permission action, so the in-app prompt
+/// and notification explain *why* the access is wanted rather than just naming a
+/// tool.
+fn permission_purpose(action: &str) -> &'static str {
+    match action {
+        "external_directory" => "Access a folder outside this project",
+        "read" => "Read a file",
+        "write" | "edit" | "patch" => "Modify a file",
+        "shell" | "bash" | "execute" => "Run a shell command",
+        "webfetch" | "fetch" | "websearch" => "Use the network",
+        "glob" | "list" => "List files",
+        "grep" => "Search file contents",
+        _ => "Use a tool",
+    }
 }
 
 /// Map an opencode permission request to a [`TaskAsk`].
@@ -511,20 +530,21 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
                 .join(", ")
         })
         .unwrap_or_default();
-    let mut message = resources;
-    if let Some(m) = req.get("message").and_then(Value::as_str) {
-        if !m.trim().is_empty() {
-            if !message.is_empty() {
-                message.push('\n');
-            }
-            message.push_str(m);
-        }
-    }
+    let message = req
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    let purpose = permission_purpose(action);
     Some(TaskAsk {
         id,
         kind: AskKind::Permission,
         title: format!("Permission: {action}"),
-        message: (!message.is_empty()).then_some(message),
+        message,
+        action: Some(action.to_string()),
+        resource: (!resources.is_empty()).then_some(resources),
+        purpose: Some(purpose.to_string()),
         fields: Vec::new(),
         options: vec!["once".into(), "always".into(), "reject".into()],
         created_at: None,
@@ -589,7 +609,12 @@ mod tests {
         let ask = permission_to_ask("ses_1", &req).expect("ask");
         assert_eq!(ask.kind, AskKind::Permission);
         assert_eq!(ask.options, vec!["once", "always", "reject"]);
-        assert!(ask.message.unwrap().contains("rm -rf build"));
+        // The concrete resource is surfaced on its own line, separate from the
+        // provider's message, so the UI can show exactly what is requested.
+        assert_eq!(ask.resource.as_deref(), Some("rm -rf build"));
+        assert_eq!(ask.message.as_deref(), Some("allow?"));
+        assert_eq!(ask.action.as_deref(), Some("bash"));
+        assert!(ask.purpose.is_some());
     }
 
     #[test]

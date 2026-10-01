@@ -260,7 +260,7 @@ account-wide):
 
 | Profile | Behaviour |
 | --- | --- |
-| `autonomous` (default) | Pre-granted; runs with `--auto`. Hard rails still apply. |
+| `autonomous` (default) | Pre-granted; runs with `--auto`. Hard rails still apply. Folders outside the project ask. |
 | `supervised` | Reads and edits allowed; shell, network, and external folders ask. With no approver, asks are auto-rejected and surfaced as notifications. |
 | `readonly` | Analysis only: reads, glob, grep, search. Edits, shell, and Code Mode (`execute`) are denied. |
 
@@ -282,6 +282,21 @@ panel (option buttons, checkboxes, or free text); a permission request offers
 keep waiting without being failed; a notification fires, and the answer is posted
 back to the live session. Other providers still run non-interactively until they
 gain adapters (see the [roadmap](#roadmap)).
+
+A pending **permission** also raises an app-level popup (with a desktop
+notification) that names the task, the exact directory/command/URL it wants, and
+the purpose, so the decision is made inside Solayge instead of through an opaque OS
+prompt. The same detail appears in the task's side panel. Because a folder outside
+the project is the one permission an agent should never take silently, **every**
+profile — including `autonomous` — asks for it; only the reply differs (autonomous
+still auto-approves every other request).
+
+Every agent task prompt is prefixed with a short instruction to **plan first and
+request access up front**: the agent states its plan and lists any outside-project
+paths/commands/hosts it needs, then asks for all of it in one batch (when the
+environment allows asking) instead of getting blocked partway through. The planner
+is told to write prompts the same way and to prefer work that stays inside the
+repository.
 
 ## Project context
 
@@ -394,6 +409,17 @@ different one, so it runs under the same account and subscription. Modes:
 - **Review, then stop on issues** — block the task, holding back dependents.
 
 The mode can be set account-wide or per project.
+
+The reviewer is deliberately **skeptical**: it is told not to assume the change is
+correct, to distrust summaries and commit messages, to try to falsify the claim
+that the task is done, and to hunt for unhandled edge cases, silent failures,
+security holes, data loss, and weakened or missing tests. The instructions are
+editable per project (**Project settings → Agent → Reviewer prompt**) and
+account-wide (**Settings → Agent defaults**); a project value overrides the account
+default, and blank uses the built-in prompt. Whatever you write, the task context
+and the required `REVIEW:` verdict line are always appended, so the verdict
+contract cannot be broken. **Read-only tasks are never reviewed** — they cannot
+change anything.
 
 ## Settings & cache
 

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import type { BranchInfo, DiffResult, GitStatus, Project } from "../types";
+import type { BranchInfo, DiffResult, GitStatus, Project, Worktree } from "../types";
 import { api } from "../api";
 import { Modal } from "./Modal";
 import { Icon } from "./Icons";
 import { DiffBody, DiffStats } from "./DiffView";
 import { GitBranches, GitWorktrees } from "./GitPanels";
+import { fileStatusLabel } from "../lib/format";
 
 type Tab = "local" | "branch" | "branches" | "worktrees" | "git";
 type MergeMethod = "squash" | "merge" | "rebase";
@@ -42,6 +43,10 @@ export function GitModal({
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(true);
   const [branchesError, setBranchesError] = useState<string | null>(null);
+
+  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const [worktreesLoading, setWorktreesLoading] = useState(true);
+  const [worktreesError, setWorktreesError] = useState<string | null>(null);
 
   const [local, setLocal] = useState<DiffResult | null>(null);
   const [localLoading, setLocalLoading] = useState(true);
@@ -131,12 +136,25 @@ export function GitModal({
     }
   }, [project.path]);
 
+  const loadWorktrees = useCallback(async () => {
+    setWorktreesLoading(true);
+    setWorktreesError(null);
+    try {
+      setWorktrees(await api.projectWorktrees(project.path));
+    } catch (e) {
+      setWorktreesError(String(e));
+    } finally {
+      setWorktreesLoading(false);
+    }
+  }, [project.path]);
+
   useEffect(() => {
     void loadLabels();
     void loadLocal();
     void loadStatus();
     void loadBranches();
-  }, [loadLabels, loadLocal, loadStatus, loadBranches]);
+    void loadWorktrees();
+  }, [loadLabels, loadLocal, loadStatus, loadBranches, loadWorktrees]);
 
   useEffect(() => {
     void loadBranch(includeLocal);
@@ -148,7 +166,16 @@ export function GitModal({
     void loadLocal();
     void loadBranch(includeLocal);
     void loadBranches();
-  }, [loadLabels, loadStatus, loadLocal, loadBranch, includeLocal, loadBranches]);
+    void loadWorktrees();
+  }, [
+    loadLabels,
+    loadStatus,
+    loadLocal,
+    loadBranch,
+    includeLocal,
+    loadBranches,
+    loadWorktrees,
+  ]);
 
   const refresh = useCallback(() => {
     if (tab === "git") {
@@ -160,10 +187,21 @@ export function GitModal({
       void loadLocal();
     } else if (tab === "branch") {
       void loadBranch(includeLocal);
+    } else if (tab === "worktrees") {
+      void loadWorktrees();
     } else {
       void loadBranches();
     }
-  }, [tab, refreshAll, loadLabels, loadLocal, loadBranch, includeLocal, loadBranches]);
+  }, [
+    tab,
+    refreshAll,
+    loadLabels,
+    loadLocal,
+    loadBranch,
+    includeLocal,
+    loadBranches,
+    loadWorktrees,
+  ]);
 
   /** Run a Git action, reporting its message or error and refreshing on success. */
   const runGitAction = async (label: string, action: () => Promise<string>) => {
@@ -362,6 +400,10 @@ export function GitModal({
               project={project}
               branches={branches}
               defaultBranch={base}
+              worktrees={worktrees}
+              loading={worktreesLoading}
+              error={worktreesError}
+              onReload={loadWorktrees}
               onChanged={refreshAll}
             />
           )}
@@ -427,7 +469,7 @@ export function GitModal({
                           </span>
                         )}
                         <span className="mono ml-auto shrink-0 text-[10px] text-ink-subtle">
-                          {f.status.trim()}
+                          {fileStatusLabel(f.status)}
                         </span>
                       </li>
                     );

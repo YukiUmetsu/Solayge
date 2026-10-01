@@ -262,6 +262,29 @@ export function AgentConfigForm({
             />
           </Field>
         </div>
+        <Field
+          label="Reviewer prompt"
+          hint="Instructions for the reviewer. Blank uses the built-in skeptical prompt; the task context and the required REVIEW: verdict line are always added."
+        >
+          <textarea
+            className="textarea !text-[11.5px]"
+            rows={6}
+            disabled={disabled}
+            placeholder="Leave blank to use the built-in skeptical reviewer prompt."
+            value={value.review_prompt ?? ""}
+            onChange={(e) => onChange({ review_prompt: e.target.value || null })}
+          />
+        </Field>
+        {inherit && value.review_prompt != null && (
+          <button
+            type="button"
+            className="btn btn-ghost !px-2 !py-1 text-[11px]"
+            disabled={disabled}
+            onClick={() => onChange({ review_prompt: null })}
+          >
+            Use account default
+          </button>
+        )}
       </section>
 
       <section className="space-y-2">

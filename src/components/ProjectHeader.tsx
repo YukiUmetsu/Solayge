@@ -223,7 +223,7 @@ export function ProjectHeader({
         <div className="flex items-center gap-3 text-[11px] text-ink-muted">
           <span className="mono">{pct}%</span>
           {drafts > 0 && <span className="text-ink-subtle">{drafts} draft</span>}
-          <span className="text-success">{succeeded} done</span>
+          <span className="text-success">{succeeded} completed</span>
           {inReview > 0 && (
             <span className="text-info">{inReview} in review</span>
           )}

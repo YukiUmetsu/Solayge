@@ -71,6 +71,7 @@ export function SettingsModal({
     review_provider: settings.review_provider ?? null,
     review_model: settings.review_model ?? null,
     review_mode: settings.review_mode ?? "off",
+    review_prompt: settings.review_prompt ?? null,
     editor: settings.editor ?? null,
   }));
   const [templates, setTemplates] = useState<CommandTemplates>(

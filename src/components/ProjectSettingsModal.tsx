@@ -105,6 +105,7 @@ export function ProjectSettingsModal({
     review_provider: project.review_provider ?? null,
     review_model: project.review_model ?? null,
     review_mode: project.review_mode ?? null,
+    review_prompt: project.review_prompt ?? null,
     editor: project.editor ?? null,
   }));
   const [envVars, setEnvVars] = useState<EnvValue[]>([]);

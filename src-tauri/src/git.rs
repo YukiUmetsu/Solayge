@@ -702,12 +702,16 @@ pub async fn merge_branch_into(repo: &Path, branch: &str, target: Option<&str>) 
     }
 }
 
-/// Force-delete a local branch. Refuses the checked-out branch and any branch
-/// that a worktree still has checked out (git refuses those anyway; this turns
-/// the failure into a clear message).
+/// Force-delete a local branch. Refuses the default branch, the checked-out
+/// branch, and any branch a worktree still has checked out (git refuses those
+/// anyway; this turns the failure into a clear message). Enforced here, not just
+/// in the UI, so the IPC surface can never delete the default branch.
 pub async fn delete_local_branch(repo: &Path, branch: &str) -> Result<String> {
     if !valid_ref(branch) {
         return Err(anyhow!("invalid branch name: {branch}"));
+    }
+    if branch == default_branch(repo).await {
+        return Err(anyhow!("refusing to delete the default branch {branch}"));
     }
     if current_branch(repo).await.as_deref() == Some(branch) {
         return Err(anyhow!("cannot delete the checked-out branch {branch}"));
@@ -724,17 +728,21 @@ pub async fn delete_local_branch(repo: &Path, branch: &str) -> Result<String> {
     Ok(format!("Deleted local branch {branch}."))
 }
 
-/// Delete `origin/<branch>` on the remote.
+/// Delete `origin/<branch>` on the remote. Refuses the default branch.
 pub async fn delete_remote_branch(repo: &Path, branch: &str) -> Result<String> {
     if !valid_ref(branch) {
         return Err(anyhow!("invalid branch name: {branch}"));
+    }
+    if branch == default_branch(repo).await {
+        return Err(anyhow!("refusing to delete the default branch origin/{branch}"));
     }
     git(repo, &["push", "origin", "--delete", branch]).await?;
     Ok(format!("Deleted origin/{branch}."))
 }
 
-/// Remove a linked worktree by path. Refuses the main worktree; prunes stale
-/// metadata afterwards.
+/// Remove a linked worktree by path. Refuses the main worktree and any worktree
+/// with uncommitted changes (so "remove" can never silently discard work), then
+/// prunes stale metadata.
 pub async fn remove_worktree(repo: &Path, worktree: &str) -> Result<String> {
     let path = Path::new(worktree);
     if worktrees(repo)
@@ -745,6 +753,14 @@ pub async fn remove_worktree(repo: &Path, worktree: &str) -> Result<String> {
     {
         return Err(anyhow!("cannot remove the main worktree"));
     }
+    if !path.is_dir() {
+        return Err(anyhow!("worktree not found: {worktree}"));
+    }
+    if has_changes(path).await {
+        return Err(anyhow!(
+            "the worktree at {worktree} has uncommitted changes; commit or stash them first"
+        ));
+    }
     worktree_remove(repo, path).await?;
     let _ = git(repo, &["worktree", "prune"]).await;
     Ok(format!("Removed worktree {worktree}."))
@@ -753,8 +769,8 @@ pub async fn remove_worktree(repo: &Path, worktree: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_exists, branches, default_branch, delete_local_branch, merge_branch_into,
-        parse_status, remove_worktree, valid_ref,
+        branch_exists, branches, default_branch, delete_local_branch, delete_remote_branch,
+        merge_branch_into, parse_status, remove_worktree, valid_ref,
     };
     use std::path::Path;
 
@@ -865,7 +881,31 @@ mod tests {
         assert!(delete_local_branch(&dir, "held").await.is_err());
         let main_arg = dir.to_string_lossy().to_string();
         assert!(remove_worktree(&dir, &main_arg).await.is_err());
+        // A worktree with uncommitted work is never removed (no silent loss).
+        std::fs::write(wt.join("wip.txt"), "x").unwrap();
+        assert!(remove_worktree(&dir, &wt_arg).await.is_err());
+        std::fs::remove_file(wt.join("wip.txt")).unwrap();
         remove_worktree(&dir, &wt_arg).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_helpers_never_delete_the_default_branch() {
+        let dir = std::env::temp_dir().join(format!("solayge-default-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        // Switch away so `main` exists but is not checked out.
+        run(&dir, &["checkout", "-q", "-b", "work"]).await;
+
+        // Neither the local nor the remote default branch may be deleted, even
+        // though it is no longer the checked-out branch.
+        assert!(delete_local_branch(&dir, "main").await.is_err());
+        assert!(delete_remote_branch(&dir, "main").await.is_err());
+
+        // A non-default branch is still deletable.
+        run(&dir, &["branch", "tmp"]).await;
+        delete_local_branch(&dir, "tmp").await.unwrap();
+        assert!(!branch_exists(&dir, "tmp").await);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

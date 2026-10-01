@@ -293,6 +293,8 @@ export function effectiveConfig(
       settings.model ??
       null,
     review_mode: project.review_mode ?? settings.review_mode ?? "off",
+    review_prompt:
+      project.review_prompt ?? settings.review_prompt ?? null,
     editor: project.editor ?? settings.editor ?? null,
   };
 }

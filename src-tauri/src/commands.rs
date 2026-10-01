@@ -142,6 +142,7 @@ pub async fn add_project(app: AppHandle, path: String) -> Result<Snapshot, Strin
                 review_provider: None,
                 review_model: None,
                 review_mode: None,
+                review_prompt: None,
                 editor: None,
                 env_vars: Vec::new(),
                 skills: Vec::new(),
@@ -556,6 +557,15 @@ pub fn create_tasks(
         // Tasks are created as drafts: nothing runs until the project is
         // executed (or the task is started explicitly).
         let status = TaskStatus::Draft;
+        let profile = nt
+            .profile
+            .or(project_default)
+            .or(global_default)
+            .unwrap_or_default();
+        // Read-only tasks cannot change anything, so there is nothing for the
+        // auto reviewer to find: never attach a review to them.
+        let skip_review =
+            resolved.review_mode == ReviewMode::Off || profile == PermissionProfile::Readonly;
         new_tasks.push(Task {
             id,
             project_path: project_path.clone(),
@@ -564,11 +574,7 @@ pub fn create_tasks(
             isolation: nt
                 .isolation
                 .unwrap_or(default_isolation.unwrap_or_default()),
-            profile: nt
-                .profile
-                .or(project_default)
-                .or(global_default)
-                .unwrap_or_default(),
+            profile,
             last_permission: None,
             base_ref: nt
                 .base_ref
@@ -590,7 +596,7 @@ pub fn create_tasks(
             fallback_provider: resolved.fallback_provider,
             fallback_model: resolved.fallback_model.clone(),
             used_fallback: false,
-            review: if resolved.review_mode == ReviewMode::Off {
+            review: if skip_review {
                 None
             } else {
                 Some(TaskReview {
@@ -1564,6 +1570,10 @@ pub fn update_project_config(
             p.review_provider = config.review_provider;
             p.review_model = config.review_model;
             p.review_mode = config.review_mode;
+            p.review_prompt = config
+                .review_prompt
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
             p.editor = config.editor;
             p.conflict_mode = config.conflict_mode;
 

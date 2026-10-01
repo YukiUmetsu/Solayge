@@ -480,6 +480,7 @@ mod tests {
                 review_provider: None,
                 review_model: None,
                 review_mode: None,
+                review_prompt: None,
                 editor: None,
                 env_vars: Vec::new(),
                 skills: Vec::new(),

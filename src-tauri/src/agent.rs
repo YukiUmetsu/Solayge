@@ -144,6 +144,28 @@ pub fn apply_system_prompt(
     }
 }
 
+/// Built-in instruction prepended to every agent task prompt. Asking for access
+/// once, before work starts, beats discovering a permission mid-task: the agent
+/// can plan around it, and the user answers one prompt instead of several.
+pub const ACCESS_PLANNING_INSTRUCTION: &str = "\
+PLAN AHEAD - REQUEST ACCESS UP FRONT\n\
+Before you change anything, do this in your first message:\n\
+1. State a short plan of the steps you will take.\n\
+2. List everything you will need that is NOT already inside this project folder, \
+naming the exact absolute path, command, or host for each: directories/files outside \
+the project you will read or write, shell commands or tools that may need approval, \
+and any network access.\n\
+If the environment gives you a way to ask the user (a question or approval tool), \
+request ALL of it in one batch now, before starting, instead of getting blocked partway \
+through. If you cannot ask up front, print the list so the user can approve it. Prefer \
+staying inside the project folder; only ask for outside access you actually need.";
+
+/// Wrap a task prompt with [`ACCESS_PLANNING_INSTRUCTION`] so the agent plans its
+/// access before acting.
+pub fn with_access_planning(prompt: &str) -> String {
+    format!("{ACCESS_PLANNING_INSTRUCTION}\n\n{prompt}")
+}
+
 /// Expand `{{project_name}}`, `{{project_path}}`, `{{current_branch}}` and
 /// `{{env.NAME}}` (also `{{env:NAME}}` and `{{$NAME}}`). Unknown tokens are
 /// left as-is so typos are visible.
@@ -225,8 +247,32 @@ pub fn sanitize_branch_name(raw: &str) -> String {
     }
 }
 
+/// The default reviewer instructions. Deliberately adversarial: the reviewer is
+/// told to distrust the change and the author, and to look for what is missing
+/// rather than to confirm what is present.
+const DEFAULT_REVIEW_INSTRUCTIONS: &str = "\
+Be skeptical and adversarial. Assume the change is flawed until the evidence proves otherwise, and \
+that the author stopped as soon as it looked done. Actively try to falsify the claim that the task \
+is complete:\n\
+- Re-read the original instruction and check every requirement is actually met, not merely plausible.\n\
+- Inspect the real diff and the files on disk. Do not trust summaries, comments, or commit messages.\n\
+- Hunt for bugs, unhandled edge cases, silent failures, security holes, data loss, and broken or missing tests.\n\
+- Question happy-path assumptions, error handling, concurrency, permissions, and off-by-one mistakes.\n\
+- Check whether the tests would actually fail if the change were wrong, and whether any test was weakened to pass.\n\
+- Call out anything you could not verify, and any requirement you cannot confirm was implemented.";
+
 /// The prompt handed to the review agent.
-pub fn review_prompt(title: &str, task_prompt: &str, mode: ReviewMode) -> String {
+///
+/// `custom` (project, then account) replaces only the instructions paragraph.
+/// The task context and the required verdict line are always appended, so an
+/// edited prompt cannot break the `REVIEW:` contract the scheduler parses.
+pub fn review_prompt(
+    title: &str,
+    task_prompt: &str,
+    mode: ReviewMode,
+    project_path: Option<&str>,
+    custom: Option<&str>,
+) -> String {
     let fix = match mode {
         ReviewMode::Autofix => {
             "If you find correctness, security, or data-loss problems, FIX them directly in \
@@ -234,13 +280,20 @@ pub fn review_prompt(title: &str, task_prompt: &str, mode: ReviewMode) -> String
         }
         _ => "Do NOT modify any files. Only report.\n",
     };
+    let instructions = custom
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_REVIEW_INSTRUCTIONS);
+    let repo_line = project_path
+        .map(|p| format!("REPOSITORY: {p}\n"))
+        .unwrap_or_default();
     format!(
-        "You are a meticulous senior engineer reviewing the changes just made for one task.\n\n\
-         TASK: {title}\n\n\
+        "You are a meticulous, skeptical senior engineer reviewing the changes just made for one \
+         task. You did not write this code and must not assume it is correct.\n\n\
+         TASK: {title}\n\
+         {repo_line}\n\
          THE INSTRUCTION THE TASK WAS GIVEN:\n{task_prompt}\n\n\
-         Inspect the working tree (`git status`, `git diff`, and the files on disk). Judge \
-         whether the change actually fulfils the instruction and is correct, safe, and \
-         complete. Focus on bugs, security, edge cases, and broken tests.\n\
+         {instructions}\n\n\
          {fix}\n\
          Finish with EXACTLY one line, on its own, in this format:\n\
          REVIEW: PASS\n\
@@ -576,6 +629,9 @@ pub fn resolve(project: Option<&Project>, settings: &Settings) -> ResolvedConfig
     let review_mode = project
         .and_then(|p| p.review_mode)
         .unwrap_or(settings.review_mode);
+    let review_prompt = project
+        .and_then(|p| p.review_prompt.clone())
+        .or_else(|| settings.review_prompt.clone());
     let editor = project
         .and_then(|p| p.editor.clone())
         .or_else(|| settings.editor.clone());
@@ -587,6 +643,7 @@ pub fn resolve(project: Option<&Project>, settings: &Settings) -> ResolvedConfig
         review_provider,
         review_model,
         review_mode,
+        review_prompt,
         editor,
     }
 }
@@ -701,6 +758,30 @@ mod tests {
             enabled: false,
         };
         assert_eq!(apply_system_prompt("do it", Some(&off), &ctx), "do it");
+    }
+
+    #[test]
+    fn access_planning_instruction_precedes_the_task() {
+        let wrapped = with_access_planning("do the thing");
+        assert!(wrapped.starts_with(ACCESS_PLANNING_INSTRUCTION));
+        assert!(wrapped.ends_with("do the thing"));
+
+        // A project prefix system prompt still frames the whole thing.
+        let env: Vec<(String, String)> = Vec::new();
+        let ctx = PromptContext {
+            project_name: "p",
+            project_path: "/p",
+            current_branch: None,
+            env: &env,
+        };
+        let prefix = SystemPrompt {
+            position: SystemPromptPosition::Prefix,
+            text: "rules".into(),
+            enabled: true,
+        };
+        let composed = apply_system_prompt(&with_access_planning("do it"), Some(&prefix), &ctx);
+        assert!(composed.starts_with("rules\n\n"));
+        assert!(composed.contains(ACCESS_PLANNING_INSTRUCTION));
     }
 
     #[test]

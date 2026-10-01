@@ -33,7 +33,7 @@ export const STATUS_META: Record<TaskStatus, StatusMeta> = {
     text: "text-warning",
   },
   succeeded: {
-    label: "Succeeded",
+    label: "Completed",
     dot: "bg-success",
     chip: "bg-success-soft border-success-line",
     text: "text-success",
@@ -144,6 +144,22 @@ export function runDuration(
   return duration(task.started_at, task.finished_at ?? now);
 }
 
+/**
+ * Execution time for the compact task card: minute resolution, no seconds.
+ * Sub-minute runs read "<1m".
+ */
+export function runMinutes(
+  task: { started_at?: number | null; finished_at?: number | null },
+  now: number,
+): string {
+  if (!task.started_at) return "—";
+  const secs = Math.max(0, (task.finished_at ?? now) - task.started_at);
+  if (secs < 60) return "<1m";
+  const m = Math.floor(secs / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /** True while a task is still running (no finish timestamp yet). */
 export function isLive(task: {
   started_at?: number | null;
@@ -154,4 +170,14 @@ export function isLive(task: {
 
 export function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+/**
+ * Display a git porcelain status code. Untracked files (`??`) are shown as "U"
+ * so the badges read as a single letter like the rest (M/A/D/R).
+ */
+export function fileStatusLabel(status: string): string {
+  const s = status.trim();
+  if (s === "??" || s === "?") return "U";
+  return s;
 }

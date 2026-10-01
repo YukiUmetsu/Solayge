@@ -59,6 +59,12 @@ export interface TaskAsk {
   kind: AskKind;
   title: string;
   message?: string | null;
+  /** For a permission ask: the provider action, e.g. `external_directory`. */
+  action?: string | null;
+  /** For a permission ask: the exact directory/command/URL requested. */
+  resource?: string | null;
+  /** For a permission ask: a plain-language reason. */
+  purpose?: string | null;
   fields: AskField[];
   options: string[];
   session_id?: string | null;
@@ -198,6 +204,8 @@ export interface AgentConfig {
   review_provider?: Provider | null;
   review_model?: string | null;
   review_mode?: ReviewMode | null;
+  /** Custom instructions for the auto reviewer; blank uses the built-in prompt. */
+  review_prompt?: string | null;
   editor?: string | null;
 }
 
@@ -209,6 +217,7 @@ export interface ResolvedConfig {
   review_provider: Provider;
   review_model?: string | null;
   review_mode: ReviewMode;
+  review_prompt?: string | null;
   editor?: string | null;
 }
 
@@ -264,6 +273,7 @@ export interface Project {
   review_provider?: Provider | null;
   review_model?: string | null;
   review_mode?: ReviewMode | null;
+  review_prompt?: string | null;
   editor?: string | null;
   env_vars: ProjectEnvVar[];
   skills: ProjectSkill[];
@@ -311,6 +321,7 @@ export interface Settings {
   review_provider?: Provider | null;
   review_model?: string | null;
   review_mode: ReviewMode;
+  review_prompt?: string | null;
   editor?: string | null;
   command_templates: CommandTemplates;
   secret_store?: SecretStore | null;
@@ -428,8 +439,26 @@ export interface TaskPatch {
   kind?: TaskKind;
 }
 
+/** A coarse kind for a task-log line, used to color and filter the log. */
+export type LogKind =
+  | "text"
+  | "tool"
+  | "note"
+  | "error"
+  | "warn"
+  | "success"
+  | "heading";
+
+/** One classified line in a task log. */
+export interface LogEntry {
+  text: string;
+  kind: LogKind;
+}
+
 export interface LogEvent {
   task_id: string;
   stream: string;
   line: string;
+  /** Coarse kind from the backend (`text` | `tool` | `note`); may be absent. */
+  kind?: string | null;
 }

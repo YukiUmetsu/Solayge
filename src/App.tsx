@@ -11,7 +11,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
-import type { EnvironmentStatus, GitStatus, LogEvent, Snapshot } from "./types";
+import type { EnvironmentStatus, GitStatus, LogEntry, LogEvent, Snapshot } from "./types";
+import { classifyLine } from "./components/LogView";
 import { effectiveConfig } from "./lib/providers";
 import { Icon } from "./components/Icons";
 import { Sidebar } from "./components/Sidebar";
@@ -28,6 +29,7 @@ import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { ShipModal } from "./components/ShipModal";
 import { MergeModal } from "./components/MergeModal";
 import { GitModal } from "./components/GitModal";
+import { PermissionPrompt } from "./components/PermissionPrompt";
 
 const MAX_LOG_LINES = 4000;
 
@@ -137,7 +139,7 @@ export default function App() {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [logs, setLogs] = useState<Record<string, string[]>>({});
+  const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [showPlanner, setShowPlanner] = useState(false);
   const [showNewTask, setShowNewTask] = useState(false);
@@ -150,6 +152,7 @@ export default function App() {
   const [showPast, setShowPast] = useState(false);
   const [remote, setRemote] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [dismissedAskId, setDismissedAskId] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
 
   const [leftOpen, setLeftOpen] = useStoredState("solayge.layout.leftOpen", true);
@@ -208,9 +211,10 @@ export default function App() {
       unlisteners.push(u),
     );
     listen<LogEvent>("task://log", (e) => {
-      const { task_id, line } = e.payload;
+      const { task_id, line, kind } = e.payload;
+      const entry: LogEntry = { text: line, kind: classifyLine(line, kind) };
       setLogs((prev) => {
-        const arr = prev[task_id] ? [...prev[task_id], line] : [line];
+        const arr = prev[task_id] ? [...prev[task_id], entry] : [entry];
         if (arr.length > MAX_LOG_LINES) arr.splice(0, arr.length - MAX_LOG_LINES);
         return { ...prev, [task_id]: arr };
       });
@@ -257,7 +261,13 @@ export default function App() {
       .taskLog(selectedTaskId)
       .then((text) => {
         const lines = text.length ? text.replace(/\n$/, "").split("\n") : [];
-        setLogs((prev) => ({ ...prev, [selectedTaskId]: lines }));
+        setLogs((prev) => ({
+          ...prev,
+          [selectedTaskId]: lines.map((line) => ({
+            text: line,
+            kind: classifyLine(line),
+          })),
+        }));
       })
       .catch(() => {});
   }, [selectedTaskId]);
@@ -280,12 +290,26 @@ export default function App() {
   }, [selectedProject]);
 
   // The detail panel is per-task and per-project; drop the selection when the
-  // project changes so it never shows the previous project's task.
+  // project changes so it never shows the previous project's task — unless the
+  // selection is still valid in the new project (e.g. a permission popup opening
+  // one of its tasks).
   useEffect(() => {
-    setSelectedTaskId(null);
     setEditingTaskId(null);
     setShowDeleted(false);
     setShowPast(false);
+    setSelectedTaskId((cur) => {
+      if (
+        cur &&
+        snapshot?.tasks.some(
+          (t) => t.id === cur && t.project_path === selectedProject,
+        )
+      ) {
+        return cur;
+      }
+      return null;
+    });
+    // Only re-run when the project changes; the latest `snapshot` is read here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject]);
 
   const project = snapshot?.projects.find((p) => p.path === selectedProject) ?? null;
@@ -310,6 +334,24 @@ export default function App() {
     () => effectiveConfig(project ?? {}, snapshot?.settings ?? {}),
     [project, snapshot?.settings],
   );
+
+  // The first running task waiting on a permission, surfaced as an app-level
+  // popup so the decision is made in-app with the directory and purpose visible.
+  const pendingPermission = useMemo(() => {
+    if (!snapshot) return null;
+    return (
+      snapshot.tasks.find(
+        (t) => t.status === "running" && t.ask?.kind === "permission",
+      ) ?? null
+    );
+  }, [snapshot]);
+  const permissionProject = pendingPermission
+    ? (snapshot?.projects.find(
+        (p) => p.path === pendingPermission.project_path,
+      ) ?? null)
+    : null;
+  const showPermission =
+    !!pendingPermission && pendingPermission.ask?.id !== dismissedAskId;
 
   async function addProject() {
     try {
@@ -566,6 +608,22 @@ export default function App() {
         <GitModal
           project={project}
           onClose={() => setShowBranchDiff(false)}
+        />
+      )}
+
+      {showPermission && pendingPermission && (
+        <PermissionPrompt
+          key={pendingPermission.ask?.id}
+          task={pendingPermission}
+          projectName={permissionProject?.name ?? null}
+          onAnswered={apply}
+          onDismiss={() => setDismissedAskId(pendingPermission.ask?.id ?? null)}
+          onOpenTask={() => {
+            setSelectedProject(pendingPermission.project_path);
+            setSelectedTaskId(pendingPermission.id);
+            setRightOpen(true);
+            setDismissedAskId(pendingPermission.ask?.id ?? null);
+          }}
         />
       )}
 

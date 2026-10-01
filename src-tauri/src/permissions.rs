@@ -19,7 +19,10 @@ fn permissions(profile: PermissionProfile) -> Vec<Value> {
     match profile {
         PermissionProfile::Autonomous => vec![
             json!({ "action": "*", "resource": "*", "effect": "allow" }),
-            json!({ "action": "external_directory", "resource": "*", "effect": "allow" }),
+            // The one exception: reaching outside the project folder asks, so
+            // access is confirmed in-app instead of silently allowed (and then
+            // announced by the OS). The later, more specific rule wins.
+            json!({ "action": "external_directory", "resource": "*", "effect": "ask" }),
         ],
         PermissionProfile::Supervised => vec![
             json!({ "action": "read", "resource": "*", "effect": "allow" }),
@@ -123,6 +126,9 @@ mod tests {
     fn autonomous_allows_everything_and_uses_auto() {
         let cfg = config_for(PermissionProfile::Autonomous);
         assert!(has_rule(&cfg, "*", "*", "allow"));
+        // The lone exception: outside folders ask rather than being silently
+        // allowed, so the app can confirm the directory and purpose.
+        assert!(has_rule(&cfg, "external_directory", "*", "ask"));
         assert!(uses_auto(PermissionProfile::Autonomous));
         assert!(!uses_auto(PermissionProfile::Supervised));
         assert!(!uses_auto(PermissionProfile::Readonly));

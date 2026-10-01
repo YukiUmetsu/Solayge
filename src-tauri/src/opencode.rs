@@ -60,6 +60,10 @@ Rules:
 - Use "shared" only for read-only analysis tasks. At most one "shared" task runs at a time.
 - Keep the dependency graph acyclic.
 - Make each "prompt" detailed enough that an agent could do it without seeing this plan.
+- In each "prompt", have the agent begin by planning and by listing any access it needs
+  outside the repository, with exact absolute paths, so the user can approve it up front.
+- Prefer tasks that only touch the repository. If a task genuinely needs files outside it,
+  name those exact paths in the prompt instead of leaving them to be discovered mid-task.
 - Output only the JSON object."#,
         skills = skills_section(skills)
     )

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { AskField, DiffResult, Project, Task, TaskAsk, Worktree } from "../types";
+import type { AskField, DiffResult, LogEntry, Project, Task, TaskAsk, Worktree } from "../types";
 import { api } from "../api";
 import {
   PROFILE_META,
@@ -14,10 +14,12 @@ import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskS
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
+import { LogBody } from "./LogView";
 
 type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
 
 const ResultView = lazy(() => import("./ResultView"));
+const Markdown = lazy(() => import("./Markdown"));
 
 export function DetailPanel({
   task,
@@ -31,7 +33,7 @@ export function DetailPanel({
 }: {
   task: Task | null;
   project: Project | null;
-  logs: string[];
+  logs: LogEntry[];
   width: number;
   onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
@@ -327,6 +329,23 @@ function AskPanel({ task }: { task: Task }) {
         </pre>
       )}
 
+      {ask.kind === "permission" && (ask.resource || ask.purpose) && (
+        <div className="mb-2 space-y-1 text-[11.5px]">
+          {ask.purpose && (
+            <div className="text-ink-muted">
+              <span className="text-ink-subtle">Why: </span>
+              {ask.purpose}
+            </div>
+          )}
+          {ask.resource && (
+            <div className="text-ink-muted">
+              <span className="text-ink-subtle">Target: </span>
+              <span className="mono break-all text-ink">{ask.resource}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {ask.kind === "permission" ? (
         <div className="flex flex-wrap gap-2">
           {ask.options.map((o) => (
@@ -490,6 +509,8 @@ function EmptyDetail() {
   );
 }
 
+const HIDE_TOOLS_KEY = "solayge.logs.hideTools";
+
 function LogsView({
   task,
   logs,
@@ -497,10 +518,25 @@ function LogsView({
   now,
 }: {
   task: Task | null;
-  logs: string[];
+  logs: LogEntry[];
   logRef: RefObject<HTMLDivElement | null>;
   now: number;
 }) {
+  const [hideTools, setHideTools] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(HIDE_TOOLS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDE_TOOLS_KEY, hideTools ? "1" : "0");
+    } catch {
+      /* storage is optional */
+    }
+  }, [hideTools]);
+
   if (!task) return <EmptyDetail />;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -519,16 +555,21 @@ function LogsView({
             </span>
           )
         )}
+        <button
+          className="btn btn-ghost ml-auto !px-2 !py-0.5 !text-[11px]"
+          onClick={() => setHideTools((v) => !v)}
+          title={hideTools ? "Show tool-call lines" : "Hide tool-call lines"}
+          aria-pressed={hideTools}
+        >
+          <Icon name="eye" className="h-3 w-3" />
+          {hideTools ? "Show tools" : "Hide tools"}
+        </button>
       </div>
       <div
         ref={logRef}
-        className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words rounded-none border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed text-ink-muted"
+        className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words rounded-none border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed"
       >
-        {logs.length === 0 ? (
-          <span className="text-ink-faint">No output yet.</span>
-        ) : (
-          logs.join("\n")
-        )}
+        <LogBody entries={logs} hideTools={hideTools} />
       </div>
     </div>
   );
@@ -589,9 +630,13 @@ function ReviewView({
           )}
         </div>
         {review.summary && (
-          <pre className="mono max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-well p-2 text-[11px] leading-relaxed text-ink-muted">
-            {review.summary}
-          </pre>
+          <div className="scroll max-h-40 overflow-auto rounded-lg border border-line bg-well p-2">
+            <Suspense
+              fallback={<span className="text-[11px] text-ink-subtle">Loading…</span>}
+            >
+              <Markdown>{review.summary}</Markdown>
+            </Suspense>
+          </div>
         )}
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-ink-subtle">Reviewer log</span>
@@ -615,12 +660,20 @@ function ReviewView({
           </div>
         </div>
       </div>
-      <div className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed text-ink-muted">
-        {loading && !log
-          ? "Loading…"
-          : err
-            ? err
-            : log.replace(/\n$/, "") || "No reviewer output yet."}
+      <div className="scroll min-h-0 flex-1 border-t border-line bg-well-strong p-3">
+        {loading && !log ? (
+          <span className="text-[11px] text-ink-subtle">Loading…</span>
+        ) : err ? (
+          <span className="text-[11px] text-danger">{err}</span>
+        ) : log.trim() ? (
+          <Suspense
+            fallback={<span className="text-[11px] text-ink-subtle">Loading…</span>}
+          >
+            <Markdown>{log}</Markdown>
+          </Suspense>
+        ) : (
+          <span className="text-[11px] text-ink-subtle">No reviewer output yet.</span>
+        )}
       </div>
     </div>
   );

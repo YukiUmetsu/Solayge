@@ -200,6 +200,14 @@ fn reviews_to_start(tasks: &mut [Task], limit: usize) -> Vec<String> {
         }
         if let Some(r) = t.review.as_mut() {
             if r.mode != ReviewMode::Off && r.status == ReviewStatus::Pending {
+                // A read-only task cannot change code (or anything else), so
+                // there is nothing for a reviewer to find. Mark the review
+                // resolved without spawning a process, so dependents proceed.
+                if t.profile == PermissionProfile::Readonly {
+                    r.status = ReviewStatus::Passed;
+                    r.summary = Some("skipped: read-only task".to_string());
+                    continue;
+                }
                 r.status = ReviewStatus::Running;
                 out.push(t.id.clone());
             }
@@ -722,6 +730,19 @@ fn local_clock(secs: i64, previous: Option<i64>) -> String {
     }
 }
 
+/// Coarse kind for a log line, matching what the UI flips its "hide tool calls"
+/// toggle on. Derived from the app's own markers, not from agent output.
+fn log_kind(body: &str) -> &'static str {
+    let body = body.trim_start();
+    if body.starts_with("[tool] ") {
+        "tool"
+    } else if body.starts_with("[Solayge] ") {
+        "note"
+    } else {
+        "text"
+    }
+}
+
 /// Append one line to a task's log and stream it to the UI. `[Solayge]` marks
 /// messages the app itself generates, so agent output is not mistaken for one;
 /// a timestamp is prepended only after a quiet gap.
@@ -732,6 +753,7 @@ fn write_log(app: &AppHandle, id: &str, line: &str, note: bool) {
     } else {
         line.to_string()
     };
+    let kind = log_kind(&body);
     let rendered = format!("{}{body}", log_stamp(app, id));
     let st = app.state::<AppState>();
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -747,6 +769,7 @@ fn write_log(app: &AppHandle, id: &str, line: &str, note: bool) {
             task_id: id.to_string(),
             stream: if note { "solayge" } else { "agent" }.to_string(),
             line: rendered,
+            kind: kind.to_string(),
         },
     );
 }
@@ -1080,7 +1103,8 @@ async fn start_agent_task(app: AppHandle, run: TaskRun) {
         current_branch: branch.as_deref(),
         env: &ctx.env,
     };
-    let prompt = agent::apply_system_prompt(&run.prompt, ctx.system_prompt.as_ref(), &pctx);
+    let base = agent::with_access_planning(&run.prompt);
+    let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
 
     let mut cmd = match agent::build_command(
         run.provider,
@@ -1120,7 +1144,8 @@ async fn opencode_setup(
         current_branch: branch.as_deref(),
         env: &ctx.env,
     };
-    let prompt = agent::apply_system_prompt(&run.prompt, ctx.system_prompt.as_ref(), &pctx);
+    let base = agent::with_access_planning(&run.prompt);
+    let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
 
     let conn = opencode_server::ensure_server().await?;
     let session = opencode_server::create_session(
@@ -1200,10 +1225,20 @@ async fn start_opencode_loop(
                 {
                     match run.profile {
                         PermissionProfile::Autonomous => {
-                            let _ = opencode_server::reply_permission(
-                                &conn, &session, &ask.id, "always", None,
-                            )
-                            .await;
+                            // Outside folders are the one thing even an
+                            // autonomous task must ask about: silently allowing
+                            // them lets the OS raise its own permission dialog
+                            // (and the agent may wander into Music, Photos, …).
+                            // Everything else is still auto-approved.
+                            if ask.action.as_deref() == Some("external_directory") {
+                                surfaced = Some(ask.id.clone());
+                                set_task_ask(&app, &run.id, ask);
+                            } else {
+                                let _ = opencode_server::reply_permission(
+                                    &conn, &session, &ask.id, "always", None,
+                                )
+                                .await;
+                            }
                         }
                         PermissionProfile::Readonly => {
                             let _ = opencode_server::reply_permission(
@@ -1293,16 +1328,20 @@ fn task_has_ask(app: &AppHandle, id: &str) -> bool {
 fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
     let st = app.state::<AppState>();
     let title = ask.title.clone();
-    let attached = {
+    // The concrete thing being requested (directory / command / URL), so the
+    // notification says *what* and *where*, not just "permission".
+    let detail = ask.resource.clone().or_else(|| ask.purpose.clone());
+    let (attached, task_title) = {
         let mut inner = crate::state::lock(&st.inner);
         match inner.tasks.iter_mut().find(|t| t.id == id) {
             // Never arm an ask on a task that already left `running`: the prompt
             // would be unanswerable and linger after the task stops.
             Some(t) if t.status == TaskStatus::Running => {
+                let task_title = t.title.clone();
                 t.ask = Some(ask);
-                true
+                (true, task_title)
             }
-            _ => false,
+            _ => (false, String::new()),
         }
     };
     if !attached {
@@ -1311,7 +1350,11 @@ fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
     log_note(app, id, &format!("Waiting for you: {title}"));
     st.save();
     emit_state(app);
-    notify(app, "Solayge needs you", &title);
+    let body = match detail.as_deref().filter(|d| !d.trim().is_empty()) {
+        Some(d) => format!("{task_title}: {title} — {d}"),
+        None => format!("{task_title}: {title}"),
+    };
+    notify(app, "Solayge needs you", &body);
 }
 
 fn clear_task_ask(app: &AppHandle, id: &str) {
@@ -2090,11 +2133,16 @@ async fn start_review(app: AppHandle, id: String) {
     // trusting the values snapshotted at creation) means a reviewer fix reaches
     // tasks that already exist, and a review never silently runs on a different
     // model-provider/account than the task it is reviewing.
-    let (provider, model) = {
+    let (provider, model, custom_review) = {
         let st = app.state::<AppState>();
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let proj = inner.projects.iter().find(|p| p.path == project);
-        agent::resolve_reviewer(proj, &inner.settings, task_provider, task_model.as_deref())
+        let (provider, model) =
+            agent::resolve_reviewer(proj, &inner.settings, task_provider, task_model.as_deref());
+        let custom = proj
+            .and_then(|p| p.review_prompt.clone())
+            .or_else(|| inner.settings.review_prompt.clone());
+        (provider, model, custom)
     };
     {
         let st = app.state::<AppState>();
@@ -2118,7 +2166,13 @@ async fn start_review(app: AppHandle, id: String) {
         let st = app.state::<AppState>();
         st.project_env(&project)
     };
-    let prompt = agent::review_prompt(&title, &task_prompt, mode);
+    let prompt = agent::review_prompt(
+        &title,
+        &task_prompt,
+        mode,
+        Some(&project),
+        custom_review.as_deref(),
+    );
     let (log_path, logs_dir) = {
         let st = app.state::<AppState>();
         (st.review_log_path(&id), st.logs_dir())
@@ -2384,6 +2438,7 @@ where
                         task_id: id.clone(),
                         stream: stream.to_string(),
                         line: line.clone(),
+                        kind: log_kind(&line).to_string(),
                     },
                 );
                 emit_state(&app);
@@ -2395,6 +2450,7 @@ where
                     task_id: id.clone(),
                     stream: stream.to_string(),
                     line: rendered,
+                    kind: log_kind(&line).to_string(),
                 },
             );
         }
@@ -2404,9 +2460,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_heartbeat_ids, choose_branch, dispatch, local_clock, mark_interrupted, now,
-        prepare_worktree, resolve_named_branch, review_clear, reviews_to_start, source_statuses,
-        stall_sweep, supervised_tick, BranchChoice,
+        active_heartbeat_ids, choose_branch, dispatch, local_clock, log_kind, mark_interrupted,
+        now, prepare_worktree, resolve_named_branch, review_clear, reviews_to_start,
+        source_statuses, stall_sweep, supervised_tick, BranchChoice,
     };
     use std::path::Path;
     use crate::models::{
@@ -2640,6 +2696,34 @@ mod tests {
     }
 
     #[test]
+    fn reviews_to_start_skips_read_only_tasks() {
+        // A read-only task cannot change anything, so its queued review is
+        // resolved without spawning a reviewer (and without holding up
+        // dependents), while a read-write task is reviewed normally.
+        let mut ro = task("ro", "/p", &[], Isolation::Worktree, None);
+        ro.status = TaskStatus::Succeeded;
+        ro.profile = PermissionProfile::Readonly;
+        let mut rw = task("rw", "/p", &[], Isolation::Worktree, None);
+        rw.status = TaskStatus::Succeeded;
+        let mut tasks = vec![
+            reviewed(ro, ReviewMode::Autofix, ReviewStatus::Pending),
+            reviewed(rw, ReviewMode::Autofix, ReviewStatus::Pending),
+        ];
+
+        assert_eq!(reviews_to_start(&mut tasks, 8), vec!["rw".to_string()]);
+        assert_eq!(tasks[0].review.as_ref().unwrap().status, ReviewStatus::Passed);
+        assert_eq!(tasks[1].review.as_ref().unwrap().status, ReviewStatus::Running);
+    }
+
+    #[test]
+    fn log_kind_tags_tools_and_notes() {
+        assert_eq!(log_kind("[tool] read: a.rs"), "tool");
+        assert_eq!(log_kind("[tool] edit: b.rs (error)"), "tool");
+        assert_eq!(log_kind("[Solayge] waiting for you"), "note");
+        assert_eq!(log_kind("Now update the workflow model."), "text");
+    }
+
+    #[test]
     fn reviews_to_start_respects_its_limit() {
         // A project full of finished tasks must not fork one reviewer each.
         let mut tasks: Vec<Task> = (0..5)
@@ -2750,6 +2834,9 @@ mod tests {
             kind: AskKind::Question,
             title: "Which environment?".into(),
             message: None,
+            action: None,
+            resource: None,
+            purpose: None,
             fields: Vec::new(),
             options: Vec::new(),
             session_id: Some("ses_1".into()),

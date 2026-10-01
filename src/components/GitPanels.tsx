@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { BranchInfo, Project, Worktree } from "../types";
 import { api } from "../api";
 import { Icon } from "./Icons";
@@ -317,44 +317,35 @@ export function GitWorktrees({
   project,
   branches,
   defaultBranch,
+  worktrees,
+  loading,
+  error,
+  onReload,
   onChanged,
 }: {
   project: Project;
   branches: BranchInfo[];
   defaultBranch: string | null;
+  worktrees: Worktree[];
+  loading: boolean;
+  error: string | null;
+  onReload: () => void;
   onChanged: () => void;
 }) {
   const { busy, note, fail, run } = useGitAction(onChanged);
-  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const target = defaultBranch ?? "the default branch";
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setWorktrees(await api.projectWorktrees(project.path));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [project.path]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
   const refresh = useCallback(() => {
-    void load();
+    onReload();
     onChanged();
-  }, [load, onChanged]);
+  }, [onReload, onChanged]);
 
   const byBranch = new Map(branches.map((b) => [b.name, b]));
-  const mergedWorktrees = worktrees.filter(
-    (w) => !w.is_main && w.branch && byBranch.get(w.branch)?.merged,
-  );
+  const mergedWorktrees = worktrees.filter((w) => {
+    if (w.is_main || !w.branch) return false;
+    const info = byBranch.get(w.branch);
+    return Boolean(info?.merged && !info.is_default);
+  });
 
   const removeMerged = () => {
     if (mergedWorktrees.length === 0) return;
@@ -422,7 +413,8 @@ export function GitWorktrees({
         {worktrees.map((w) => {
           const info = w.branch ? byBranch.get(w.branch) : undefined;
           const merged = info ? info.merged : false;
-          const canDeleteBranch = Boolean(w.branch) && merged;
+          // Never offer to delete the default branch, even if a worktree holds it.
+          const canDeleteBranch = Boolean(w.branch) && merged && !info?.is_default;
           return (
             <li key={w.path} className="rounded-lg border border-line px-3 py-2">
               <div className="flex items-center gap-2">

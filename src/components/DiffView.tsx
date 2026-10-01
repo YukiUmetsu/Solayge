@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { DiffResult } from "../types";
 import { Icon } from "./Icons";
 import { highlightLine, languageForPath } from "../lib/highlight";
+import { fileStatusLabel } from "../lib/format";
 
 type LineKind = "add" | "del" | "context" | "hunk" | "meta" | "blank";
 
@@ -23,7 +24,15 @@ function markerFor(kind: LineKind): string {
   return "";
 }
 
-function DiffLine({ line, language }: { line: string; language: string | null }) {
+/** One rendered diff line. Memoized: highlighting is pure per line, so a parent
+ * re-render (collapse/expand, tab switch) must not re-run it for every line. */
+const DiffLine = memo(function DiffLine({
+  line,
+  language,
+}: {
+  line: string;
+  language: string | null;
+}) {
   const kind = lineKind(line);
   if (kind === "blank") {
     return <div className="diff-line diff-blank">&nbsp;</div>;
@@ -46,7 +55,7 @@ function DiffLine({ line, language }: { line: string; language: string | null })
       )}
     </div>
   );
-}
+});
 
 /** One collapsible file inside a diff, with per-file syntax highlighting. */
 export function DiffFile({
@@ -85,7 +94,7 @@ export function DiffFile({
           </span>
         )}
         <span className="mono ml-auto text-[10px] text-ink-subtle">
-          {status.trim()}
+          {fileStatusLabel(status)}
         </span>
       </button>
       {open && (
@@ -143,6 +152,11 @@ export function DiffBody({
   empty?: string;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // A different diff (another task or tab) must not inherit which files were
+  // collapsed in the previous one.
+  useEffect(() => {
+    setCollapsed(new Set());
+  }, [result]);
   const paths = result.files.map((f) => f.path);
   const allCollapsed = paths.length > 0 && paths.every((p) => collapsed.has(p));
 

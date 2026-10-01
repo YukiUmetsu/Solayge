@@ -319,6 +319,16 @@ pub struct TaskAsk {
     pub title: String,
     #[serde(default)]
     pub message: Option<String>,
+    /// For a permission ask: the provider action (e.g. `external_directory`).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// For a permission ask: the concrete thing being requested (a directory, a
+    /// command, a URL), so the UI can show it on its own line.
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// For a permission ask: a plain-language reason the agent gave.
+    #[serde(default)]
+    pub purpose: Option<String>,
     #[serde(default)]
     pub fields: Vec<AskField>,
     /// Permission decisions offered by the provider (`once`, `always`, `reject`).
@@ -501,6 +511,10 @@ pub struct Project {
     pub review_model: Option<String>,
     #[serde(default)]
     pub review_mode: Option<ReviewMode>,
+    /// Custom instructions for the auto code reviewer. `None` uses the built-in
+    /// skeptical prompt.
+    #[serde(default)]
+    pub review_prompt: Option<String>,
     /// Editor id used by the "open project" button (vscode, cursor, zed, …).
     #[serde(default)]
     pub editor: Option<String>,
@@ -555,6 +569,8 @@ pub struct ProjectConfig {
     pub review_model: Option<String>,
     #[serde(default)]
     pub review_mode: Option<ReviewMode>,
+    #[serde(default)]
+    pub review_prompt: Option<String>,
     #[serde(default)]
     pub editor: Option<String>,
     /// Omitted fields leave the existing value untouched.
@@ -652,6 +668,10 @@ pub struct Settings {
     pub review_model: Option<String>,
     #[serde(default)]
     pub review_mode: ReviewMode,
+    /// Account-wide default instructions for the auto code reviewer. Projects
+    /// override it; `None` uses the built-in skeptical prompt.
+    #[serde(default)]
+    pub review_prompt: Option<String>,
     /// Default editor id for the "open project" button.
     #[serde(default)]
     pub editor: Option<String>,
@@ -676,6 +696,7 @@ impl Default for Settings {
             review_provider: None,
             review_model: None,
             review_mode: ReviewMode::Off,
+            review_prompt: None,
             editor: None,
             command_templates: CommandTemplates::default(),
             secret_store: None,
@@ -693,6 +714,7 @@ pub struct ResolvedConfig {
     pub review_provider: Provider,
     pub review_model: Option<String>,
     pub review_mode: ReviewMode,
+    pub review_prompt: Option<String>,
     pub editor: Option<String>,
 }
 
@@ -948,6 +970,9 @@ pub struct LogEvent {
     pub task_id: String,
     pub stream: String,
     pub line: String,
+    /// Coarse kind for the UI (`"text"`, `"tool"`, or `"note"`), so the log can
+    /// be grouped/filtered without re-parsing the line.
+    pub kind: String,
 }
 
 #[cfg(test)]

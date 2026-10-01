@@ -2,7 +2,7 @@ import type { Task } from "../types";
 import {
   PROFILE_META,
   isLive,
-  runDuration,
+  runMinutes,
   shortId,
 } from "../lib/format";
 import {
@@ -103,7 +103,7 @@ export function TaskCard({
                 title={live ? "Running for" : "Ran for"}
               >
                 <Icon name="clock" className="h-3 w-3" />
-                {runDuration(task, now)}
+                {runMinutes(task, now)}
                 {live && (
                   <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
                 )}
