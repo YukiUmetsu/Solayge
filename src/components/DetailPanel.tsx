@@ -14,7 +14,7 @@ import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskS
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
-import { LogBody } from "./LogView";
+import { classifyLine, LogBody } from "./LogView";
 
 type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
 
@@ -660,23 +660,28 @@ function ReviewView({
           </div>
         </div>
       </div>
-      <div className="scroll min-h-0 flex-1 border-t border-line bg-well-strong p-3">
+      <div className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed">
         {loading && !log ? (
           <span className="text-[11px] text-ink-subtle">Loading…</span>
         ) : err ? (
           <span className="text-[11px] text-danger">{err}</span>
         ) : log.trim() ? (
-          <Suspense
-            fallback={<span className="text-[11px] text-ink-subtle">Loading…</span>}
-          >
-            <Markdown>{log}</Markdown>
-          </Suspense>
+          // The reviewer log is a terminal transcript, not markdown: render it
+          // line by line so newlines survive (Markdown collapses soft breaks).
+          <LogBody entries={reviewerLogLines(log)} hideTools={false} />
         ) : (
           <span className="text-[11px] text-ink-subtle">No reviewer output yet.</span>
         )}
       </div>
     </div>
   );
+}
+
+/** Split a raw reviewer log into classified lines for the line-based renderer. */
+function reviewerLogLines(text: string): LogEntry[] {
+  const body = text.replace(/\n$/, "");
+  if (!body) return [];
+  return body.split("\n").map((line) => ({ text: line, kind: classifyLine(line) }));
 }
 
 function DetailsView({

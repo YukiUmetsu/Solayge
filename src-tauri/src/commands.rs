@@ -1280,7 +1280,10 @@ pub fn get_task_log(app: AppHandle, task_id: String) -> Result<String, String> {
     if st.backfill_result(&task_id) {
         emit_state(&app);
     }
-    std::fs::read_to_string(st.log_path(&task_id)).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(st.log_path(&task_id)).map_err(|e| e.to_string())?;
+    // Logs written before ANSI stripping was applied still contain escape
+    // sequences; clean them on the way out too.
+    Ok(crate::opencode::strip_ansi(&text))
 }
 
 /// The error-only log, for the Settings viewer.
@@ -1648,7 +1651,10 @@ pub fn get_review_log(app: AppHandle, task_id: String) -> String {
         return String::new();
     }
     let st = app.state::<AppState>();
-    std::fs::read_to_string(st.review_log_path(&task_id)).unwrap_or_default()
+    let text = std::fs::read_to_string(st.review_log_path(&task_id)).unwrap_or_default();
+    // Reviewer output is terminal-ish; drop any ANSI codes (including from logs
+    // written before the readers stripped them).
+    crate::opencode::strip_ansi(&text)
 }
 
 /// Explain why a resolved CLI isn't runnable.

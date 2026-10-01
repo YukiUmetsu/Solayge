@@ -2389,6 +2389,7 @@ where
             .ok();
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            let line = crate::opencode::strip_ansi(&line);
             let rendered = format!("{}{line}", log_stamp(&app, &format!("review-{id}")));
             if let Some(f) = file.as_mut() {
                 let _ = f.write_all(rendered.as_bytes()).await;
@@ -2415,6 +2416,10 @@ where
             .ok();
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            // Provider CLIs (opencode especially) decorate stdout/stderr with
+            // ANSI codes. Strip them before the line reaches the log file or the
+            // UI so the transcript stays readable.
+            let line = crate::opencode::strip_ansi(&line);
             let rendered = format!("{}{line}", log_stamp(&app, &id));
             if let Some(f) = file.as_mut() {
                 let _ = f.write_all(rendered.as_bytes()).await;
