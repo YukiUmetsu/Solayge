@@ -2533,6 +2533,7 @@ async fn start_review(app: AppHandle, id: String) {
 
 fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
+    let mut title: Option<String> = None;
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
@@ -2540,12 +2541,24 @@ fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
                 r.status = ReviewStatus::Failed;
                 r.summary = Some(msg);
                 r.finished_at = Some(now());
+                title = Some(t.title.clone());
             }
         }
     }
     crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
+    // The reviewer could not run at all (e.g. its provider failed to launch),
+    // so unlike `finish_review` there is no terminal review status the user
+    // would otherwise hear about.
+    if let Some(title) = title {
+        notify(
+            app,
+            NotifyKind::TaskFailed,
+            "Solayge",
+            &format!("{title} — review could not run"),
+        );
+    }
 }
 
 async fn reap_reviews(app: &AppHandle) {
@@ -2726,15 +2739,6 @@ where
                         t.last_permission = Some(line.clone());
                     }
                 }
-                let _ = app.emit(
-                    "task://permission",
-                    LogEvent {
-                        task_id: id.clone(),
-                        stream: stream.to_string(),
-                        line: line.clone(),
-                        kind: log_kind(&line).to_string(),
-                    },
-                );
                 emit_state(&app);
                 notify(
                     &app,

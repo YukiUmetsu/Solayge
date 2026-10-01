@@ -487,7 +487,7 @@ function NotificationsTab({
         <div className="rounded-lg border border-line bg-well p-3">
           <ToggleRow
             label="Enable notifications"
-            hint="Master switch. Turns off every desktop notification below."
+            hint="Master switch. Turns off every notification below — the desktop notification, the in-app toast, and the sound."
             checked={value.enabled}
             disabled={busy}
             onChange={(v) => onChange({ enabled: v })}
@@ -830,8 +830,8 @@ function SoundRow({
       </select>
       <button
         className="btn btn-ghost shrink-0 !px-2 !py-1"
-        disabled={disabled || !value}
-        title="Preview"
+        disabled={disabled}
+        title={value ? "Preview" : "Preview default sound"}
         onClick={() => {
           onError(null);
           void playSound(value ?? fallback, volume);
