@@ -286,6 +286,8 @@ pub enum AskFieldKind {
     Integer,
     Boolean,
     Multiselect,
+    /// Answered outside the form (e.g. an OAuth URL the agent hands over).
+    External,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,12 +308,39 @@ pub struct AskField {
     pub kind: AskFieldKind,
     #[serde(default)]
     pub required: bool,
+    /// Whether the user may answer with something other than `options` (opencode's
+    /// `custom` flag). The UI shows a free-text input alongside the choices.
+    #[serde(default)]
+    pub custom: bool,
     #[serde(default)]
     pub options: Vec<AskOption>,
     #[serde(default)]
     pub default: Option<serde_json::Value>,
     #[serde(default)]
     pub placeholder: Option<String>,
+    /// String format hint: `email`, `uri`, `date`, or `date-time`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Numeric bounds for `number`/`integer` fields.
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// String length bounds.
+    #[serde(default)]
+    pub min_length: Option<u64>,
+    #[serde(default)]
+    pub max_length: Option<u64>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    /// Bounds on the number of multiselect entries.
+    #[serde(default)]
+    pub min_items: Option<u64>,
+    #[serde(default)]
+    pub max_items: Option<u64>,
+    /// For an `external` field: where the user completes it.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// A pending question or permission request from an agent. While one is set the
@@ -327,10 +356,19 @@ pub struct TaskAsk {
     /// For a permission ask: the provider action (e.g. `external_directory`).
     #[serde(default)]
     pub action: Option<String>,
-    /// For a permission ask: the concrete thing being requested (a directory, a
-    /// command, a URL), so the UI can show it on its own line.
+    /// For a permission ask: the concrete targets being requested (a directory,
+    /// command, URL, …), one per entry so the UI can list them on their own lines.
     #[serde(default)]
-    pub resource: Option<String>,
+    pub resources: Vec<String>,
+    /// For a permission ask: what an `always` reply would remember.
+    #[serde(default)]
+    pub save: Vec<String>,
+    /// For a permission ask: provider-supplied details (tool, command, args, …).
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// For a permission ask: the tool call that triggered the request.
+    #[serde(default)]
+    pub source: Option<serde_json::Value>,
     /// For a permission ask: a plain-language reason the agent gave.
     #[serde(default)]
     pub purpose: Option<String>,
@@ -358,6 +396,10 @@ pub struct Task {
     pub profile: PermissionProfile,
     #[serde(default)]
     pub last_permission: Option<String>,
+    /// The live opencode session backing this task while it runs. The UI uses it
+    /// to let the user send the agent messages; cleared when the task stops.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub base_ref: Option<String>,
     #[serde(default)]

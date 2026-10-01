@@ -15,6 +15,7 @@ import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
 import { classifyLine, LogBody } from "./LogView";
+import { DECISION_HINTS, DECISION_LABELS, PermissionDetails } from "./PermissionDetails";
 
 type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
 
@@ -147,6 +148,7 @@ export function DetailPanel({
       {/* Only a running task can accept an answer; a leftover ask on an
           interrupted or canceled task would render buttons that cannot work. */}
       {task?.status === "running" && task.ask && <AskPanel task={task} />}
+      {task?.status === "running" && task.session_id && <MessageComposer task={task} />}
 
       {!task && tab !== "worktrees" ? (
         <EmptyDetail />
@@ -265,18 +267,14 @@ export function DetailPanel({
 function defaultAnswer(ask: TaskAsk): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of ask.fields) {
+    // External fields are completed elsewhere; there is no value to submit.
+    if (f.kind === "external") continue;
     if (f.kind === "multiselect") out[f.key] = Array.isArray(f.default) ? f.default : [];
     else if (f.kind === "boolean") out[f.key] = typeof f.default === "boolean" ? f.default : false;
     else out[f.key] = f.default ?? "";
   }
   return out;
 }
-
-const PERMISSION_LABELS: Record<string, string> = {
-  once: "Allow once",
-  always: "Always allow",
-  reject: "Reject",
-};
 
 /** A pending question or permission request, answered in place. */
 function AskPanel({ task }: { task: Task }) {
@@ -296,7 +294,8 @@ function AskPanel({ task }: { task: Task }) {
     setAnswer((a) => ({ ...a, [key]: value }));
 
   const missing = ask.fields.some((f) => {
-    if (!f.required) return false;
+    // External fields are completed elsewhere and carry no submitted value.
+    if (!f.required || f.kind === "external") return false;
     const v = answer[f.key];
     return v === "" || v === undefined || v === null || (Array.isArray(v) && v.length === 0);
   });
@@ -323,68 +322,62 @@ function AskPanel({ task }: { task: Task }) {
         </span>
       </div>
 
-      {ask.message && (
-        <pre className="mono mb-2 whitespace-pre-wrap rounded-lg border border-line bg-well p-2 text-[11px] leading-relaxed text-ink-muted">
-          {ask.message}
-        </pre>
-      )}
-
-      {ask.kind === "permission" && (ask.resource || ask.purpose) && (
-        <div className="mb-2 space-y-1 text-[11.5px]">
-          {ask.purpose && (
-            <div className="text-ink-muted">
-              <span className="text-ink-subtle">Why: </span>
-              {ask.purpose}
-            </div>
-          )}
-          {ask.resource && (
-            <div className="text-ink-muted">
-              <span className="text-ink-subtle">Target: </span>
-              <span className="mono break-all text-ink">{ask.resource}</span>
-            </div>
-          )}
-        </div>
-      )}
-
       {ask.kind === "permission" ? (
-        <div className="flex flex-wrap gap-2">
-          {ask.options.map((o) => (
-            <button
-              key={o}
-              className="btn btn-ghost !py-1"
-              disabled={busy}
-              onClick={() => void send({ decision: o })}
-            >
-              {PERMISSION_LABELS[o] ?? o}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {ask.fields.map((f) => (
-            <AskFieldInput
-              key={f.key}
-              field={f}
-              value={answer[f.key]}
-              onChange={(v) => set(f.key, v)}
-            />
-          ))}
-          <div className="flex items-center gap-2">
-            <button
-              className="btn btn-primary !py-1"
-              disabled={busy || missing}
-              onClick={() => void send(answer)}
-            >
-              <Icon name="check" className="h-3.5 w-3.5" />
-              Send answer
-            </button>
-            {missing && (
-              <span className="text-[11px] text-ink-subtle">
-                Fill in the required fields
-              </span>
-            )}
+        <>
+          <PermissionDetails ask={ask} />
+          <div className="mt-3 flex flex-wrap gap-2">
+            {ask.options.map((o) => (
+              <button
+                key={o}
+                className={
+                  o === "once"
+                    ? "btn btn-primary !py-1"
+                    : o === "reject"
+                      ? "btn btn-danger !py-1"
+                      : "btn btn-ghost !py-1"
+                }
+                disabled={busy}
+                title={DECISION_HINTS[o]}
+                onClick={() => void send({ decision: o })}
+              >
+                {DECISION_LABELS[o] ?? o}
+              </button>
+            ))}
           </div>
-        </div>
+        </>
+      ) : (
+        <>
+          {ask.message && (
+            <pre className="mono mb-2 whitespace-pre-wrap rounded-lg border border-line bg-well p-2 text-[11px] leading-relaxed text-ink-muted">
+              {ask.message}
+            </pre>
+          )}
+          <div className="space-y-3">
+            {ask.fields.map((f) => (
+              <AskFieldInput
+                key={f.key}
+                field={f}
+                value={answer[f.key]}
+                onChange={(v) => set(f.key, v)}
+              />
+            ))}
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-primary !py-1"
+                disabled={busy || missing}
+                onClick={() => void send(answer)}
+              >
+                <Icon name="check" className="h-3.5 w-3.5" />
+                Send answer
+              </button>
+              {missing && (
+                <span className="text-[11px] text-ink-subtle">
+                  Fill in the required fields
+                </span>
+              )}
+            </div>
+          </div>
+        </>
       )}
 
       {err && <p className="mt-2 text-[11px] text-danger">{err}</p>}
@@ -401,48 +394,38 @@ function AskFieldInput({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
+  const [draft, setDraft] = useState("");
   const label = (
     <div className="mb-1 text-[11px] font-medium text-ink">
       {field.label}
       {field.required && <span className="text-danger"> *</span>}
     </div>
   );
+  const description = field.description ? (
+    <p className="mt-1 text-[10.5px] text-ink-subtle">{field.description}</p>
+  ) : null;
 
-  if (field.options.length > 0) {
+  // An external field is completed outside the form (e.g. an OAuth page).
+  if (field.kind === "external") {
     return (
       <div>
         {label}
-        <div className="flex flex-wrap gap-1.5">
-          {field.options.map((o) => {
-            const on = Array.isArray(value)
-              ? (value as string[]).includes(o.value)
-              : value === o.value;
-            return (
-              <button
-                key={o.value}
-                title={o.description ?? undefined}
-                className={`rounded-lg border px-2 py-1 text-[11.5px] transition ${
-                  on
-                    ? "border-accent-line bg-accent-soft text-accent-text"
-                    : "border-line bg-well text-ink-muted hover:border-accent-line"
-                }`}
-                onClick={() => {
-                  if (field.kind === "multiselect") {
-                    const arr = Array.isArray(value) ? [...(value as string[])] : [];
-                    const i = arr.indexOf(o.value);
-                    if (i >= 0) arr.splice(i, 1);
-                    else arr.push(o.value);
-                    onChange(arr);
-                  } else {
-                    onChange(o.value);
-                  }
-                }}
-              >
-                {o.label}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="btn btn-ghost !py-1"
+            disabled={!field.url}
+            onClick={() => {
+              if (field.url) void api.openExternal(field.url).catch(() => {});
+            }}
+          >
+            <Icon name="external" className="h-3.5 w-3.5" />
+            Open
+          </button>
+          <span className="text-[10.5px] text-ink-subtle">
+            Finish this outside Solayge, then send your answer below.
+          </span>
         </div>
+        {description}
       </div>
     );
   }
@@ -469,18 +452,150 @@ function AskFieldInput({
             </button>
           ))}
         </div>
+        {description}
       </div>
     );
   }
 
   const numeric = field.kind === "number" || field.kind === "integer";
+
+  if (field.options.length > 0) {
+    const isOption = (v: string) => field.options.some((o) => o.value === v);
+    const arr = Array.isArray(value) ? (value as string[]) : [];
+    // Hand-typed multiselect entries, shown as removable chips.
+    const customValues = arr.filter((v) => !isOption(v));
+    // For a single-choice field, a typed value that is not one of the options.
+    const customText =
+      !Array.isArray(value) && typeof value === "string" && value !== "" && !isOption(value)
+        ? value
+        : "";
+
+    const optionClass = (on: boolean) =>
+      `rounded-lg border px-2 py-1 text-[11.5px] transition ${
+        on
+          ? "border-accent-line bg-accent-soft text-accent-text"
+          : "border-line bg-well text-ink-muted hover:border-accent-line"
+      }`;
+
+    return (
+      <div>
+        {label}
+        <div className="flex flex-wrap gap-1.5">
+          {field.options.map((o) => {
+            const on = field.kind === "multiselect" ? arr.includes(o.value) : value === o.value;
+            return (
+              <button
+                key={o.value}
+                title={o.description ?? undefined}
+                className={optionClass(on)}
+                onClick={() => {
+                  if (field.kind === "multiselect") {
+                    const next = [...arr];
+                    const i = next.indexOf(o.value);
+                    if (i >= 0) next.splice(i, 1);
+                    else next.push(o.value);
+                    onChange(next);
+                  } else {
+                    onChange(o.value);
+                  }
+                }}
+              >
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {customValues.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {customValues.map((v) => (
+              <span
+                key={v}
+                className="inline-flex items-center gap-1 rounded-lg border border-accent-line bg-accent-soft px-2 py-0.5 text-[11px] text-accent-text"
+              >
+                {v}
+                <button
+                  className="text-accent-text hover:text-ink"
+                  title="Remove"
+                  onClick={() => onChange(arr.filter((x) => x !== v))}
+                >
+                  <Icon name="x" className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {field.custom &&
+          (field.kind === "multiselect" ? (
+            <div className="mt-1.5 flex gap-1.5">
+              <input
+                className="min-w-0 flex-1 rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
+                placeholder={field.placeholder ?? "Type your own answer"}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && draft.trim()) {
+                    e.preventDefault();
+                    onChange([...arr, draft.trim()]);
+                    setDraft("");
+                  }
+                }}
+              />
+              <button
+                className="btn btn-ghost !py-1"
+                disabled={!draft.trim()}
+                onClick={() => {
+                  onChange([...arr, draft.trim()]);
+                  setDraft("");
+                }}
+              >
+                Add
+              </button>
+            </div>
+          ) : (
+            <input
+              className="mt-1.5 w-full rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
+              placeholder={field.placeholder ?? "Or type your own answer"}
+              value={customText}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          ))}
+
+        {!field.custom && field.kind !== "multiselect" && (
+          <p className="mt-1 text-[10.5px] text-ink-subtle">
+            Choose one of the options above.
+          </p>
+        )}
+        {description}
+      </div>
+    );
+  }
+
+  const inputType = numeric
+    ? "number"
+    : field.format === "email"
+      ? "email"
+      : field.format === "uri"
+        ? "url"
+        : field.format === "date"
+          ? "date"
+          : field.format === "date-time"
+            ? "datetime-local"
+            : "text";
   return (
     <div>
       {label}
       <input
         className="w-full rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
-        type={numeric ? "number" : "text"}
+        type={inputType}
         placeholder={field.placeholder ?? ""}
+        min={field.min ?? undefined}
+        max={field.max ?? undefined}
+        minLength={field.min_length ?? undefined}
+        maxLength={field.max_length ?? undefined}
+        pattern={field.pattern ?? undefined}
+        step={field.kind === "integer" ? 1 : numeric ? "any" : undefined}
         value={typeof value === "string" || typeof value === "number" ? value : ""}
         onChange={(e) =>
           onChange(
@@ -492,9 +607,64 @@ function AskFieldInput({
           )
         }
       />
-      {field.description && (
-        <p className="mt-1 text-[10.5px] text-ink-subtle">{field.description}</p>
-      )}
+      {description}
+    </div>
+  );
+}
+
+/** Send a free-form message to a running agent, like typing at its prompt. */
+function MessageComposer({ task }: { task: Task }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function send() {
+    const message = text.trim();
+    if (!message) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.sendTaskMessage(task.id, message);
+      setText("");
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="border-b border-line bg-panel px-3 py-2">
+      <div className="flex items-end gap-2">
+        <textarea
+          className="scroll max-h-28 min-h-9 flex-1 resize-y rounded-lg border border-line bg-well px-2 py-1.5 text-[12px] text-ink outline-none focus:border-accent-line"
+          rows={1}
+          placeholder="Message the agent — ask a question or add instructions…"
+          value={text}
+          disabled={busy}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+        <button
+          className="btn btn-primary !py-1.5"
+          disabled={busy || !text.trim()}
+          onClick={() => void send()}
+          title="Send (Enter). Shift+Enter for a new line."
+        >
+          <Icon name="play" className="h-3.5 w-3.5" />
+          Send
+        </button>
+      </div>
+      <div className="mt-1 text-[10.5px] text-ink-subtle">
+        The agent keeps working; its reply streams into the log. Enter sends,
+        Shift+Enter adds a line.
+      </div>
+      {err && <p className="mt-1 text-[11px] text-danger">{err}</p>}
     </div>
   );
 }

@@ -34,7 +34,8 @@ export type AskFieldKind =
   | "number"
   | "integer"
   | "boolean"
-  | "multiselect";
+  | "multiselect"
+  | "external";
 
 export interface AskOption {
   value: string;
@@ -48,9 +49,22 @@ export interface AskField {
   description?: string | null;
   kind: AskFieldKind;
   required: boolean;
+  /** Whether a value outside `options` may be typed (opencode's `custom`). */
+  custom: boolean;
   options: AskOption[];
   default?: unknown;
   placeholder?: string | null;
+  /** `email` | `uri` | `date` | `date-time`. */
+  format?: string | null;
+  min?: number | null;
+  max?: number | null;
+  min_length?: number | null;
+  max_length?: number | null;
+  pattern?: string | null;
+  min_items?: number | null;
+  max_items?: number | null;
+  /** For an `external` field: where it is completed. */
+  url?: string | null;
 }
 
 /** A pending question or permission request from an agent. */
@@ -61,8 +75,14 @@ export interface TaskAsk {
   message?: string | null;
   /** For a permission ask: the provider action, e.g. `external_directory`. */
   action?: string | null;
-  /** For a permission ask: the exact directory/command/URL requested. */
-  resource?: string | null;
+  /** For a permission ask: the exact directories/commands/URLs requested. */
+  resources: string[];
+  /** For a permission ask: what an `always` reply would remember. */
+  save: string[];
+  /** For a permission ask: provider-supplied details (tool, command, …). */
+  metadata?: unknown;
+  /** For a permission ask: the tool call that triggered the request. */
+  source?: unknown;
   /** For a permission ask: a plain-language reason. */
   purpose?: string | null;
   fields: AskField[];
@@ -263,6 +283,8 @@ export interface Task {
   isolation: Isolation;
   profile: PermissionProfile;
   last_permission?: string | null;
+  /** The live opencode session while the task runs (for messaging the agent). */
+  session_id?: string | null;
   base_ref?: string | null;
   branch?: string | null;
   worktree_path?: string | null;

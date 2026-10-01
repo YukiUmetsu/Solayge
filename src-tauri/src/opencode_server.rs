@@ -416,20 +416,29 @@ fn assistant_text(message: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn field_kind(s: &str) -> Option<AskFieldKind> {
-    Some(match s {
-        "string" => AskFieldKind::String,
+fn field_kind(s: &str) -> AskFieldKind {
+    match s {
         "number" => AskFieldKind::Number,
         "integer" => AskFieldKind::Integer,
         "boolean" => AskFieldKind::Boolean,
         "multiselect" => AskFieldKind::Multiselect,
-        _ => return None,
-    })
+        "external" => AskFieldKind::External,
+        // An unknown type still renders as free text rather than disappearing.
+        _ => AskFieldKind::String,
+    }
+}
+
+fn json_f64(f: &Value, key: &str) -> Option<f64> {
+    f.get(key).and_then(Value::as_f64)
+}
+
+fn json_u64(f: &Value, key: &str) -> Option<u64> {
+    f.get(key).and_then(Value::as_u64)
 }
 
 fn field_from_json(f: &Value) -> Option<AskField> {
     let key = f.get("key").and_then(Value::as_str)?.to_string();
-    let kind = field_kind(f.get("type").and_then(Value::as_str)?)?;
+    let kind = field_kind(f.get("type").and_then(Value::as_str).unwrap_or("string"));
     let label = f
         .get("title")
         .and_then(Value::as_str)
@@ -463,9 +472,19 @@ fn field_from_json(f: &Value) -> Option<AskField> {
         description: f.get("description").and_then(Value::as_str).map(str::to_string),
         kind,
         required: f.get("required").and_then(Value::as_bool).unwrap_or(false),
+        custom: f.get("custom").and_then(Value::as_bool).unwrap_or(false),
         options,
         default: f.get("default").cloned(),
         placeholder: f.get("placeholder").and_then(Value::as_str).map(str::to_string),
+        format: f.get("format").and_then(Value::as_str).map(str::to_string),
+        min: json_f64(f, "minimum"),
+        max: json_f64(f, "maximum"),
+        min_length: json_u64(f, "minLength"),
+        max_length: json_u64(f, "maxLength"),
+        pattern: f.get("pattern").and_then(Value::as_str).map(str::to_string),
+        min_items: json_u64(f, "minItems"),
+        max_items: json_u64(f, "maxItems"),
+        url: f.get("url").and_then(Value::as_str).map(str::to_string),
     })
 }
 
@@ -488,7 +507,10 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         title,
         message: None,
         action: None,
-        resource: None,
+        resources: Vec::new(),
+        save: Vec::new(),
+        metadata: None,
+        source: None,
         purpose: None,
         fields,
         options: Vec::new(),
@@ -500,17 +522,31 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
 /// A short, human purpose for a provider permission action, so the in-app prompt
 /// and notification explain *why* the access is wanted rather than just naming a
 /// tool.
-fn permission_purpose(action: &str) -> &'static str {
+fn permission_purpose(action: &str) -> String {
     match action {
-        "external_directory" => "Access a folder outside this project",
-        "read" => "Read a file",
-        "write" | "edit" | "patch" => "Modify a file",
-        "shell" | "bash" | "execute" => "Run a shell command",
-        "webfetch" | "fetch" | "websearch" => "Use the network",
-        "glob" | "list" => "List files",
-        "grep" => "Search file contents",
-        _ => "Use a tool",
+        "external_directory" => "Access a folder outside this project".to_string(),
+        "read" => "Read a file".to_string(),
+        "write" | "edit" | "patch" => "Modify a file".to_string(),
+        "shell" | "bash" | "execute" => "Run a shell command".to_string(),
+        "webfetch" | "fetch" | "websearch" => "Access the network".to_string(),
+        "glob" | "list" | "ls" => "List files".to_string(),
+        "grep" | "search" => "Search file contents".to_string(),
+        "question" => "Ask you a question".to_string(),
+        "task" | "agent" | "subagent" => "Start a sub-agent".to_string(),
+        other => format!("Use the `{other}` tool"),
     }
+}
+
+/// Read an optional array of strings from a permission request.
+fn string_list(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Map an opencode permission request to a [`TaskAsk`].
@@ -519,32 +555,34 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
     let action = req
         .get("action")
         .and_then(Value::as_str)
-        .unwrap_or("use a tool");
-    let resources = req
-        .get("resources")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
+        .unwrap_or("use a tool")
+        .to_string();
+    let resources = string_list(req.get("resources"));
+    let save = string_list(req.get("save"));
     let message = req
         .get("message")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(str::to_string);
-    let purpose = permission_purpose(action);
+    // An empty metadata object carries no information, so treat it as absent.
+    let metadata = req
+        .get("metadata")
+        .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()))
+        .cloned();
+    let source = req.get("source").filter(|v| !v.is_null()).cloned();
+    let purpose = permission_purpose(&action);
     Some(TaskAsk {
         id,
         kind: AskKind::Permission,
         title: format!("Permission: {action}"),
         message,
-        action: Some(action.to_string()),
-        resource: (!resources.is_empty()).then_some(resources),
-        purpose: Some(purpose.to_string()),
+        action: Some(action),
+        resources,
+        save,
+        metadata,
+        source,
+        purpose: Some(purpose),
         fields: Vec::new(),
         options: vec!["once".into(), "always".into(), "reject".into()],
         created_at: None,
@@ -585,6 +623,8 @@ mod tests {
             "fields": [{
                 "key": "color", "type": "string", "title": "What is your favorite color?",
                 "required": true,
+                "placeholder": "e.g. teal",
+                "custom": true,
                 "options": [
                     {"value":"red","label":"Red","description":"warm"},
                     {"value":"blue","label":"Blue"}
@@ -598,23 +638,67 @@ mod tests {
         assert_eq!(ask.fields[0].kind, AskFieldKind::String);
         assert_eq!(ask.fields[0].options.len(), 2);
         assert_eq!(ask.fields[0].options[1].value, "blue");
+        // `custom` and `placeholder` both let the user answer with free text.
+        assert!(ask.fields[0].custom);
+        assert_eq!(ask.fields[0].placeholder.as_deref(), Some("e.g. teal"));
+    }
+
+    #[test]
+    fn unmapped_and_external_fields_stay_visible() {
+        // A field type we do not know must not make the whole question vanish.
+        let form = json!({
+            "id": "frm_2", "title": "Mixed",
+            "fields": [
+                {"key": "a", "type": "something_new", "title": "A"},
+                {"key": "b", "type": "external", "title": "Sign in",
+                 "url": "https://example.test/oauth"}
+            ]
+        });
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.fields.len(), 2);
+        assert_eq!(ask.fields[0].kind, AskFieldKind::String);
+        assert_eq!(ask.fields[1].kind, AskFieldKind::External);
+        assert_eq!(
+            ask.fields[1].url.as_deref(),
+            Some("https://example.test/oauth")
+        );
     }
 
     #[test]
     fn maps_a_permission_request() {
         let req = json!({
             "id":"per_1","sessionID":"ses_1","action":"bash",
-            "resources":["rm -rf build"],"message":"allow?"
+            "resources":["rm -rf build","another"],
+            "save":["rm -rf build"],
+            "message":"allow?",
+            "metadata":{"command":"rm -rf build","cwd":"/tmp"},
+            "source":{"type":"tool","messageID":"msg_1","id":"call_1"}
         });
         let ask = permission_to_ask("ses_1", &req).expect("ask");
         assert_eq!(ask.kind, AskKind::Permission);
         assert_eq!(ask.options, vec!["once", "always", "reject"]);
-        // The concrete resource is surfaced on its own line, separate from the
-        // provider's message, so the UI can show exactly what is requested.
-        assert_eq!(ask.resource.as_deref(), Some("rm -rf build"));
+        // Each resource is kept separate so the UI can show exactly what is
+        // requested, one line at a time, instead of a comma-joined blob.
+        assert_eq!(ask.resources, vec!["rm -rf build", "another"]);
+        assert_eq!(ask.save, vec!["rm -rf build"]);
         assert_eq!(ask.message.as_deref(), Some("allow?"));
         assert_eq!(ask.action.as_deref(), Some("bash"));
-        assert!(ask.purpose.is_some());
+        assert!(ask.purpose.as_deref().unwrap().contains("shell command"));
+        assert_eq!(
+            ask.metadata.as_ref().and_then(|m| m.get("cwd")).and_then(Value::as_str),
+            Some("/tmp")
+        );
+        assert!(ask.source.is_some());
+    }
+
+    #[test]
+    fn an_empty_permission_metadata_is_treated_as_absent() {
+        let req = json!({
+            "id":"per_2","sessionID":"ses_1","action":"read",
+            "resources":["/etc/hosts"],"metadata":{}
+        });
+        let ask = permission_to_ask("ses_1", &req).expect("ask");
+        assert!(ask.metadata.is_none());
     }
 
     #[test]

@@ -88,6 +88,8 @@ export const api = {
     invoke<Snapshot>("retry_review", { taskId }),
   answerTask: (taskId: string, answer: Record<string, unknown>) =>
     invoke<Snapshot>("answer_task", { taskId, answer }),
+  sendTaskMessage: (taskId: string, text: string) =>
+    invoke<void>("send_task_message", { taskId, text }),
   removeWorktree: (taskId: string) =>
     invoke<Snapshot>("remove_task_worktree", { taskId }),
   clearFinished: (projectPath: string) =>

@@ -100,6 +100,7 @@ pub fn run() {
             commands::retry_task,
             commands::retry_review,
             commands::answer_task,
+            commands::send_task_message,
             commands::remove_task_worktree,
             commands::clear_finished,
             commands::get_task_log,

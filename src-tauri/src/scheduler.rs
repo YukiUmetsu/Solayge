@@ -137,6 +137,7 @@ fn mark_interrupted(t: &mut Task, reason: &str, finished_at: i64) -> Option<Stri
     t.error = Some(reason.to_string());
     t.finished_at = Some(finished_at);
     t.ask = None;
+    t.session_id = None;
     Some(t.title.clone())
 }
 
@@ -754,6 +755,7 @@ fn fail_task(app: &AppHandle, id: &str, msg: String) {
                 t.status = TaskStatus::Failed;
                 t.error = Some(msg);
                 t.finished_at = Some(now());
+                t.session_id = None;
                 Some(t.title.clone())
             }
             None => None,
@@ -973,7 +975,7 @@ fn write_log(app: &AppHandle, id: &str, line: &str, note: bool) {
 }
 
 /// An app-generated note in the task log.
-fn log_note(app: &AppHandle, id: &str, message: &str) {
+pub(crate) fn log_note(app: &AppHandle, id: &str, message: &str) {
     write_log(app, id, message, true);
 }
 
@@ -1354,8 +1356,19 @@ async fn opencode_setup(
     )
     .await?;
     log_note(app, &run.id, &format!("opencode session {session}"));
+    // Remember the session so the user can send the agent messages while it runs.
+    set_task_session(app, &run.id, &session);
     opencode_server::prompt(&conn, &session, &prompt).await?;
     Ok((conn, session))
+}
+
+/// Record (or clear) the live opencode session on a task.
+fn set_task_session(app: &AppHandle, id: &str, session: &str) {
+    let st = app.state::<AppState>();
+    let mut inner = crate::state::lock(&st.inner);
+    if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+        t.session_id = Some(session.to_string());
+    }
 }
 
 /// Poll an opencode session: stream output to the task log, surface questions
@@ -1536,7 +1549,11 @@ fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
     let title = ask.title.clone();
     // The concrete thing being requested (directory / command / URL), so the
     // notification says *what* and *where*, not just "permission".
-    let detail = ask.resource.clone().or_else(|| ask.purpose.clone());
+    let detail = if ask.resources.is_empty() {
+        ask.purpose.clone()
+    } else {
+        Some(ask.resources.join("; "))
+    };
     let (attached, task_title) = {
         let mut inner = crate::state::lock(&st.inner);
         match inner.tasks.iter_mut().find(|t| t.id == id) {
@@ -2236,6 +2253,7 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
             }
             t.exit_code = Some(if ok { 0 } else { 1 });
             t.finished_at = Some(now());
+            t.session_id = None;
             if ok {
                 t.status = TaskStatus::Succeeded;
                 // An interactive success queues its review (via `queue_review`)
@@ -2291,6 +2309,7 @@ fn finish_blocked(app: &AppHandle, id: &str, reason: String) {
             t.status = TaskStatus::Blocked;
             t.error = Some(reason);
             t.finished_at = Some(now());
+            t.session_id = None;
             title = Some(t.title.clone());
         }
     }
@@ -2752,6 +2771,7 @@ mod tests {
             isolation,
             profile: PermissionProfile::default(),
             last_permission: None,
+            session_id: None,
             base_ref: None,
             branch: None,
             worktree_path: None,
@@ -3101,7 +3121,10 @@ mod tests {
             title: "Which environment?".into(),
             message: None,
             action: None,
-            resource: None,
+            resources: Vec::new(),
+            save: Vec::new(),
+            metadata: None,
+            source: None,
             purpose: None,
             fields: Vec::new(),
             options: Vec::new(),

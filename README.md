@@ -139,8 +139,13 @@ Solayge turns that graph into something you can see and control:
 - **Automatic code review** — a reviewer reports, auto-fixes, or stops a task for
   your attention.
 - **Interactive questions** — when an agent asks a question or requests
-  permission, the task notifies you, shows the question and its options in the
-  side panel, and sends your answer back to the live session.
+  permission, the task notifies you and shows the prompt in the side panel.
+  Choice questions can also be answered with free text when the agent allows a
+  custom answer (opencode's `custom` flag), and permission requests spell out the
+  action, the exact target(s), the provider's own details, and what
+  **Always allow** would remember. While a task is running you can also send the
+  agent an arbitrary message at any time — ask a follow-up or add instructions
+  mid-run — and its reply streams into the task log.
 
 ## Requirements
 

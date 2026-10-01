@@ -96,6 +96,7 @@ fn reset_for_rerun(t: &mut Task) {
     t.last_permission = None;
     t.used_fallback = false;
     t.ask = None;
+    t.session_id = None;
     t.result = None;
     if t.isolation == Isolation::Worktree {
         t.worktree_path = None;
@@ -576,6 +577,7 @@ pub fn create_tasks(
                 .unwrap_or(default_isolation.unwrap_or_default()),
             profile,
             last_permission: None,
+            session_id: None,
             base_ref: nt
                 .base_ref
                 .clone()
@@ -823,6 +825,7 @@ fn render_diff(d: &DiffResult, cap: usize) -> String {
 /// and any queued/running review abandoned.
 fn abandon_run_state(t: &mut Task, at: i64) {
     t.ask = None;
+    t.session_id = None;
     if !t.status.is_terminal() {
         t.status = TaskStatus::Canceled;
         t.finished_at.get_or_insert(at);
@@ -1026,6 +1029,7 @@ fn cancel_task_state(t: &mut Task) -> bool {
     t.status = TaskStatus::Canceled;
     t.finished_at = Some(now());
     t.ask = None;
+    t.session_id = None;
     true
 }
 
@@ -1159,6 +1163,40 @@ pub async fn answer_task(
     st.save();
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
+}
+
+/// Send a free-form message to a running interactive (opencode) task, the way you
+/// would type at the agent's prompt. The agent keeps running; its reply streams
+/// into the task log like any other output.
+#[tauri::command]
+pub async fn send_task_message(
+    app: AppHandle,
+    task_id: String,
+    text: String,
+) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("the message is empty".into());
+    }
+    let st = app.state::<AppState>();
+    let session = {
+        let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(t) = inner.tasks.iter().find(|t| t.id == task_id) else {
+            return Err("task not found".into());
+        };
+        if t.status != TaskStatus::Running {
+            return Err("this task is no longer running".into());
+        }
+        t.session_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this task has no live agent session".to_string())?
+    };
+    let conn = crate::opencode_server::ensure_server().await?;
+    crate::opencode_server::prompt(&conn, &session, &text).await?;
+    // Echo it into the transcript, so it is clear what the agent was told.
+    crate::scheduler::log_note(&app, &task_id, &format!("You: {text}"));
+    Ok(())
 }
 
 #[tauri::command]
@@ -1828,6 +1866,7 @@ mod tests {
             isolation,
             profile: PermissionProfile::default(),
             last_permission: None,
+            session_id: None,
             base_ref: None,
             branch: None,
             worktree_path: None,
@@ -1878,6 +1917,7 @@ mod tests {
         t.used_fallback = true;
         // A leftover ask from the interrupted run must not survive the reset.
         t.ask = Some(pending_ask());
+        t.session_id = Some("ses_1".into());
         t.review = Some(TaskReview {
             mode: ReviewMode::Autofix,
             status: ReviewStatus::Running,
@@ -1899,6 +1939,10 @@ mod tests {
         assert!(t.worktree_path.is_none());
         assert!(t.branch.is_none());
         assert!(t.ask.is_none(), "the old run's ask must be forgotten");
+        assert!(
+            t.session_id.is_none(),
+            "the old run's agent session must be forgotten"
+        );
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::None);
         assert!(r.summary.is_none() && r.finished_at.is_none());
