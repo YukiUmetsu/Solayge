@@ -8,12 +8,22 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
-import type { EnvironmentStatus, GitStatus, LogEntry, LogEvent, Snapshot } from "./types";
+import type {
+  EnvironmentStatus,
+  GitStatus,
+  LogEntry,
+  LogEvent,
+  NotifyEvent,
+  Snapshot,
+} from "./types";
 import { classifyLine } from "./components/LogView";
 import { effectiveConfig } from "./lib/providers";
+import {
+  handleNotification,
+  primeNotificationPermission,
+} from "./lib/notifications";
 import { Icon } from "./components/Icons";
 import { Sidebar } from "./components/Sidebar";
 import { ProjectHeader } from "./components/ProjectHeader";
@@ -155,6 +165,12 @@ export default function App() {
   const [dismissedAskId, setDismissedAskId] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
 
+  // Latest settings for the notification listener, which is registered once.
+  const settingsRef = useRef<Snapshot["settings"] | undefined>(undefined);
+  useEffect(() => {
+    settingsRef.current = snapshot?.settings;
+  }, [snapshot]);
+
   const [leftOpen, setLeftOpen] = useStoredState("solayge.layout.leftOpen", true);
   const [rightOpen, setRightOpen] = useStoredState("solayge.layout.rightOpen", true);
   const [leftWidth, setLeftWidth] = useStoredState("solayge.layout.leftWidth", 264);
@@ -195,13 +211,7 @@ export default function App() {
 
   // Ask for desktop-notification permission once (used for task + permission events).
   useEffect(() => {
-    (async () => {
-      try {
-        if (!(await isPermissionGranted())) await requestPermission();
-      } catch {
-        /* notifications are optional */
-      }
-    })();
+    void primeNotificationPermission();
   }, []);
 
   // Live state + log streams, with a polling fallback.
@@ -220,8 +230,9 @@ export default function App() {
       });
     }).then((u) => unlisteners.push(u));
 
-    listen<LogEvent>("task://permission", (e) => {
-      notify(`Permission requested: ${e.payload.line}`);
+    listen<NotifyEvent>("app://notify", (e) => {
+      notify(e.payload.body);
+      void handleNotification(e.payload, settingsRef.current?.notifications);
     }).then((u) => unlisteners.push(u));
 
     const poll = window.setInterval(() => {
@@ -628,8 +639,9 @@ export default function App() {
       )}
 
       {toast && (
-        <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-danger-line bg-panel px-4 py-2 text-[12px] text-danger shadow-xl backdrop-blur">
-          {toast}
+        <div className="fixed bottom-5 left-1/2 z-50 flex max-w-xl -translate-x-1/2 items-center gap-2 rounded-lg border border-line bg-panel px-4 py-2 text-[12px] text-ink shadow-xl backdrop-blur">
+          <Icon name="zap" className="h-3.5 w-3.5 shrink-0 text-accent" />
+          <span className="truncate">{toast}</span>
         </div>
       )}
     </div>

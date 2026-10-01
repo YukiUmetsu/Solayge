@@ -32,6 +32,12 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 
+# macOS notifications must be delivered on the main thread, which the Tauri
+# notification plugin does not do (it dispatches from a worker). We call the
+# same underlying crate directly, on the main thread, in `scheduler::notify`.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+
 # Release builds unwind on panic on purpose: the scheduler runs every tick in
 # its own task (`supervised_tick`) and turns a panic into a logged error so the
 # loop keeps running. `panic = "abort"` would take the whole app down instead.

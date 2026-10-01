@@ -124,6 +124,8 @@ export const api = {
     invoke<CacheStats>("clear_cache", { prompts, logs }),
   errorLog: () => invoke<string>("get_error_log"),
   clearErrorLog: () => invoke<void>("clear_error_log"),
+  readSound: (path: string) => invoke<string>("read_sound_file", { path }),
+  testNotification: () => invoke<void>("test_notification"),
 
   // ---- projects ----
   reorderProjects: (paths: string[]) =>

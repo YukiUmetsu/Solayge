@@ -98,6 +98,8 @@ pub fn run() {
             commands::set_project_default_profile,
             commands::plan_with_opencode,
             commands::update_settings,
+            commands::read_sound_file,
+            commands::test_notification,
             commands::get_prompt_history,
             commands::get_cache_stats,
             commands::clear_cache,

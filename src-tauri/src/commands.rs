@@ -1054,15 +1054,22 @@ fn requeue_review(t: &mut Task) -> Result<(), String> {
 #[tauri::command]
 pub fn retry_review(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
-    {
+    let title = {
         let mut inner = crate::state::lock(&st.inner);
         let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
         requeue_review(t)?;
-    }
+        t.title.clone()
+    };
     st.save();
     emit_state(&app);
+    crate::scheduler::notify(
+        &app,
+        NotifyKind::TaskReview,
+        "Solayge review",
+        &format!("{title} — in review"),
+    );
     Ok(crate::state::snapshot(&app))
 }
 
@@ -1416,6 +1423,50 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, S
     cache::prune(&st);
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
+}
+
+/// Send a test notification through the same path real ones use, so the user can
+/// confirm their OS notification settings allow Solayge to show anything.
+#[tauri::command]
+pub fn test_notification(app: AppHandle) -> Result<(), String> {
+    crate::scheduler::notify(
+        &app,
+        NotifyKind::System,
+        "Solayge",
+        "This is a test notification.",
+    );
+    Ok(())
+}
+
+/// Read a custom notification sound and return it as a data URL the webview can
+/// play. Only audio extensions are accepted, and the file is capped so a huge
+/// pick can't be base64'd into the UI.
+#[tauri::command]
+pub fn read_sound_file(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let pb = PathBuf::from(&path);
+    let ext = pb
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .ok_or_else(|| "sound file has no extension".to_string())?;
+    let mime = match ext.as_str() {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "ogg" | "oga" => "audio/ogg",
+        "flac" => "audio/flac",
+        _ => return Err(format!("unsupported sound format: .{ext}")),
+    };
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let meta = std::fs::metadata(&pb).map_err(|e| format!("cannot read {path}: {e}"))?;
+    if meta.len() > MAX_BYTES {
+        return Err("sound file is larger than 10 MB".to_string());
+    }
+    let bytes = std::fs::read(&pb).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 #[tauri::command]

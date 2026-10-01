@@ -178,6 +178,13 @@ Build a bundle:
 pnpm tauri build    # bundles for the host OS (dmg/app, msi/nsis, deb/rpm/AppImage)
 ```
 
+On macOS, `pnpm tauri build` goes through `scripts/tauri.mjs`, which wraps the
+Tauri CLI. The DMG step drives `hdiutil` and Finder and fails intermittently; the
+wrapper clears stale staging images and mounted volumes before bundling and
+retries a DMG-only failure, so a transient hiccup does not fail the release. If
+the bundle directory is wedged, `pnpm clean:bundle` removes it so the next build
+starts fresh.
+
 Checks used in development:
 
 ```bash
@@ -426,14 +433,29 @@ change anything.
 
 ## Settings & cache
 
-Open **Settings** from the gear in the sidebar:
+Open **Settings** from the gear in the sidebar. It is organised into tabs:
 
-- **Appearance** — System / Light / Dark.
-- **Default permissions** — fallback profile for projects without their own.
-- **Secret storage** — where encrypted environment values live.
-- **Agent defaults** — provider, model, backup, review, editor, command templates.
-- **Cache** — retention (7 days … 1 year, or forever), live stats, and buttons to
-  clear prompt history, task logs, or everything.
+- **General** — appearance (System / Light / Dark), the default permission profile
+  for projects without their own, and secret storage.
+- **Agent** — provider, model, backup, review, editor, and command templates.
+- **Notifications** — desktop notifications and sounds (see below).
+- **Advanced** — cache retention and stats, and the error log.
+
+### Notifications
+
+Each event can be toggled independently (completion, failure, entering review, and
+needs-attention — questions, permissions, conflicts, interruptions), with a master
+switch over all of them. Sound can be turned off, given its own volume, and set to a
+bundled tone or any local audio file per event. All four bundled tones (completion,
+failure, review, attention) are synthesised by `pnpm make:sounds`.
+
+Notifications are shown by the Rust core. On macOS the app drives the notification
+center on the main thread directly, because the Tauri notification plugin delivers
+from a background thread, which recent macOS silently drops. Every notification is
+also surfaced as an in-app toast and plays its sound, so a denied OS notification is
+never the only feedback. Use **Test notification** in the Notifications tab to check
+that the OS allows Solayge to post; failures are recorded in the **Advanced** tab's
+error log.
 
 Prompts you write for tasks and planner goals are cached and offered as one-click
 suggestions in **New task** and **Plan with AI**. Task logs are treated as cache

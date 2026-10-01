@@ -195,6 +195,40 @@ export interface CommandTemplates {
   cursor: string;
 }
 
+/** The event kinds the backend can raise a notification for. */
+export type NotifyKind =
+  | "task_complete"
+  | "task_failed"
+  | "task_review"
+  | "needs_attention"
+  | "system";
+
+/** Desktop notification + sound preferences. */
+export interface NotificationSettings {
+  /** Master switch for every notification. */
+  enabled: boolean;
+  on_task_complete: boolean;
+  on_task_failed: boolean;
+  on_task_review: boolean;
+  on_needs_attention: boolean;
+  /** Play a sound alongside a notification. */
+  sound_enabled: boolean;
+  /** Playback volume, 0..1. */
+  volume: number;
+  /** A preset id or a `file:<absolute path>` reference; null is silent. */
+  complete_sound: string | null;
+  failed_sound: string | null;
+  review_sound: string | null;
+  attention_sound: string | null;
+}
+
+/** The payload of the backend `app://notify` event. */
+export interface NotifyEvent {
+  kind: NotifyKind;
+  title: string;
+  body: string;
+}
+
 /** The agent configuration fields, shared by project config and settings. */
 export interface AgentConfig {
   provider?: Provider | null;
@@ -325,6 +359,7 @@ export interface Settings {
   editor?: string | null;
   command_templates: CommandTemplates;
   secret_store?: SecretStore | null;
+  notifications: NotificationSettings;
 }
 
 export interface PromptEntry {

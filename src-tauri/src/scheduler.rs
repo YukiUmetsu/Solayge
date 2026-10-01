@@ -11,10 +11,11 @@ use crate::git;
 use crate::opencode_server;
 use crate::models::{
     BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSourceStatus,
-    MergeSpec, MergeStrategy, PermissionProfile, Provider, ReviewMode, ReviewStatus, SystemPrompt,
-    Task, TaskKind, TaskStatus,
+    MergeSpec, MergeStrategy, NotifyEvent, NotifyKind, PermissionProfile, Provider, ReviewMode,
+    ReviewStatus, SystemPrompt, Task, TaskKind, TaskStatus,
 };
 use crate::state::AppState;
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// A task that is `running` but has shown no sign of life (live child, streamed
@@ -33,8 +34,94 @@ pub fn emit_state(app: &AppHandle) {
     let _ = app.emit("state://changed", snap);
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
-    let _ = app.notification().builder().title(title).body(body).show();
+/// Raise a notification, honoring the user's notification settings.
+///
+/// The desktop notification is shown here, so it fires even when the webview is
+/// backgrounded. The event is also forwarded to the frontend, which plays the
+/// configured sound and shows an in-app toast. A `show` failure is recorded in
+/// the error log instead of being swallowed.
+pub(crate) fn notify(app: &AppHandle, kind: NotifyKind, title: &str, body: &str) {
+    let allowed = {
+        let st = app.state::<AppState>();
+        let inner = crate::state::lock(&st.inner);
+        inner.settings.notifications.allows(kind)
+    };
+    if !allowed {
+        return;
+    }
+    if let Err(e) = show_desktop(app, title, body) {
+        crate::errorlog::record(
+            app,
+            "notification",
+            &format!("could not show notification: {e}"),
+        );
+    }
+    let _ = app.emit(
+        "app://notify",
+        NotifyEvent {
+            kind,
+            title: title.to_string(),
+            body: body.to_string(),
+        },
+    );
+}
+
+/// Deliver the OS notification.
+///
+/// On macOS the notification center must be driven from the main thread, but the
+/// Tauri plugin dispatches its delivery from a background runtime task — which
+/// is silently dropped on recent macOS. So there we call the underlying
+/// `mac-notification-sys` directly on the main thread. Everywhere else the
+/// plugin is used as-is.
+#[cfg(target_os = "macos")]
+fn show_desktop(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    let handle = app.clone();
+    let title = title.to_string();
+    let body = body.to_string();
+    app.run_on_main_thread(move || {
+        let identifier = handle.config().identifier.clone();
+        // Match the plugin's dev behavior: an unbundled dev binary has no app
+        // bundle of its own, so notifications are attributed to Terminal.
+        let bundle = if tauri::is_dev() {
+            "com.apple.Terminal"
+        } else {
+            identifier.as_str()
+        };
+        let _ = mac_notification_sys::set_application(bundle);
+        // Deliver via a near-future schedule: the synchronous delivery path
+        // blocks the calling thread waiting for an XPC delivery callback, which
+        // would freeze the UI when that callback is slow (e.g. denied). A
+        // scheduled notification is fire-and-forget and still appears at once.
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+            + 0.2;
+        let mut options = mac_notification_sys::Notification::new();
+        options
+            .title(&title)
+            .message(&body)
+            .delivery_date(when);
+        if let Err(e) = options.send() {
+            eprintln!("[Solayge] notification failed: {e}");
+            crate::errorlog::record(
+                &handle,
+                "notification",
+                &format!("could not show notification: {e}"),
+            );
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_desktop(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 pub fn spawn_scheduler(app: AppHandle) {
@@ -71,7 +158,7 @@ where
 fn record_scheduler_error(app: &AppHandle, message: &str) {
     eprintln!("[Solayge] {message}");
     crate::errorlog::record(app, "scheduler", message);
-    notify(app, "Solayge", message);
+    notify(app, NotifyKind::System, "Solayge", message);
 }
 
 /// Move a task out of `running` into `interrupted`, forgetting any pending ask.
@@ -118,7 +205,12 @@ fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
     log_note(app, id, &format!("Interrupted: {reason}"));
     st.save();
     emit_state(app);
-    notify(app, "Solayge needs you", &format!("{title} was interrupted"));
+    notify(
+        app,
+        NotifyKind::NeedsAttention,
+        "Solayge needs you",
+        &format!("{title} was interrupted"),
+    );
 }
 
 /// Which running tasks and running reviews have gone silent. Pure so it can be
@@ -335,6 +427,7 @@ async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
         None
     };
     let mut outcome: Option<(String, bool)> = None;
+    let mut entered_review = false;
     let mut retry_note: Option<(PathBuf, String)> = None;
     {
         let mut inner = crate::state::lock(&st.inner);
@@ -354,6 +447,7 @@ async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
                             r.summary = None;
                             r.started_at = None;
                             r.finished_at = None;
+                            entered_review = true;
                         }
                     }
                     outcome = Some((t.title.clone(), true));
@@ -420,12 +514,28 @@ async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     }
 
     if let Some((title, ok)) = outcome {
-        let body = if ok {
-            format!("{title} — finished")
+        if entered_review {
+            notify(
+                app,
+                NotifyKind::TaskReview,
+                "Solayge review",
+                &format!("{title} — in review"),
+            );
+        } else if ok {
+            notify(
+                app,
+                NotifyKind::TaskComplete,
+                "Solayge",
+                &format!("{title} — finished"),
+            );
         } else {
-            format!("{title} — failed")
-        };
-        notify(app, "Solayge", &body);
+            notify(
+                app,
+                NotifyKind::TaskFailed,
+                "Solayge",
+                &format!("{title} — failed"),
+            );
+        }
     }
 }
 
@@ -674,16 +784,28 @@ async fn prepare_worktree(
 fn fail_task(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
     crate::errorlog::record(app, "task", &format!("{id}: {msg}"));
-    {
+    let title = {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
-            t.status = TaskStatus::Failed;
-            t.error = Some(msg);
-            t.finished_at = Some(now());
+        match inner.tasks.iter_mut().find(|t| t.id == id) {
+            Some(t) => {
+                t.status = TaskStatus::Failed;
+                t.error = Some(msg);
+                t.finished_at = Some(now());
+                Some(t.title.clone())
+            }
+            None => None,
         }
-    }
+    };
     st.save();
     emit_state(app);
+    if let Some(title) = title {
+        notify(
+            app,
+            NotifyKind::TaskFailed,
+            "Solayge",
+            &format!("{title} — failed"),
+        );
+    }
 }
 
 /// Everything a task needs at start, read once from state.
@@ -1475,7 +1597,7 @@ fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
         Some(d) => format!("{task_title}: {title} — {d}"),
         None => format!("{task_title}: {title}"),
     };
-    notify(app, "Solayge needs you", &body);
+    notify(app, NotifyKind::NeedsAttention, "Solayge needs you", &body);
 }
 
 fn clear_task_ask(app: &AppHandle, id: &str) {
@@ -2142,6 +2264,7 @@ async fn run_merge_steps(
 fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
     let st = app.state::<AppState>();
     let mut title: Option<String> = None;
+    let mut entered_review = false;
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
@@ -2152,6 +2275,16 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
             t.finished_at = Some(now());
             if ok {
                 t.status = TaskStatus::Succeeded;
+                // An interactive success queues its review (via `queue_review`)
+                // before this runs, so treat "pending/running review" as entering
+                // review rather than a plain completion.
+                entered_review = t
+                    .review
+                    .as_ref()
+                    .is_some_and(|r| {
+                        r.mode != ReviewMode::Off
+                            && matches!(r.status, ReviewStatus::Pending | ReviewStatus::Running)
+                    });
             } else {
                 t.status = TaskStatus::Failed;
                 t.error = error.or_else(|| Some("integration failed".into()));
@@ -2163,8 +2296,22 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
     st.save();
     emit_state(app);
     if let Some(title) = title {
-        let body = format!("{title} — {}", if ok { "finished" } else { "failed" });
-        notify(app, "Solayge", &body);
+        if entered_review {
+            notify(
+                app,
+                NotifyKind::TaskReview,
+                "Solayge review",
+                &format!("{title} — in review"),
+            );
+        } else {
+            let body = format!("{title} — {}", if ok { "finished" } else { "failed" });
+            let kind = if ok {
+                NotifyKind::TaskComplete
+            } else {
+                NotifyKind::TaskFailed
+            };
+            notify(app, kind, "Solayge", &body);
+        }
     }
 }
 
@@ -2188,7 +2335,12 @@ fn finish_blocked(app: &AppHandle, id: &str, reason: String) {
     st.save();
     emit_state(app);
     if let Some(title) = title {
-        notify(app, "Solayge needs you", &format!("{title} is waiting for you"));
+        notify(
+            app,
+            NotifyKind::NeedsAttention,
+            "Solayge needs you",
+            &format!("{title} is waiting for you"),
+        );
     }
 }
 
@@ -2505,7 +2657,7 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
                 _ => format!("{title} — review done"),
             }
         };
-        notify(app, "Solayge review", &body);
+        notify(app, NotifyKind::TaskReview, "Solayge review", &body);
     }
 }
 
@@ -2584,7 +2736,12 @@ where
                     },
                 );
                 emit_state(&app);
-                notify(&app, "Permission requested", &line);
+                notify(
+                    &app,
+                    NotifyKind::NeedsAttention,
+                    "Permission requested",
+                    &line,
+                );
             }
             let _ = app.emit(
                 "task://log",

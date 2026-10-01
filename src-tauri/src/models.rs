@@ -647,6 +647,122 @@ fn default_retention_days() -> i64 {
     30
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_volume() -> f32 {
+    0.8
+}
+
+fn default_sound_complete() -> Option<String> {
+    Some("complete".to_string())
+}
+
+fn default_sound_failed() -> Option<String> {
+    Some("failed".to_string())
+}
+
+fn default_sound_review() -> Option<String> {
+    Some("review".to_string())
+}
+
+fn default_sound_attention() -> Option<String> {
+    Some("attention".to_string())
+}
+
+/// The kinds of app event that can raise a notification. Serialized
+/// snake_case so the frontend can switch on the string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyKind {
+    /// A task finished successfully.
+    TaskComplete,
+    /// A task failed.
+    TaskFailed,
+    /// A task entered (or finished) automatic review.
+    TaskReview,
+    /// Something needs the user: a question, permission, block, or interruption.
+    NeedsAttention,
+    /// An app-level problem (scheduler, launch). Only gated by the master toggle.
+    System,
+}
+
+/// The payload sent to the frontend over `app://notify`, where the in-app toast
+/// and the notification sound are produced.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotifyEvent {
+    pub kind: NotifyKind,
+    pub title: String,
+    pub body: String,
+}
+
+/// Which events notify, how they sound, and how loud. All on by default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationSettings {
+    /// Master switch for every notification.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub on_task_complete: bool,
+    #[serde(default = "default_true")]
+    pub on_task_failed: bool,
+    #[serde(default = "default_true")]
+    pub on_task_review: bool,
+    #[serde(default = "default_true")]
+    pub on_needs_attention: bool,
+    /// Play a sound alongside a notification.
+    #[serde(default = "default_true")]
+    pub sound_enabled: bool,
+    /// Playback volume, `0.0`..=`1.0`.
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// A preset id (`complete`, `failed`, `review`, `attention`) or a
+    /// `file:<absolute path>` reference. `None` is silent.
+    #[serde(default = "default_sound_complete")]
+    pub complete_sound: Option<String>,
+    #[serde(default = "default_sound_failed")]
+    pub failed_sound: Option<String>,
+    #[serde(default = "default_sound_review")]
+    pub review_sound: Option<String>,
+    #[serde(default = "default_sound_attention")]
+    pub attention_sound: Option<String>,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        NotificationSettings {
+            enabled: true,
+            on_task_complete: true,
+            on_task_failed: true,
+            on_task_review: true,
+            on_needs_attention: true,
+            sound_enabled: true,
+            volume: default_volume(),
+            complete_sound: default_sound_complete(),
+            failed_sound: default_sound_failed(),
+            review_sound: default_sound_review(),
+            attention_sound: default_sound_attention(),
+        }
+    }
+}
+
+impl NotificationSettings {
+    /// Whether an event of this kind should notify at all.
+    pub fn allows(&self, kind: NotifyKind) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match kind {
+            NotifyKind::TaskComplete => self.on_task_complete,
+            NotifyKind::TaskFailed => self.on_task_failed,
+            NotifyKind::TaskReview => self.on_task_review,
+            NotifyKind::NeedsAttention => self.on_needs_attention,
+            NotifyKind::System => true,
+        }
+    }
+}
+
 /// App-wide preferences, persisted with the rest of the state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -687,6 +803,9 @@ pub struct Settings {
     /// is available, otherwise the file store.
     #[serde(default)]
     pub secret_store: Option<String>,
+    /// Desktop notification + sound preferences.
+    #[serde(default)]
+    pub notifications: NotificationSettings,
 }
 
 impl Default for Settings {
@@ -705,6 +824,7 @@ impl Default for Settings {
             editor: None,
             command_templates: CommandTemplates::default(),
             secret_store: None,
+            notifications: NotificationSettings::default(),
         }
     }
 }
