@@ -265,6 +265,11 @@ pub struct TaskReview {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// How many times this review has been started. A review that ends without
+    /// a final verdict is attempted again until [`crate::scheduler`]'s limit,
+    /// then it blocks the task so dependents do not run on unreviewed work.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 /// Whether an agent is asking a question or requesting permission.
@@ -380,8 +385,18 @@ pub struct TaskAsk {
     /// The provider session this ask belongs to (for opencode, `ses_…`).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When the ask surfaced (unix seconds). Set by the scheduler if the
+    /// provider did not supply one, so a wait can be measured.
     #[serde(default)]
     pub created_at: Option<i64>,
+    /// A wall-clock deadline (unix seconds) after which the provider stops
+    /// waiting for an answer, when it supplied one. `None` waits indefinitely.
+    #[serde(default)]
+    pub deadline: Option<i64>,
+    /// A provider-supplied relative wait (seconds) instead of a deadline.
+    /// Resolved into `deadline` when the ask is surfaced.
+    #[serde(default)]
+    pub timeout_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

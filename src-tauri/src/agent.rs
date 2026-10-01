@@ -295,7 +295,11 @@ pub fn review_prompt(
          THE INSTRUCTION THE TASK WAS GIVEN:\n{task_prompt}\n\n\
          {instructions}\n\n\
          {fix}\n\
-         Finish with EXACTLY one line, on its own, in this format:\n\
+         Run any commands or tests you need in the foreground and WAIT for them to finish. \
+         Never end your turn to wait for a result: do not background a check and reply that \
+         you are still waiting for it. Your review is only finished once every check you \
+         started has completed and you have written the verdict below.\n\
+         Finish with EXACTLY one line, on its own, as the very last line, in this format:\n\
          REVIEW: PASS\n\
          or\n\
          REVIEW: ISSUES: <one short line describing the main problem>"
@@ -303,40 +307,48 @@ pub fn review_prompt(
 }
 
 /// Parse the reviewer's final verdict line.
+///
+/// Only the **latest attempt** counts: review logs are appended across re-runs,
+/// so a verdict from an earlier attempt must never settle a later one (that was
+/// the bug where a review that stopped mid-run was reported as a pass from the
+/// previous run). Within that attempt the verdict must also be the reviewer's
+/// **final** non-empty line — the prompt asks for exactly one line at the end —
+/// so a stray `REVIEW:` mentioned mid-report cannot settle the review.
 pub fn parse_verdict(output: &str) -> (ReviewStatus, Option<String>) {
     let clean = crate::opencode::strip_ansi(output);
-    let mut verdict: Option<(ReviewStatus, Option<String>)> = None;
-    for line in clean.lines() {
-        let t = line.trim();
-        if t.len() < 7 || !t.is_char_boundary(7) || !t[..7].eq_ignore_ascii_case("REVIEW:") {
-            continue;
-        }
-        let rest = t[7..].trim();
-        let upper = rest.to_ascii_uppercase();
-        if upper.starts_with("PASS") {
-            verdict = Some((ReviewStatus::Passed, None));
-        } else if upper.starts_with("ISSUES:") && rest.is_char_boundary(7) {
-            verdict = Some((
-                ReviewStatus::Issues,
-                Some(rest[7..].trim().to_string()),
-            ));
-        } else if upper.starts_with("ISSUES") {
-            verdict = Some((ReviewStatus::Issues, Some("issues found".to_string())));
-        }
+    let attempt = crate::summary::last_attempt(&clean);
+    let last = attempt
+        .lines()
+        .map(crate::summary::strip_stamp)
+        .map(str::trim)
+        .rfind(|line| !line.is_empty());
+    let failed = |message: &str| (ReviewStatus::Failed, Some(message.to_string()));
+    let Some(t) = last else {
+        return failed("the reviewer did not report a verdict");
+    };
+    if t.len() < 7 || !t.is_char_boundary(7) || !t[..7].eq_ignore_ascii_case("REVIEW:") {
+        return failed("the reviewer stopped before giving a final verdict");
     }
-    verdict.unwrap_or((
-        // No verdict line is a failed review, not a pass: a reviewer that exits
-        // 0 without reporting must not be silently recorded as "passed".
-        ReviewStatus::Failed,
-        Some("the reviewer did not report a verdict".to_string()),
-    ))
+    let rest = t[7..].trim();
+    let upper = rest.to_ascii_uppercase();
+    if upper.starts_with("PASS") {
+        (ReviewStatus::Passed, None)
+    } else if upper.starts_with("ISSUES:") && rest.is_char_boundary(7) {
+        (ReviewStatus::Issues, Some(rest[7..].trim().to_string()))
+    } else if upper.starts_with("ISSUES") {
+        (ReviewStatus::Issues, Some("issues found".to_string()))
+    } else {
+        failed("the reviewer did not report a verdict")
+    }
 }
 
 /// Last ~40 lines of the review output, used as the recorded summary when there
-/// is no explicit issue line.
+/// is no explicit issue line. Only the latest attempt is considered, so a
+/// re-run's summary does not resurface the previous attempt's text.
 pub fn tail(output: &str) -> String {
     let clean = crate::opencode::strip_ansi(output);
-    let lines: Vec<&str> = clean.lines().filter(|l| !l.trim().is_empty()).collect();
+    let attempt = crate::summary::last_attempt(&clean);
+    let lines: Vec<&str> = attempt.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(40);
     lines[start..].join("\n")
 }
@@ -701,6 +713,46 @@ mod tests {
         let (status, summary) = parse_verdict("I looked at the code and it seems fine");
         assert_eq!(status, ReviewStatus::Failed);
         assert!(summary.is_some(), "the reason is recorded");
+    }
+
+    #[test]
+    fn an_earlier_attempts_verdict_does_not_count() {
+        // The exact regression: a review was re-run, the new attempt stopped
+        // while waiting for a build, but the first attempt's PASS was reused.
+        let log = "some report\nREVIEW: PASS\n\
+                   [Solayge] ---- new attempt: 10-01 14:00:00 ----\n\
+                   Frontend checks pass; I'm waiting on the Rust checks before the verdict.\n";
+        let (status, summary) = parse_verdict(log);
+        assert_eq!(
+            status,
+            ReviewStatus::Failed,
+            "an older attempt's verdict must not settle a later one"
+        );
+        assert!(summary.is_some());
+    }
+
+    #[test]
+    fn a_mid_stream_verdict_does_not_count() {
+        // The verdict must be the reviewer's final word, not a mention that the
+        // reviewer then continued past.
+        let (status, _) = parse_verdict("REVIEW: PASS\nActually, one more check first.\n");
+        assert_eq!(status, ReviewStatus::Failed);
+    }
+
+    #[test]
+    fn a_timestamped_verdict_is_read() {
+        // A quiet gap can prefix the verdict line with a clock stamp.
+        let (status, summary) = parse_verdict("report\n14:11:02 REVIEW: ISSUES: race\n");
+        assert_eq!(status, ReviewStatus::Issues);
+        assert_eq!(summary.as_deref(), Some("race"));
+    }
+
+    #[test]
+    fn the_latest_attempt_summary_wins() {
+        // `tail` is the recorded summary when there is no issue line; it must
+        // come from the latest attempt, not the first.
+        let log = "old text\n[Solayge] ---- new attempt: 10-01 14:00:00 ----\nbroke at step 2";
+        assert_eq!(tail(log), "broke at step 2");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import type { PermissionProfile, TaskStatus } from "../types";
+import type { PermissionProfile, TaskAsk, TaskStatus } from "../types";
 
 export interface StatusMeta {
   label: string;
@@ -170,6 +170,19 @@ export function isLive(task: {
 
 export function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+/**
+ * The resolved answer deadline (unix seconds) for a pending ask, or null when
+ * the provider supplied none. A relative `timeout_secs` is measured from when
+ * the ask surfaced (`created_at`).
+ */
+export function askDeadline(ask: TaskAsk): number | null {
+  if (ask.deadline && ask.deadline > 0) return ask.deadline;
+  if (ask.created_at && ask.timeout_secs && ask.timeout_secs > 0) {
+    return ask.created_at + ask.timeout_secs;
+  }
+  return null;
 }
 
 /**

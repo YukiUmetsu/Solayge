@@ -27,6 +27,20 @@ const STALL_SECS: i64 = 600;
 /// one provider process per task at once.
 const MAX_CONCURRENT_REVIEWS: usize = 4;
 
+/// How many times a review that ends without a final `REVIEW:` verdict is
+/// started (the first run plus automatic retries) before its task is blocked.
+/// A reviewer that stops early — most often after backgrounding a long build
+/// and then ending its turn — must not be mistaken for a finished review.
+const MAX_REVIEW_ATTEMPTS: u32 = 3;
+
+/// Whether a review that ended with `status` should be attempted again. A real
+/// verdict (`passed`/`issues`) settles; a failure — the reviewer exited without
+/// a final verdict, or could not run — is retried until the budget is spent,
+/// after which the task blocks so dependents wait. Pure so it can be tested.
+fn review_should_retry(status: ReviewStatus, attempts: u32) -> bool {
+    status == ReviewStatus::Failed && attempts < MAX_REVIEW_ATTEMPTS
+}
+
 pub use crate::state::now;
 
 pub fn emit_state(app: &AppHandle) {
@@ -1542,11 +1556,128 @@ fn task_has_ask(app: &AppHandle, id: &str) -> bool {
         .is_some_and(|t| t.ask.is_some())
 }
 
+/// Human-readable lines describing an ask, written to the task log when it is
+/// surfaced. They record *what* the agent asked and *why* it paused, so the
+/// decision can be reviewed later instead of only showing the live prompt.
+fn ask_log_lines(ask: &crate::models::TaskAsk) -> Vec<String> {
+    use crate::models::AskKind;
+    let mut lines = vec![format!("Waiting for you: {}", ask.title)];
+    match ask.kind {
+        AskKind::Question => {
+            if let Some(msg) = ask
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                lines.push(format!("Agent said: {msg}"));
+            }
+            for f in &ask.fields {
+                let mut line = format!("Question: {}", f.label);
+                if f.required {
+                    line.push_str(" (required)");
+                }
+                if let Some(d) = f
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                {
+                    line.push_str(&format!(" — {d}"));
+                }
+                lines.push(line);
+                if !f.options.is_empty() {
+                    let opts: Vec<&str> = f.options.iter().map(|o| o.label.as_str()).collect();
+                    lines.push(format!("  choices: {}", opts.join(", ")));
+                }
+            }
+        }
+        AskKind::Permission => {
+            if let Some(p) = ask
+                .purpose
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                lines.push(format!("Reason: {p}"));
+            }
+            if let Some(msg) = ask
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+            {
+                lines.push(format!("Agent said: {msg}"));
+            }
+            if !ask.resources.is_empty() {
+                lines.push(format!("Requested: {}", ask.resources.join("; ")));
+            }
+            if !ask.save.is_empty() {
+                lines.push(format!(
+                    "\"Always allow\" would remember: {}",
+                    ask.save.join("; ")
+                ));
+            }
+        }
+    }
+    if let Some(line) = answer_window_line(ask) {
+        lines.push(line);
+    }
+    lines
+}
+
+/// A log line describing how long the agent will wait for an answer, when the
+/// provider supplied a timeout. `None` when it waits indefinitely.
+fn answer_window_line(ask: &crate::models::TaskAsk) -> Option<String> {
+    let secs = ask
+        .timeout_secs
+        .filter(|s| *s > 0)
+        .or_else(|| match (ask.created_at, ask.deadline) {
+            (Some(created), Some(deadline)) if deadline > created => Some(deadline - created),
+            _ => None,
+        })?;
+    Some(format!(
+        "The agent will wait up to {} for your answer.",
+        humanize_secs(secs)
+    ))
+}
+
+/// A coarse, human duration for log lines ("45 seconds", "2 minutes", "1h 30m").
+fn humanize_secs(secs: i64) -> String {
+    if secs < 60 {
+        return format!("{secs} second{}", if secs == 1 { "" } else { "s" });
+    }
+    let mins = (secs + 30) / 60;
+    let h = mins / 60;
+    if h > 0 {
+        if mins % 60 == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {}m", mins % 60)
+        }
+    } else {
+        format!("{mins} minute{}", if mins == 1 { "" } else { "s" })
+    }
+}
+
 /// Attach a pending question/permission to a task and notify the user. The task
 /// stays `running`, so dependents wait without becoming permanently blocked.
-fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
+fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
     let st = app.state::<AppState>();
+    // Stamp when the ask arrived and turn a relative provider timeout into an
+    // absolute deadline so the popup can show a live countdown.
+    let arrived = now();
+    if ask.created_at.is_none() {
+        ask.created_at = Some(arrived);
+    }
+    if ask.deadline.is_none() {
+        if let Some(secs) = ask.timeout_secs.filter(|s| *s > 0) {
+            ask.deadline = Some(arrived + secs);
+        }
+    }
     let title = ask.title.clone();
+    // The log lines are derived before the ask is moved onto the task.
+    let lines = ask_log_lines(&ask);
     // The concrete thing being requested (directory / command / URL), so the
     // notification says *what* and *where*, not just "permission".
     let detail = if ask.resources.is_empty() {
@@ -1570,7 +1701,9 @@ fn set_task_ask(app: &AppHandle, id: &str, ask: crate::models::TaskAsk) {
     if !attached {
         return;
     }
-    log_note(app, id, &format!("Waiting for you: {title}"));
+    for line in &lines {
+        log_note(app, id, line);
+    }
     st.save();
     emit_state(app);
     let body = match detail.as_deref().filter(|d| !d.trim().is_empty()) {
@@ -2455,6 +2588,9 @@ async fn start_review(app: AppHandle, id: String) {
                 r.started_at = Some(now());
                 r.finished_at = None;
                 r.summary = None;
+                // Count this start so a reviewer that stops without a verdict
+                // is retried a bounded number of times before its task blocks.
+                r.attempts = r.attempts.saturating_add(1);
             }
         }
         crate::state::lock(&st.heartbeat).insert(id.clone(), now());
@@ -2495,12 +2631,15 @@ async fn start_review(app: AppHandle, id: String) {
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(id.clone(), child);
             }
+            let mut readers = Vec::new();
             if let Some(out) = stdout {
-                spawn_review_reader(app.clone(), id.clone(), out);
+                readers.push(spawn_review_reader(app.clone(), id.clone(), out));
             }
             if let Some(err) = stderr {
-                spawn_review_reader(app.clone(), id.clone(), err);
+                readers.push(spawn_review_reader(app.clone(), id.clone(), err));
             }
+            let st = app.state::<AppState>();
+            crate::state::lock(&st.review_readers).insert(id.clone(), readers);
             emit_state(&app);
         }
         Err(e) => {
@@ -2513,33 +2652,67 @@ async fn start_review(app: AppHandle, id: String) {
     }
 }
 
+/// The reviewer could not run at all (a launch failure) or the stall watchdog
+/// gave up on it. This gets the same retry-then-block treatment as a reviewer
+/// that exits without a verdict: another attempt while the budget lasts,
+/// otherwise the task blocks so a dependent cannot run on work that was never
+/// actually reviewed.
 fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
     let st = app.state::<AppState>();
+    // The stall watchdog may fire while the reviewer process is still alive.
+    // Stop it and drop its readers so a retry cannot orphan the old process.
+    {
+        let mut reviewing = crate::state::lock(&st.reviewing);
+        if let Some(child) = reviewing.get_mut(id) {
+            let _ = child.start_kill();
+        }
+        reviewing.remove(id);
+    }
+    crate::state::lock(&st.review_readers).remove(id);
     let mut title: Option<String> = None;
+    let mut retried = false;
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+            title = Some(t.title.clone());
+            let attempts = t.review.as_ref().map(|r| r.attempts).unwrap_or(0);
+            let succeeded = t.status == TaskStatus::Succeeded;
+            let retry = succeeded && review_should_retry(ReviewStatus::Failed, attempts);
             if let Some(r) = t.review.as_mut() {
-                r.status = ReviewStatus::Failed;
-                r.summary = Some(msg);
-                r.finished_at = Some(now());
-                title = Some(t.title.clone());
+                if retry {
+                    r.status = ReviewStatus::Pending;
+                    r.summary = Some(format!("{msg} Re-running the review."));
+                    r.started_at = None;
+                    r.finished_at = None;
+                } else {
+                    r.status = ReviewStatus::Failed;
+                    r.summary = Some(msg.clone());
+                    r.finished_at = Some(now());
+                }
+            }
+            if retry {
+                retried = true;
+            } else if succeeded {
+                t.status = TaskStatus::Blocked;
+                t.error = Some(format!("review could not finish: {msg}"));
+                t.finished_at = Some(now());
             }
         }
     }
     crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
-    // The reviewer could not run at all (e.g. its provider failed to launch),
-    // so unlike `finish_review` there is no terminal review status the user
-    // would otherwise hear about.
+    // The reviewer never produced a verdict, so nothing else would surface it.
+    // Stay quiet while a retry is pending; only tell the user once it stops.
     if let Some(title) = title {
-        notify(
-            app,
-            NotifyKind::TaskFailed,
-            "Solayge",
-            &format!("{title} — review could not run"),
-        );
+        if !retried {
+            notify(
+                app,
+                NotifyKind::TaskFailed,
+                "Solayge",
+                &format!("{title} — review could not run"),
+            );
+        }
     }
 }
 
@@ -2579,6 +2752,16 @@ async fn reap_reviews(app: &AppHandle) {
         }
     }
     for (id, code) in finished {
+        // The reader tasks write the reviewer's stdout/stderr to the log. Wait
+        // for them to reach EOF so the final lines (and the verdict) are on disk
+        // before we parse the file; otherwise a fast process exit could race the
+        // flush and lose the tail.
+        let readers = crate::state::lock(&st.review_readers)
+            .remove(&id)
+            .unwrap_or_default();
+        for handle in readers {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
         finish_review(app, &id, code).await;
     }
 }
@@ -2592,6 +2775,7 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     // the fixes sit uncommitted. A failure is surfaced by failing the task.
     let commit_error = commit_worktree_work(app, id).await.err();
     let mut outcome: Option<(String, ReviewStatus, Option<String>)> = None;
+    let mut retried = false;
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
@@ -2610,14 +2794,35 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
                         Some(tail)
                     }
                 });
+            let attempts = t.review.as_ref().map(|r| r.attempts).unwrap_or(0);
+            let succeeded = t.status == TaskStatus::Succeeded;
+            // A review with no terminal verdict is not finished. Retry it while
+            // the budget lasts (the reviewer often finishes on a second run);
+            // once spent, block the task so dependents do not run on work the
+            // reviewer never actually checked.
+            let retry = succeeded
+                && commit_error.is_none()
+                && review_should_retry(status, attempts);
             let mut pause = false;
             if let Some(r) = t.review.as_mut() {
-                r.status = status;
-                r.summary = summary.clone();
-                r.finished_at = Some(now());
-                pause = r.mode == ReviewMode::Pause && status == ReviewStatus::Issues;
+                if retry {
+                    r.status = ReviewStatus::Pending;
+                    r.summary = Some(format!(
+                        "The reviewer stopped before a verdict (attempt {attempts} of \
+                         {MAX_REVIEW_ATTEMPTS}); re-running."
+                    ));
+                    r.started_at = None;
+                    r.finished_at = None;
+                } else {
+                    r.status = status;
+                    r.summary = summary.clone();
+                    r.finished_at = Some(now());
+                    pause = r.mode == ReviewMode::Pause && status == ReviewStatus::Issues;
+                }
             }
-            if let Some(reason) = &commit_error {
+            if retry {
+                retried = true;
+            } else if let Some(reason) = &commit_error {
                 t.status = TaskStatus::Failed;
                 t.error = Some(reason.clone());
                 t.finished_at = Some(now());
@@ -2628,6 +2833,15 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
                 t.status = TaskStatus::Blocked;
                 t.error = Some(format!("review found issues: {msg}"));
                 t.finished_at = Some(now());
+            } else if succeeded && status == ReviewStatus::Failed {
+                // Out of retries: hold the task (and its dependents) instead of
+                // letting unreviewed work flow into the next step.
+                let msg = summary
+                    .clone()
+                    .unwrap_or_else(|| "the reviewer did not give a verdict".into());
+                t.status = TaskStatus::Blocked;
+                t.error = Some(format!("review could not finish: {msg}"));
+                t.finished_at = Some(now());
             }
             outcome = Some((t.title.clone(), status, summary));
         }
@@ -2637,6 +2851,17 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     emit_state(app);
     if let Some(reason) = &commit_error {
         log_note(app, id, &format!("Could not commit reviewer changes: {reason}"));
+    }
+    if retried {
+        // Leave the transcript (and a marker) for the next attempt, and skip the
+        // "finished" notification: this attempt did not finish.
+        review_note(
+            app,
+            id,
+            "the reviewer stopped before a verdict; re-running automatically",
+        )
+        .await;
+        return;
     }
     if let Some((title, status, summary)) = outcome {
         let body = if commit_error.is_some() {
@@ -2656,7 +2881,14 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     }
 }
 
-fn spawn_review_reader<R>(app: AppHandle, id: String, reader: R)
+/// Stream one reviewer stream to its log. The returned handle lets the reaper
+/// wait for the pipe to drain before it reads the verdict, so a process exit
+/// cannot race the last lines onto disk.
+fn spawn_review_reader<R>(
+    app: AppHandle,
+    id: String,
+    reader: R,
+) -> tauri::async_runtime::JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -2680,7 +2912,10 @@ where
                 let _ = f.write_all(b"\n").await;
             }
         }
-    });
+        if let Some(f) = file.as_mut() {
+            let _ = f.flush().await;
+        }
+    })
 }
 
 fn spawn_reader<R>(app: AppHandle, id: String, reader: R, stream: &'static str)
@@ -2745,9 +2980,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_heartbeat_ids, choose_branch, commit_all_changes, commit_message, dispatch,
-        local_clock, log_kind, mark_interrupted, now, prepare_worktree, resolve_named_branch,
-        review_clear, reviews_to_start, source_statuses, stall_sweep, supervised_tick, BranchChoice,
+        active_heartbeat_ids, ask_log_lines, choose_branch, commit_all_changes, commit_message,
+        dispatch, local_clock, log_kind, mark_interrupted, now, prepare_worktree,
+        resolve_named_branch, review_clear, review_should_retry, reviews_to_start, source_statuses,
+        stall_sweep, supervised_tick, BranchChoice, MAX_REVIEW_ATTEMPTS,
     };
     use std::path::Path;
     use crate::models::{
@@ -2834,6 +3070,7 @@ mod tests {
             summary: None,
             started_at: None,
             finished_at: None,
+            attempts: 0,
         });
         t
     }
@@ -2937,6 +3174,44 @@ mod tests {
         let mut a = task("a", "/p", &[], Isolation::Worktree, None);
         a.status = TaskStatus::Blocked; // review pause mode stopped it
         let a = reviewed(a, ReviewMode::Pause, ReviewStatus::Issues);
+        let b = task("b", "/p", &["a"], Isolation::Worktree, None);
+        let st = state_with(vec![a, b], 3);
+
+        dispatch(&st);
+        let b = st
+            .inner
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|t| t.id == "b")
+            .map(|t| t.status);
+        assert_eq!(b, Some(TaskStatus::Blocked));
+        assert_eq!(count(&st, TaskStatus::Running), 0);
+    }
+
+    #[test]
+    fn an_unfinished_review_is_retried_until_the_budget_is_spent() {
+        // A reviewer that exits without a verdict is retried, not settled.
+        assert!(review_should_retry(ReviewStatus::Failed, 1));
+        assert!(review_should_retry(ReviewStatus::Failed, MAX_REVIEW_ATTEMPTS - 1));
+        // Once the budget is spent (or a real verdict exists) it settles.
+        assert!(!review_should_retry(
+            ReviewStatus::Failed,
+            MAX_REVIEW_ATTEMPTS
+        ));
+        assert!(!review_should_retry(ReviewStatus::Passed, 1));
+        assert!(!review_should_retry(ReviewStatus::Issues, 1));
+    }
+
+    #[test]
+    fn a_blocked_incomplete_review_holds_dependents() {
+        // After its retries are exhausted the task is blocked, so a dependent
+        // (e.g. a production build) never starts on unreviewed work.
+        let mut a = task("a", "/p", &[], Isolation::Worktree, None);
+        a.status = TaskStatus::Blocked;
+        a.error = Some("review could not finish".into());
+        let a = reviewed(a, ReviewMode::Autofix, ReviewStatus::Failed);
         let b = task("b", "/p", &["a"], Isolation::Worktree, None);
         let st = state_with(vec![a, b], 3);
 
@@ -3130,7 +3405,87 @@ mod tests {
             options: Vec::new(),
             session_id: Some("ses_1".into()),
             created_at: None,
+            deadline: None,
+            timeout_secs: None,
         }
+    }
+
+    #[test]
+    fn ask_log_lines_describe_a_question() {
+        let mut ask = pending_ask();
+        ask.message = Some("I need to pick where to write.".into());
+        ask.fields = vec![crate::models::AskField {
+            key: "env".into(),
+            label: "Which environment?".into(),
+            description: Some("Staging or production".into()),
+            kind: crate::models::AskFieldKind::String,
+            required: true,
+            custom: false,
+            options: vec![crate::models::AskOption {
+                value: "staging".into(),
+                label: "Staging".into(),
+                description: None,
+            }],
+            default: None,
+            placeholder: None,
+            format: None,
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            min_items: None,
+            max_items: None,
+            url: None,
+        }];
+
+        let lines = ask_log_lines(&ask);
+
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Waiting for you: Which environment?")));
+        assert!(lines.iter().any(|l| l.contains("Agent said: I need to pick")));
+        assert!(lines
+            .iter()
+            .any(|l| l == "Question: Which environment? (required) — Staging or production"));
+        assert!(lines.iter().any(|l| l.contains("choices: Staging")));
+    }
+
+    #[test]
+    fn ask_log_lines_describe_a_permission() {
+        let mut ask = pending_ask();
+        ask.kind = AskKind::Permission;
+        ask.title = "Permission: bash".into();
+        ask.purpose = Some("Run a shell command".into());
+        ask.resources = vec!["rm -rf build".into()];
+        ask.save = vec!["rm -rf build".into()];
+
+        let lines = ask_log_lines(&ask);
+
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Reason: Run a shell command")));
+        assert!(lines.iter().any(|l| l.contains("Requested: rm -rf build")));
+        assert!(lines.iter().any(|l| l.contains("Always allow")));
+    }
+
+    #[test]
+    fn ask_log_lines_mention_a_wait_window() {
+        let mut ask = pending_ask();
+        ask.timeout_secs = Some(90);
+        let lines = ask_log_lines(&ask);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("will wait up to 2 minutes for your answer")));
+
+        // An absolute window (from a created/deadline pair) reads the same way.
+        let mut ask = pending_ask();
+        ask.created_at = Some(1_000);
+        ask.deadline = Some(1_600);
+        let lines = ask_log_lines(&ask);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("will wait up to 10 minutes for your answer")));
     }
 
     #[test]
@@ -3236,6 +3591,7 @@ mod tests {
             summary: None,
             started_at: None,
             finished_at: None,
+            attempts: 0,
         });
         let b = task("b", "/p", &["a"], Isolation::Worktree, None);
         let st = state_with(vec![a, b], 3);

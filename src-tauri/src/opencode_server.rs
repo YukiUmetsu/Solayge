@@ -488,6 +488,44 @@ fn field_from_json(f: &Value) -> Option<AskField> {
     })
 }
 
+/// Read a JSON number, accepting a numeric string as well.
+fn json_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|n| n as i64))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()).map(|n| n as i64))
+}
+
+/// Read an absolute deadline (unix seconds) and/or a relative timeout (seconds)
+/// from a provider payload, accepting the common spellings. A millisecond value
+/// is converted to seconds. Either half is `None` when the provider did not
+/// supply it, so the UI simply omits the deadline.
+fn read_deadline(v: &Value) -> (Option<i64>, Option<i64>) {
+    let get = |keys: &[&str]| keys.iter().find_map(|k| v.get(*k).and_then(json_i64));
+    // An absolute instant may arrive in seconds or milliseconds.
+    let deadline = get(&["deadline", "expires_at", "expiresAt", "expires"]).map(|d| {
+        if d > 1_000_000_000_000 {
+            d / 1000
+        } else {
+            d
+        }
+    });
+    let timeout_secs = if let Some(ms) = get(&["timeout_ms", "timeoutMs", "timeoutMillis"]) {
+        Some((ms + 999) / 1000)
+    } else {
+        get(&[
+            "timeout_secs",
+            "timeoutSecs",
+            "timeout_seconds",
+            "timeoutSeconds",
+            "timeout",
+        ])
+    };
+    (
+        deadline.filter(|d| *d > 0),
+        timeout_secs.filter(|t| *t > 0),
+    )
+}
+
 /// Map an opencode form (the `question` tool) to a [`TaskAsk`].
 pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
     let id = form.get("id").and_then(Value::as_str)?.to_string();
@@ -501,6 +539,7 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(field_from_json).collect())
         .unwrap_or_default();
+    let (deadline, timeout_secs) = read_deadline(form);
     Some(TaskAsk {
         id,
         kind: AskKind::Question,
@@ -515,6 +554,8 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         fields,
         options: Vec::new(),
         created_at: None,
+        deadline,
+        timeout_secs,
         session_id: Some(session.to_string()),
     })
 }
@@ -572,6 +613,7 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
         .cloned();
     let source = req.get("source").filter(|v| !v.is_null()).cloned();
     let purpose = permission_purpose(&action);
+    let (deadline, timeout_secs) = read_deadline(req);
     Some(TaskAsk {
         id,
         kind: AskKind::Permission,
@@ -586,6 +628,8 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
         fields: Vec::new(),
         options: vec!["once".into(), "always".into(), "reject".into()],
         created_at: None,
+        deadline,
+        timeout_secs,
         session_id: Some(session.to_string()),
     })
 }
@@ -699,6 +743,46 @@ mod tests {
         });
         let ask = permission_to_ask("ses_1", &req).expect("ask");
         assert!(ask.metadata.is_none());
+    }
+
+    #[test]
+    fn reads_a_relative_timeout_from_a_form() {
+        let form = json!({
+            "id":"frm_3","title":"Pick one","timeout_secs":90,
+            "fields":[{"key":"a","type":"string","title":"A"}]
+        });
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.timeout_secs, Some(90));
+        assert_eq!(ask.deadline, None);
+    }
+
+    #[test]
+    fn reads_an_absolute_expiry_in_millis() {
+        let req = json!({
+            "id":"per_3","sessionID":"ses_1","action":"bash",
+            "resources":["ls"],"expiresAt":1_700_000_000_000i64
+        });
+        let ask = permission_to_ask("ses_1", &req).expect("ask");
+        assert_eq!(ask.deadline, Some(1_700_000_000));
+        assert_eq!(ask.timeout_secs, None);
+    }
+
+    #[test]
+    fn accepts_a_millisecond_timeout() {
+        let form = json!({
+            "id":"frm_4","title":"Pick one","timeoutMs":1500,
+            "fields":[]
+        });
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.timeout_secs, Some(2));
+    }
+
+    #[test]
+    fn no_timeout_field_means_no_deadline() {
+        let form = json!({"id":"frm_5","title":"Pick one","fields":[]});
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.deadline, None);
+        assert_eq!(ask.timeout_secs, None);
     }
 
     #[test]

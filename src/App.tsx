@@ -39,7 +39,8 @@ import { ProjectSettingsModal } from "./components/ProjectSettingsModal";
 import { ShipModal } from "./components/ShipModal";
 import { MergeModal } from "./components/MergeModal";
 import { GitModal } from "./components/GitModal";
-import { PermissionPrompt } from "./components/PermissionPrompt";
+import { AttentionPrompt } from "./components/AttentionPrompt";
+import { useNow } from "./lib/useNow";
 
 const MAX_LOG_LINES = 4000;
 
@@ -162,8 +163,12 @@ export default function App() {
   const [showPast, setShowPast] = useState(false);
   const [remote, setRemote] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [dismissedAskId, setDismissedAskId] = useState<string | null>(null);
+  const [dismissedAskIds, setDismissedAskIds] = useState<string[]>([]);
+  // Ask id -> unix seconds until which its popup stays hidden ("remind me later").
+  const [snoozeUntil, setSnoozeUntil] = useState<Record<string, number>>({});
   const toastTimer = useRef<number | null>(null);
+  // Ticking clock, so a snoozed ask re-surfaces when its time is up.
+  const nowSec = useNow();
 
   // Latest settings for the notification listener, which is registered once.
   const settingsRef = useRef<Snapshot["settings"] | undefined>(undefined);
@@ -346,23 +351,88 @@ export default function App() {
     [project, snapshot?.settings],
   );
 
-  // The first running task waiting on a permission, surfaced as an app-level
-  // popup so the decision is made in-app with the directory and purpose visible.
-  const pendingPermission = useMemo(() => {
-    if (!snapshot) return null;
-    return (
-      snapshot.tasks.find(
-        (t) => t.status === "running" && t.ask?.kind === "permission",
-      ) ?? null
-    );
-  }, [snapshot]);
-  const permissionProject = pendingPermission
-    ? (snapshot?.projects.find(
-        (p) => p.path === pendingPermission.project_path,
-      ) ?? null)
+  // The first running task waiting on input — a question or a permission —
+  // surfaced as an app-level popup so the ask is answered in-app instead of in
+  // the task panel. Snoozed asks are skipped until their timer elapses and
+  // dismissed ones are skipped for good.
+  const pendingAsks = useMemo(
+    () => (snapshot?.tasks ?? []).filter((t) => t.status === "running" && t.ask),
+    [snapshot],
+  );
+  const pendingAsk = useMemo(
+    () =>
+      pendingAsks.find((t) => {
+        const id = t.ask?.id;
+        if (!id || dismissedAskIds.includes(id)) return false;
+        const until = snoozeUntil[id];
+        return !until || until <= nowSec;
+      }) ?? null,
+    [pendingAsks, dismissedAskIds, snoozeUntil, nowSec],
+  );
+  const askProject = pendingAsk
+    ? (snapshot?.projects.find((p) => p.path === pendingAsk.project_path) ?? null)
     : null;
-  const showPermission =
-    !!pendingPermission && pendingPermission.ask?.id !== dismissedAskId;
+
+  // Load the pending ask's full log so its popup shows the history, not just the
+  // lines streamed since the app opened. Live lines keep appending after.
+  const pendingAskId = pendingAsk?.id ?? null;
+  useEffect(() => {
+    if (!pendingAskId) return;
+    api
+      .taskLog(pendingAskId)
+      .then((text) => {
+        const lines = text.length ? text.replace(/\n$/, "").split("\n") : [];
+        setLogs((prev) => ({
+          ...prev,
+          [pendingAskId]: lines.map((line) => ({
+            text: line,
+            kind: classifyLine(line),
+          })),
+        }));
+      })
+      .catch(() => {});
+  }, [pendingAskId]);
+
+  /** Hide an ask's popup for good (until the ask itself changes). */
+  function dismissAsk(id: string) {
+    setDismissedAskIds((cur) => (cur.includes(id) ? cur : [...cur, id]));
+  }
+
+  /** Hide an ask's popup for a while, then let it surface again. */
+  function snoozeAsk(id: string, ms: number) {
+    const until = nowSec + Math.max(1, Math.round(ms / 1000));
+    setSnoozeUntil((u) => {
+      const next: Record<string, number> = {};
+      for (const [k, v] of Object.entries(u)) if (v > nowSec) next[k] = v;
+      next[id] = until;
+      return next;
+    });
+  }
+
+  /** Bring a specific task's ask back to the front (from the side panel). */
+  function openAsk(taskId: string) {
+    const id = snapshot?.tasks.find((t) => t.id === taskId)?.ask?.id;
+    setSelectedTaskId(taskId);
+    setRightOpen(true);
+    if (!id) return;
+    setDismissedAskIds((cur) => cur.filter((d) => d !== id));
+    setSnoozeUntil((u) => {
+      if (!(id in u)) return u;
+      const next = { ...u };
+      delete next[id];
+      return next;
+    });
+  }
+
+  // Drop dismissals whose ask is gone, so the list cannot grow without bound.
+  useEffect(() => {
+    const live = new Set<string>();
+    for (const t of snapshot?.tasks ?? []) if (t.ask?.id) live.add(t.ask.id);
+    setDismissedAskIds((cur) => {
+      const next = cur.filter((id) => live.has(id));
+      return next.length === cur.length ? cur : next;
+    });
+  }, [snapshot]);
 
   async function addProject() {
     try {
@@ -531,6 +601,7 @@ export default function App() {
                     onRetryReview={(id) =>
                       void runAction(() => api.retryReview(id))
                     }
+                    onOpenAsk={openAsk}
                     onCollapse={() => setRightOpen(false)}
                   />
                 </>
@@ -622,18 +693,20 @@ export default function App() {
         />
       )}
 
-      {showPermission && pendingPermission && (
-        <PermissionPrompt
-          key={pendingPermission.ask?.id}
-          task={pendingPermission}
-          projectName={permissionProject?.name ?? null}
+      {pendingAsk && pendingAsk.ask && (
+        <AttentionPrompt
+          key={pendingAsk.ask.id}
+          task={pendingAsk}
+          project={askProject}
+          logs={logs[pendingAsk.id] ?? []}
           onAnswered={apply}
-          onDismiss={() => setDismissedAskId(pendingPermission.ask?.id ?? null)}
+          onDismiss={() => dismissAsk(pendingAsk.ask!.id)}
+          onSnooze={(ms) => snoozeAsk(pendingAsk.ask!.id, ms)}
           onOpenTask={() => {
-            setSelectedProject(pendingPermission.project_path);
-            setSelectedTaskId(pendingPermission.id);
-            setRightOpen(true);
-            setDismissedAskId(pendingPermission.ask?.id ?? null);
+            const id = pendingAsk.ask!.id;
+            setSelectedProject(pendingAsk.project_path);
+            openAsk(pendingAsk.id);
+            dismissAsk(id);
           }}
         />
       )}

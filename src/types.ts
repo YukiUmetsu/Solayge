@@ -89,6 +89,10 @@ export interface TaskAsk {
   options: string[];
   session_id?: string | null;
   created_at?: number | null;
+  /** Unix seconds after which the agent stops waiting, when it supplied one. */
+  deadline?: number | null;
+  /** A provider-supplied relative wait in seconds instead of a deadline. */
+  timeout_secs?: number | null;
 }
 
 export interface TaskReview {
@@ -99,6 +103,8 @@ export interface TaskReview {
   summary?: string | null;
   started_at?: number | null;
   finished_at?: number | null;
+  /** How many times the review has been started (automatic retries included). */
+  attempts?: number;
 }
 
 export type SystemPromptPosition = "prefix" | "suffix";

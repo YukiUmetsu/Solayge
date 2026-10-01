@@ -107,6 +107,7 @@ fn reset_for_rerun(t: &mut Task) {
         r.summary = None;
         r.started_at = None;
         r.finished_at = None;
+        r.attempts = 0;
     }
     t.status = if t.depends_on.is_empty() {
         TaskStatus::Ready
@@ -609,6 +610,7 @@ pub fn create_tasks(
                     summary: None,
                     started_at: None,
                     finished_at: None,
+                    attempts: 0,
                 })
             },
             kind: nt.kind.unwrap_or_default(),
@@ -1033,23 +1035,35 @@ fn cancel_task_state(t: &mut Task) -> bool {
     true
 }
 
-/// Re-queue a succeeded task's auto-review so the scheduler runs it again,
-/// without re-running the (already finished) task. Errors when there is nothing
-/// to re-run. Pure, so the rule can be unit-tested.
+/// Re-queue a task's auto-review so the scheduler runs it again, without
+/// re-running the (already finished) task. A task blocked because its review
+/// could not finish is restored to succeeded so the review can run again; the
+/// attempt budget is reset. Errors when there is nothing to re-run. Pure, so
+/// the rule can be unit-tested.
 fn requeue_review(t: &mut Task) -> Result<(), String> {
+    let (mode, review_failed) = match t.review.as_ref() {
+        Some(r) => (r.mode, r.status == ReviewStatus::Failed),
+        None => return Err("this task has no review".into()),
+    };
+    if mode == ReviewMode::Off {
+        return Err("this task has no review".into());
+    }
+    // A review that ran out of attempts blocks the task; re-running it resumes
+    // the success (the task's work did succeed).
+    if t.status == TaskStatus::Blocked && review_failed {
+        t.status = TaskStatus::Succeeded;
+        t.error = None;
+    }
     if t.status != TaskStatus::Succeeded {
         return Err("only a succeeded task's review can be re-run".into());
     }
-    let Some(r) = t.review.as_mut() else {
-        return Err("this task has no review".into());
-    };
-    if r.mode == ReviewMode::Off {
-        return Err("this task has no review".into());
+    if let Some(r) = t.review.as_mut() {
+        r.status = ReviewStatus::Pending;
+        r.summary = None;
+        r.started_at = None;
+        r.finished_at = None;
+        r.attempts = 0;
     }
-    r.status = ReviewStatus::Pending;
-    r.summary = None;
-    r.started_at = None;
-    r.finished_at = None;
     Ok(())
 }
 
@@ -1926,6 +1940,7 @@ mod tests {
             summary: Some("stale".into()),
             started_at: Some(10),
             finished_at: None,
+            attempts: 2,
         });
 
         reset_for_rerun(&mut t);
@@ -1946,6 +1961,7 @@ mod tests {
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::None);
         assert!(r.summary.is_none() && r.finished_at.is_none());
+        assert_eq!(r.attempts, 0, "a re-run gets a fresh review budget");
     }
 
     #[test]
@@ -2161,6 +2177,7 @@ mod tests {
                 summary: None,
                 started_at: None,
                 finished_at: None,
+                attempts: 0,
             });
             assert!(!is_clearable(&t), "{status:?} must hold the task");
         }
@@ -2205,6 +2222,7 @@ mod tests {
             summary: None,
             started_at: None,
             finished_at: None,
+            attempts: 0,
         });
     }
 
@@ -2375,10 +2393,28 @@ mod tests {
     fn a_failed_review_can_be_requeued() {
         let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Failed);
+        t.review.as_mut().unwrap().attempts = 3;
         requeue_review(&mut t).unwrap();
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::Pending);
         assert!(r.summary.is_none() && r.finished_at.is_none());
+        assert_eq!(r.attempts, 0, "a manual re-run gets a fresh budget");
+    }
+
+    #[test]
+    fn a_blocked_incomplete_review_can_be_requeued() {
+        // Running out of attempts blocks the task; re-running the review puts
+        // the (already succeeded) task back in review.
+        let mut t = task(TaskStatus::Blocked, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Failed);
+        t.error = Some("review could not finish".into());
+        requeue_review(&mut t).unwrap();
+        assert_eq!(t.status, TaskStatus::Succeeded);
+        assert!(t.error.is_none());
+        assert_eq!(
+            t.review.as_ref().unwrap().status,
+            ReviewStatus::Pending
+        );
     }
 
     #[test]

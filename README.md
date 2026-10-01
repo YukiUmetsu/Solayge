@@ -139,13 +139,23 @@ Solayge turns that graph into something you can see and control:
 - **Automatic code review** — a reviewer reports, auto-fixes, or stops a task for
   your attention.
 - **Interactive questions** — when an agent asks a question or requests
-  permission, the task notifies you and shows the prompt in the side panel.
-  Choice questions can also be answered with free text when the agent allows a
-  custom answer (opencode's `custom` flag), and permission requests spell out the
-  action, the exact target(s), the provider's own details, and what
-  **Always allow** would remember. While a task is running you can also send the
-  agent an arbitrary message at any time — ask a follow-up or add instructions
-  mid-run — and its reply streams into the task log.
+  permission, the task notifies you and raises a transient in-app dialog (and a
+  reply banner in the task's side panel) that names the project and task, shows
+  the task's prompt and recent log, and spells out what is being asked — plus
+  the answer deadline when the agent supplies one. A question with several parts
+  is split into tabs so it can be answered one at a time, and the dialog can be
+  deferred with **More time…** — pick a remind-me-later interval, or send the
+  agent a note with how long you need. The whole task card is tinted and glows
+  while it waits on you (and again when a task is blocked), so a request is never
+  a tiny chip. Choice questions can also be answered with free text when the
+  agent allows a custom answer (opencode's `custom` flag), and permission
+  requests spell out the action, the exact target(s), the provider's own
+  details, and what **Always allow** would remember. While a task is running you
+  can also send the agent an arbitrary message at any time — ask a follow-up or
+  add instructions mid-run — and its reply streams into the task log. Each
+  surfaced ask is also written to the task log (the question or the requested
+  target, the agent's reason, and — for questions — the choices), so you can look
+  back at why it decided to ask.
 
 ## Requirements
 
@@ -295,10 +305,13 @@ keep waiting without being failed; a notification fires, and the answer is poste
 back to the live session. Other providers still run non-interactively until they
 gain adapters (see the [roadmap](#roadmap)).
 
-A pending **permission** also raises an app-level popup (with a desktop
-notification) that names the task, the exact directory/command/URL it wants, and
-the purpose, so the decision is made inside Solayge instead of through an opaque OS
-prompt. The same detail appears in the task's side panel. Because a folder outside
+A pending **question or permission** also raises an app-level popup (with a
+desktop notification) that names the project and task, shows the task's prompt
+and recent log, spells out the exact directory/command/URL it wants and the
+purpose — and, when the agent supplies one, counts down to the answer deadline
+— so the decision is made inside Solayge instead of through an opaque OS prompt.
+The same detail appears in the task's side panel, and the ask is recorded in the
+task log. Because a folder outside
 the project is the one permission an agent should never take silently, **every**
 profile — including `autonomous` — asks for it; only the reply differs (autonomous
 still auto-approves every other request).
@@ -424,6 +437,17 @@ different one, so it runs under the same account and subscription. Modes:
 - **Review, then stop on issues** — block the task, holding back dependents.
 
 The mode can be set account-wide or per project.
+
+The verdict must be the reviewer's **final** line. A reviewer that stops early —
+for example after backgrounding a long build and ending its turn saying it is
+"waiting" for the result — has not produced a verdict, so that attempt is re-run
+automatically (up to three starts in all). An earlier attempt's verdict never
+counts for a later one, and once the retries are spent the task is **blocked** so
+its dependents (a production build, the next step) cannot run on work the
+reviewer never actually checked. Re-run the review from the **Review** tab (or
+retry the task) once it can finish. Each attempt is appended to the reviewer log
+under a `---- new attempt ----` marker, and the log is only read up to its last
+attempt.
 
 The reviewer is deliberately **skeptical**: it is told not to assume the change is
 correct, to distrust summaries and commit messages, to try to falsify the claim

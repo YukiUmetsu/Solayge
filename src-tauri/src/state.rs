@@ -21,6 +21,10 @@ pub struct AppState {
     pub running: Mutex<HashMap<String, tokio::process::Child>>,
     /// Auto code-review processes, keyed by task id.
     pub reviewing: Mutex<HashMap<String, tokio::process::Child>>,
+    /// Reader tasks streaming each review's stdout/stderr to its log, keyed by
+    /// task id. The reaper drains them before parsing the verdict so the final
+    /// lines cannot race the flush.
+    pub review_readers: Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>,
     /// Multi-step integration (merge) processes, keyed by task id.
     pub merging: Mutex<HashMap<String, tokio::process::Child>>,
     /// Cached provider model lists, keyed by provider command key.
@@ -52,6 +56,7 @@ impl AppState {
             inner: Mutex::new(state),
             running: Mutex::new(HashMap::new()),
             reviewing: Mutex::new(HashMap::new()),
+            review_readers: Mutex::new(HashMap::new()),
             merging: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             heartbeat: Mutex::new(HashMap::new()),
