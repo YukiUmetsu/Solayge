@@ -70,11 +70,11 @@ function cleanStaleDmgState() {
 }
 
 /** Run the Tauri CLI, streaming its output live while also capturing it. */
-function runTauri() {
+function runTauri(env = process.env) {
   return new Promise((resolve) => {
     const child = spawn(tauriBin(), args, {
       cwd: root,
-      env: process.env,
+      env,
       stdio: ["inherit", "pipe", "pipe"],
       shell: process.platform === "win32",
     });
@@ -112,14 +112,38 @@ async function main() {
     return;
   }
 
+  // `bundle_dmg.sh` uses AppleScript to arrange the DMG window, which needs the
+  // terminal granted control of Finder. When that is refused the whole bundle
+  // fails with an AppleEvent error (-1728/-1743) — a persistent environment
+  // problem, not a transient one, so a plain retry cannot help. tauri-bundler
+  // passes `--skip-jenkins` (skipping the AppleScript step) whenever `CI` is set,
+  // which still yields an installable DMG, so fall back to that.
+  let skipDmgAesthetics = false;
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     cleanStaleDmgState();
-    const { code, output } = await runTauri();
+    const env = skipDmgAesthetics ? { ...process.env, CI: "true" } : process.env;
+    const { code, output } = await runTauri(env);
     if (code === 0) process.exit(0);
 
     // Only retry the flaky disk-image stage; a real compile/config error should
     // surface immediately instead of being run again.
     const dmgRelated = /bundle_dmg|hdiutil|create-dmg|osascript/i.test(output);
+    const applescriptDenied =
+      /-1728|-1743|Failed running AppleScript|Not authorized to send Apple events/i.test(
+        output,
+      );
+
+    if (applescriptDenied && !skipDmgAesthetics) {
+      console.error(
+        "\n[bundle] Finder automation is blocked (-1728/-1743), so the DMG layout " +
+          "step cannot run. Retrying with `CI=true` to skip it; the DMG will build " +
+          "without the custom icon layout.\n",
+      );
+      skipDmgAesthetics = true;
+      continue;
+    }
+
     if (attempt < MAX_ATTEMPTS && dmgRelated) {
       console.error(
         `\n[bundle] macOS DMG step failed (attempt ${attempt}/${MAX_ATTEMPTS}); ` +
@@ -131,8 +155,9 @@ async function main() {
       console.error(
         "\n[bundle] The macOS DMG step kept failing. Re-run with " +
           "`pnpm tauri build --bundles dmg -v` to see the full bundle_dmg.sh output. " +
-          "If it mentions an AppleEvent error (-1728/-1743), allow your terminal to " +
-          "control Finder under System Settings → Privacy & Security → Automation.\n",
+          "If it mentions an AppleEvent error (-1728/-1743), grant your terminal " +
+          "control of Finder under System Settings → Privacy & Security → Automation, " +
+          "or set `CI=true` to skip the DMG layout step.\n",
       );
     }
     process.exit(code);
