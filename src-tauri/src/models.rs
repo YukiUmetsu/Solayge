@@ -1102,7 +1102,7 @@ pub struct LogEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Task, TaskStatus};
+    use super::{NotificationSettings, NotifyKind, Settings, Task, TaskStatus};
 
     /// Every status a task can have. Used to check rules that must hold for all
     /// of them; add any new status here and the invariant tests below cover it.
@@ -1201,6 +1201,125 @@ mod tests {
             t.ask = None;
             assert!(!t.drop_orphaned_ask());
             assert!(t.ask.is_none());
+        }
+    }
+
+    /// The event kinds the frontend switches on. If one is added, the default
+    /// and gating tests below must cover it too.
+    const ALL_KINDS: [NotifyKind; 5] = [
+        NotifyKind::TaskComplete,
+        NotifyKind::TaskFailed,
+        NotifyKind::TaskReview,
+        NotifyKind::NeedsAttention,
+        NotifyKind::System,
+    ];
+
+    #[test]
+    fn notifications_are_allowed_by_default() {
+        let n = NotificationSettings::default();
+        for kind in ALL_KINDS {
+            assert!(n.allows(kind), "{kind:?} should notify by default");
+        }
+    }
+
+    #[test]
+    fn the_master_switch_silences_every_kind() {
+        let n = NotificationSettings {
+            enabled: false,
+            ..Default::default()
+        };
+        for kind in ALL_KINDS {
+            assert!(!n.allows(kind), "{kind:?} must be silenced by the master switch");
+        }
+    }
+
+    #[test]
+    fn each_event_toggle_gates_only_its_own_kind() {
+        let complete = NotificationSettings {
+            on_task_complete: false,
+            ..Default::default()
+        };
+        assert!(!complete.allows(NotifyKind::TaskComplete));
+        assert!(complete.allows(NotifyKind::TaskFailed));
+
+        let failed = NotificationSettings {
+            on_task_failed: false,
+            ..Default::default()
+        };
+        assert!(!failed.allows(NotifyKind::TaskFailed));
+        assert!(failed.allows(NotifyKind::TaskComplete));
+
+        let review = NotificationSettings {
+            on_task_review: false,
+            ..Default::default()
+        };
+        assert!(!review.allows(NotifyKind::TaskReview));
+        assert!(review.allows(NotifyKind::TaskComplete));
+
+        let attention = NotificationSettings {
+            on_needs_attention: false,
+            ..Default::default()
+        };
+        assert!(!attention.allows(NotifyKind::NeedsAttention));
+        assert!(attention.allows(NotifyKind::TaskComplete));
+    }
+
+    #[test]
+    fn system_notifications_ignore_the_per_event_toggles() {
+        // App-level problems have no dedicated toggle: only the master switch
+        // controls them, so they still surface when everything else is muted.
+        let n = NotificationSettings {
+            on_task_complete: false,
+            on_task_failed: false,
+            on_task_review: false,
+            on_needs_attention: false,
+            ..Default::default()
+        };
+        assert!(n.allows(NotifyKind::System));
+    }
+
+    #[test]
+    fn missing_notification_fields_fall_back_to_defaults() {
+        let n: NotificationSettings =
+            serde_json::from_value(serde_json::json!({})).expect("empty object is valid");
+        assert!(n.enabled);
+        assert!(n.on_task_complete);
+        assert!(n.sound_enabled);
+        assert!((n.volume - 0.8).abs() < f32::EPSILON);
+        assert_eq!(n.complete_sound.as_deref(), Some("complete"));
+        assert_eq!(n.failed_sound.as_deref(), Some("failed"));
+        assert_eq!(n.review_sound.as_deref(), Some("review"));
+        assert_eq!(n.attention_sound.as_deref(), Some("attention"));
+
+        let partial: NotificationSettings =
+            serde_json::from_value(serde_json::json!({ "enabled": false }))
+                .expect("a partial object is valid");
+        assert!(!partial.enabled);
+        assert!(partial.on_task_complete, "unspecified toggles keep their default");
+        assert_eq!(partial.complete_sound.as_deref(), Some("complete"));
+    }
+
+    #[test]
+    fn settings_from_older_state_gains_notification_defaults() {
+        // State written before the notifications feature has no `notifications`
+        // key; it must load with defaults rather than failing.
+        let s: Settings = serde_json::from_value(serde_json::json!({})).expect("valid settings");
+        assert!(s.notifications.enabled);
+        let round_tripped = serde_json::to_value(&s).expect("serializes");
+        assert!(round_tripped.get("notifications").is_some());
+    }
+
+    #[test]
+    fn notify_kind_matches_the_frontend_wire_contract() {
+        let cases = [
+            (NotifyKind::TaskComplete, "task_complete"),
+            (NotifyKind::TaskFailed, "task_failed"),
+            (NotifyKind::TaskReview, "task_review"),
+            (NotifyKind::NeedsAttention, "needs_attention"),
+            (NotifyKind::System, "system"),
+        ];
+        for (kind, wire) in cases {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(wire));
         }
     }
 }

@@ -1438,6 +1438,18 @@ pub fn test_notification(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The MIME type for a supported audio file extension (lowercased), or `None`.
+fn sound_mime(ext: &str) -> Option<&'static str> {
+    match ext {
+        "wav" => Some("audio/wav"),
+        "mp3" => Some("audio/mpeg"),
+        "m4a" | "aac" => Some("audio/mp4"),
+        "ogg" | "oga" => Some("audio/ogg"),
+        "flac" => Some("audio/flac"),
+        _ => None,
+    }
+}
+
 /// Read a custom notification sound and return it as a data URL the webview can
 /// play. Only audio extensions are accepted, and the file is capped so a huge
 /// pick can't be base64'd into the UI.
@@ -1451,14 +1463,7 @@ pub fn read_sound_file(path: String) -> Result<String, String> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .ok_or_else(|| "sound file has no extension".to_string())?;
-    let mime = match ext.as_str() {
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "m4a" | "aac" => "audio/mp4",
-        "ogg" | "oga" => "audio/ogg",
-        "flac" => "audio/flac",
-        _ => return Err(format!("unsupported sound format: .{ext}")),
-    };
+    let mime = sound_mime(&ext).ok_or_else(|| format!("unsupported sound format: .{ext}"))?;
     const MAX_BYTES: u64 = 10 * 1024 * 1024;
     let meta = std::fs::metadata(&pb).map_err(|e| format!("cannot read {path}: {e}"))?;
     if meta.len() > MAX_BYTES {
@@ -1806,7 +1811,8 @@ pub async fn list_models(
 mod tests {
     use super::{
         apply_draft_patch, archive_task, cancel_task_state, has_dependency_cycle, is_clearable,
-        log_tail, render_diff, requeue_review, reset_for_rerun, restore_task_state, valid_task_id,
+        log_tail, read_sound_file, render_diff, requeue_review, reset_for_rerun, restore_task_state,
+        sound_mime, valid_task_id,
     };
     use crate::models::{
         BranchMode, DeletedTask, DiffResult, FileDiff, GitOp, Isolation, PermissionProfile,
@@ -2358,5 +2364,57 @@ mod tests {
         ])));
         // A dangling dependency is not a cycle (it is handled separately).
         assert!(!has_dependency_cycle(&edges(&[("a", &["missing"])])));
+    }
+
+    #[test]
+    fn sound_mime_accepts_only_supported_audio_extensions() {
+        assert_eq!(sound_mime("wav"), Some("audio/wav"));
+        assert_eq!(sound_mime("mp3"), Some("audio/mpeg"));
+        assert_eq!(sound_mime("m4a"), Some("audio/mp4"));
+        assert_eq!(sound_mime("aac"), Some("audio/mp4"));
+        assert_eq!(sound_mime("ogg"), Some("audio/ogg"));
+        assert_eq!(sound_mime("oga"), Some("audio/ogg"));
+        assert_eq!(sound_mime("flac"), Some("audio/flac"));
+        assert_eq!(sound_mime("txt"), None);
+        assert_eq!(sound_mime("wave"), None);
+    }
+
+    fn sound_temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("solayge-sound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_sound_file_returns_a_data_url_for_a_small_audio_file() {
+        use base64::Engine as _;
+        let dir = sound_temp_dir();
+        let path = dir.join("tone.WAV"); // extension matching is case-insensitive
+        std::fs::write(&path, b"RIFF....WAVE").unwrap();
+
+        let url = read_sound_file(path.to_string_lossy().into_owned()).unwrap();
+        let b64 = url
+            .strip_prefix("data:audio/wav;base64,")
+            .expect("data URL with the right MIME type");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(decoded, b"RIFF....WAVE");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_sound_file_rejects_non_audio_and_unreadable_files() {
+        let dir = sound_temp_dir();
+
+        let text = dir.join("note.txt");
+        std::fs::write(&text, b"hi").unwrap();
+        let err = read_sound_file(text.to_string_lossy().into_owned()).unwrap_err();
+        assert!(err.contains("unsupported sound format"), "{err}");
+
+        let missing = dir.join("missing.wav");
+        let err = read_sound_file(missing.to_string_lossy().into_owned()).unwrap_err();
+        assert!(err.contains("cannot read"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

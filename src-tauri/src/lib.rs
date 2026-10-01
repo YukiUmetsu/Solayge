@@ -1,8 +1,15 @@
+// Keep first-party code free of `unsafe`: the only exception is the isolated
+// Objective-C interop in `macos_notify`, which is explicitly allowed below.
+#![deny(unsafe_code)]
+
 mod agent;
 mod cache;
 mod commands;
 mod errorlog;
 mod git;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // Objective-C interop for UNUserNotificationCenter; everything else stays safe Rust.
+mod macos_notify;
 mod models;
 mod opencode;
 mod opencode_server;
@@ -56,6 +63,8 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             app.manage(AppState::new(data_dir));
+            #[cfg(target_os = "macos")]
+            macos_notify::init();
             scheduler::spawn_scheduler(app.handle().clone());
             Ok(())
         })

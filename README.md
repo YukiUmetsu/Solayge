@@ -449,13 +449,16 @@ switch over all of them. Sound can be turned off, given its own volume, and set 
 bundled tone or any local audio file per event. All four bundled tones (completion,
 failure, review, attention) are synthesised by `pnpm make:sounds`.
 
-Notifications are shown by the Rust core. On macOS the app drives the notification
-center on the main thread directly, because the Tauri notification plugin delivers
-from a background thread, which recent macOS silently drops. Every notification is
-also surfaced as an in-app toast and plays its sound, so a denied OS notification is
-never the only feedback. Use **Test notification** in the Notifications tab to check
-that the OS allows Solayge to post; failures are recorded in the **Advanced** tab's
-error log.
+Notifications are shown by the Rust core. On macOS they go through the modern
+UserNotifications framework (`UNUserNotificationCenter`); the older
+`NSUserNotificationCenter` API that `notify-rust`/`mac-notification-sys` (and
+therefore the Tauri notification plugin) use is treated as a legacy connection
+and refused by `usernoted`, so notifications built on it are silently dropped.
+macOS asks for permission the first time the app runs — allow Solayge there.
+Every notification is also surfaced as an in-app toast and plays its sound, so a
+denied OS notification is never the only feedback. Use **Test notification** in
+the Notifications tab to check that the OS allows Solayge to post; failures are
+recorded in the **Advanced** tab's error log.
 
 Prompts you write for tasks and planner goals are cached and offered as one-click
 suggestions in **New task** and **Plan with AI**. Task logs are treated as cache

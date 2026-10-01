@@ -68,50 +68,13 @@ pub(crate) fn notify(app: &AppHandle, kind: NotifyKind, title: &str, body: &str)
 
 /// Deliver the OS notification.
 ///
-/// On macOS the notification center must be driven from the main thread, but the
-/// Tauri plugin dispatches its delivery from a background runtime task — which
-/// is silently dropped on recent macOS. So there we call the underlying
-/// `mac-notification-sys` directly on the main thread. Everywhere else the
-/// plugin is used as-is.
+/// On macOS we go through the modern UserNotifications framework (see
+/// `macos_notify`); the old `NSUserNotification` path is refused by `usernoted`.
+/// Everywhere else the Tauri plugin is used as-is.
 #[cfg(target_os = "macos")]
 fn show_desktop(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
-    let handle = app.clone();
-    let title = title.to_string();
-    let body = body.to_string();
-    app.run_on_main_thread(move || {
-        let identifier = handle.config().identifier.clone();
-        // Match the plugin's dev behavior: an unbundled dev binary has no app
-        // bundle of its own, so notifications are attributed to Terminal.
-        let bundle = if tauri::is_dev() {
-            "com.apple.Terminal"
-        } else {
-            identifier.as_str()
-        };
-        let _ = mac_notification_sys::set_application(bundle);
-        // Deliver via a near-future schedule: the synchronous delivery path
-        // blocks the calling thread waiting for an XPC delivery callback, which
-        // would freeze the UI when that callback is slow (e.g. denied). A
-        // scheduled notification is fire-and-forget and still appears at once.
-        let when = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0)
-            + 0.2;
-        let mut options = mac_notification_sys::Notification::new();
-        options
-            .title(&title)
-            .message(&body)
-            .delivery_date(when);
-        if let Err(e) = options.send() {
-            eprintln!("[Solayge] notification failed: {e}");
-            crate::errorlog::record(
-                &handle,
-                "notification",
-                &format!("could not show notification: {e}"),
-            );
-        }
-    })
-    .map_err(|e| e.to_string())
+    crate::macos_notify::show(app, title, body);
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

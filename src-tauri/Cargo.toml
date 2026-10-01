@@ -32,11 +32,26 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 
-# macOS notifications must be delivered on the main thread, which the Tauri
-# notification plugin does not do (it dispatches from a worker). We call the
-# same underlying crate directly, on the main thread, in `scheduler::notify`.
+# macOS desktop notifications go through the modern UserNotifications
+# framework. The older `NSUserNotificationCenter` (used by `notify-rust` /
+# `mac-notification-sys`, and therefore by the Tauri notification plugin) is a
+# "LegacyConnection" that `usernoted` refuses on current macOS, so notifications
+# built on it are silently dropped. `macos_notify` drives `UNUserNotificationCenter`
+# directly.
 [target.'cfg(target_os = "macos")'.dependencies]
-mac-notification-sys = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationTrigger",
+    "UNNotificationSound",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"
 
 # Release builds unwind on panic on purpose: the scheduler runs every tick in
 # its own task (`supervised_tick`) and turns a panic into a logged error so the
