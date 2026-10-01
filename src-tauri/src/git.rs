@@ -597,16 +597,28 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
         } else {
             ahead_behind(repo, &default, name).await
         };
+        let worktree = worktree_for.get(name).cloned();
+        let is_current = current.as_deref() == Some(name.as_str());
+        // Uncommitted work in a branch's worktree is not on the branch, so a
+        // branch can look "merged" while still holding changes. Check the
+        // worktree that has it checked out; the project folder counts for the
+        // branch checked out there.
+        let dirty = match worktree.as_deref() {
+            Some(wt) => has_changes(Path::new(wt)).await,
+            None if is_current => has_changes(repo).await,
+            None => false,
+        };
         out.push(BranchInfo {
             name: name.clone(),
             is_remote: false,
             is_default,
-            is_current: current.as_deref() == Some(name.as_str()),
+            is_current,
             merged,
             ahead,
             behind,
-            worktree: worktree_for.get(name).cloned(),
+            worktree,
             has_remote: remote_exists(repo, name).await,
+            dirty,
         });
     }
 
@@ -641,6 +653,7 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
             behind,
             worktree: None,
             has_remote: true,
+            dirty: false,
         });
     }
     Ok(out)
@@ -856,6 +869,36 @@ mod tests {
         let feat = list.iter().find(|b| b.name == "feat").unwrap();
         assert!(feat.merged, "a landed branch must be marked merged");
         assert_eq!(feat.ahead, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn branches_flag_uncommitted_work_in_their_worktree() {
+        let dir = std::env::temp_dir().join(format!("solayge-branchdirty-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+
+        // A branch checked out in its own worktree.
+        let wt = dir.join("wt");
+        let wt_arg = wt.to_string_lossy().to_string();
+        run(&dir, &["worktree", "add", "-q", "-b", "feat", &wt_arg]).await;
+
+        let list = branches(&dir).await.unwrap();
+        let feat = list.iter().find(|b| b.name == "feat").unwrap();
+        assert!(!feat.dirty, "a clean worktree is not dirty");
+
+        // An uncommitted edit in the worktree must be flagged.
+        std::fs::write(wt.join("wip.txt"), "half done").unwrap();
+        let list = branches(&dir).await.unwrap();
+        let feat = list.iter().find(|b| b.name == "feat").unwrap();
+        assert!(feat.dirty, "uncommitted work in the worktree must be flagged");
+
+        // Once committed, it is clean again.
+        run(&wt, &["add", "-A"]).await;
+        run(&wt, &["commit", "-qm", "wip"]).await;
+        let list = branches(&dir).await.unwrap();
+        let feat = list.iter().find(|b| b.name == "feat").unwrap();
+        assert!(!feat.dirty, "a committed worktree is clean");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -63,6 +63,23 @@ function LandedBadge({ merged, target }: { merged: boolean; target: string }) {
   );
 }
 
+/**
+ * Warns that a branch's worktree holds uncommitted changes. They are not on the
+ * branch, so a "Merged" badge alone would be misleading: the edits would be
+ * left behind by a combine or lost when the worktree is removed.
+ */
+function DirtyBadge() {
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1 rounded border border-warning-line bg-warning-soft px-1.5 py-0.5 text-[10px] text-warning"
+      title="Uncommitted changes in the worktree — not on the branch, and not included in a merge"
+    >
+      <Icon name="alert" className="h-3 w-3" />
+      Uncommitted
+    </span>
+  );
+}
+
 function ResultNotes({
   note,
   fail,
@@ -207,7 +224,8 @@ export function GitBranches({
                     remote
                   </span>
                 )}
-                <span className="ml-auto">
+                <span className="ml-auto flex items-center gap-1.5">
+                  {b.dirty && <DirtyBadge />}
                   <LandedBadge merged={b.merged} target={target} />
                 </span>
               </div>
@@ -344,7 +362,9 @@ export function GitWorktrees({
   const mergedWorktrees = worktrees.filter((w) => {
     if (w.is_main || !w.branch) return false;
     const info = byBranch.get(w.branch);
-    return Boolean(info?.merged && !info.is_default);
+    // Never bulk-remove a worktree with uncommitted changes: the removal would
+    // be refused anyway, and the leftover work needs the user's eyes first.
+    return Boolean(info?.merged && !info.is_default && !info.dirty);
   });
 
   const removeMerged = () => {
@@ -421,13 +441,15 @@ export function GitWorktrees({
                 <span className="mono truncate text-[12px] text-ink" title={w.path}>
                   {w.branch ?? "(detached)"}
                 </span>
-                {w.is_main ? (
+                {w.is_main && (
                   <span className="shrink-0 rounded bg-well-strong px-1.5 py-0.5 text-[10px] text-ink-muted">
                     main worktree
                   </span>
-                ) : (
-                  <LandedBadge merged={merged} target={target} />
                 )}
+                <span className="ml-auto flex items-center gap-1.5">
+                  {info?.dirty && <DirtyBadge />}
+                  {!w.is_main && <LandedBadge merged={merged} target={target} />}
+                </span>
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-ink-subtle">
                 <span className="mono truncate" title={w.path}>

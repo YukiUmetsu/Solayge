@@ -257,6 +257,10 @@ export function GitModal({
   const error = tab === "local" ? localError : branchError;
   const result = tab === "local" ? local : branch;
   const changed = status?.changed_files ?? [];
+  const dirtyWorktrees = worktrees.filter((w) => {
+    const info = w.branch ? branches.find((b) => b.name === w.branch) : undefined;
+    return Boolean(info?.dirty);
+  }).length;
 
   return (
     <Modal
@@ -289,18 +293,32 @@ export function GitModal({
             onClick={() => setTab("branches")}
           >
             Branches
-            {branches.some((b) => !b.merged && !b.is_default) && (
-              <span
-                className="ml-auto h-1.5 w-1.5 rounded-full bg-warning"
-                title="Some branches are not merged into the default branch"
-              />
-            )}
+            <span className="ml-auto flex items-center gap-1">
+              {branches.some((b) => !b.merged && !b.is_default) && (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-warning"
+                  title="Some branches are not merged into the default branch"
+                />
+              )}
+              {branches.some((b) => b.dirty) && (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-danger"
+                  title="Some branches have uncommitted changes in their worktree"
+                />
+              )}
+            </span>
           </button>
           <button
             className={tabClass(tab === "worktrees")}
             onClick={() => setTab("worktrees")}
           >
             Worktrees
+            {dirtyWorktrees > 0 && (
+              <span
+                className="ml-auto h-1.5 w-1.5 rounded-full bg-danger"
+                title={`${dirtyWorktrees} worktree${dirtyWorktrees === 1 ? "" : "s"} with uncommitted changes`}
+              />
+            )}
           </button>
           <button
             className={tabClass(tab === "git")}

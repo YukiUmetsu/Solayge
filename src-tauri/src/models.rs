@@ -164,6 +164,11 @@ pub struct BranchInfo {
     pub worktree: Option<String>,
     /// A remote-tracking branch `origin/<name>` exists.
     pub has_remote: bool,
+    /// The branch's worktree (or the project folder, for the checked-out
+    /// branch) has uncommitted changes that are not on the branch. Surfaced so a
+    /// branch is never shown as cleanly "merged" while its work sits uncommitted.
+    #[serde(default)]
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

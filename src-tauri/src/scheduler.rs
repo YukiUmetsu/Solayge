@@ -247,8 +247,8 @@ fn resume_reviews(app: &AppHandle) {
 }
 
 async fn step(app: &AppHandle) {
-    reap(app);
-    reap_reviews(app);
+    reap(app).await;
+    reap_reviews(app).await;
     resume_reviews(app);
     reap_stalled(app);
     let (started, mutated) = {
@@ -274,7 +274,7 @@ async fn step(app: &AppHandle) {
 }
 
 /// Reap finished child processes. Returns true if any task was finalized.
-fn reap(app: &AppHandle) -> bool {
+async fn reap(app: &AppHandle) -> bool {
     let st = app.state::<AppState>();
     let mut finished: Vec<(String, Option<i32>)> = Vec::new();
     let now = now();
@@ -316,20 +316,31 @@ fn reap(app: &AppHandle) -> bool {
         return false;
     }
     for (id, code) in finished {
-        finalize(app, &id, code);
+        finalize(app, &id, code).await;
     }
     true
 }
 
-fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
+async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     let st = app.state::<AppState>();
+    // A worktree task whose agent (or shell command) never ran `git commit`
+    // leaves its branch pointing at the commit it started from: the Git view
+    // calls that "merged" while the real edits sit uncommitted and are left out
+    // of any combine. Commit them before success is recorded; a failure here
+    // fails the task rather than reporting a clean success with no work on the
+    // branch.
+    let commit_error = if code == Some(0) {
+        commit_worktree_work(app, id).await.err()
+    } else {
+        None
+    };
     let mut outcome: Option<(String, bool)> = None;
     let mut retry_note: Option<(PathBuf, String)> = None;
     {
         let mut inner = crate::state::lock(&st.inner);
         if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
             if t.status == TaskStatus::Running {
-                let ok = code == Some(0);
+                let ok = code == Some(0) && commit_error.is_none();
                 if ok {
                     t.exit_code = code;
                     t.finished_at = Some(now());
@@ -346,7 +357,10 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
                         }
                     }
                     outcome = Some((t.title.clone(), true));
-                } else if !t.used_fallback && t.fallback_provider.is_some() {
+                } else if commit_error.is_none()
+                    && !t.used_fallback
+                    && t.fallback_provider.is_some()
+                {
                     // Retry once with the backup provider/model.
                     t.used_fallback = true;
                     let backup = t.fallback_provider;
@@ -373,7 +387,9 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
                     t.exit_code = code;
                     t.finished_at = Some(now());
                     t.status = TaskStatus::Failed;
-                    if t.error.is_none() {
+                    if let Some(reason) = commit_error.clone() {
+                        t.error = Some(reason);
+                    } else if t.error.is_none() {
                         t.error = Some(match code {
                             Some(c) => format!("exited with code {c}"),
                             None => "terminated by signal".to_string(),
@@ -387,6 +403,10 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
+
+    if let Some(reason) = &commit_error {
+        log_note(app, id, &format!("Could not commit worktree changes: {reason}"));
+    }
 
     if let Some((path, note)) = retry_note {
         use std::io::Write;
@@ -407,6 +427,99 @@ fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
         };
         notify(app, "Solayge", &body);
     }
+}
+
+/// Commit any uncommitted work in a worktree-isolated task's worktree.
+///
+/// Agents do not reliably run `git commit`, and a shell step often changes files
+/// without committing them. When that happens the task's `devtools/<id>` branch
+/// still points at the commit it started from - an ancestor of the default
+/// branch - so the Git view reports it "merged" even though the real changes are
+/// not on any branch and a combine (which merges committed work only) silently
+/// leaves them out. Called just before a successful task is finalized so the
+/// branch actually carries the work. Returns `Err` only when a commit was needed
+/// and could not be made.
+async fn commit_worktree_work(app: &AppHandle, id: &str) -> Result<(), String> {
+    // Commit only once the task has succeeded or is finalizing (a review runs
+    // after the task has already succeeded, so `Succeeded` is allowed here too).
+    // A cancelled or failed task's partial edits are the user's to inspect, not
+    // ours to commit silently.
+    let status = {
+        let st = app.state::<AppState>();
+        let inner = crate::state::lock(&st.inner);
+        inner.tasks.iter().find(|t| t.id == id).map(|t| t.status)
+    };
+    if !matches!(status, Some(TaskStatus::Running | TaskStatus::Succeeded)) {
+        return Ok(());
+    }
+    let Some(run) = load_run(app, id) else {
+        return Ok(());
+    };
+    if run.isolation != Isolation::Worktree {
+        return Ok(());
+    }
+    let Some(wt) = run.existing_wt.clone().filter(|w| Path::new(w).is_dir()) else {
+        return Ok(());
+    };
+    let env = project_context(app, &run.project).env;
+    match commit_all_changes(Path::new(&wt), &commit_message(&run.title), &env).await {
+        Ok(true) => {
+            log_note(app, &run.id, "Committed uncommitted work in the task's worktree.");
+            Ok(())
+        }
+        Ok(false) => Ok(()),
+        Err(e) => Err(format!("could not commit worktree changes: {e}")),
+    }
+}
+
+/// Stage and commit every change in `worktree`. Returns `Ok(true)` when a commit
+/// was made, `Ok(false)` when the tree was already clean, and `Err` when git
+/// failed. Split out from [`commit_worktree_work`] so it can be tested against a
+/// real repository without an `AppHandle`.
+async fn commit_all_changes(
+    worktree: &Path,
+    message: &str,
+    env: &[(String, String)],
+) -> Result<bool, String> {
+    if !git::has_changes(worktree).await {
+        return Ok(false);
+    }
+    let mut add = git::git_cmd(worktree, &["add", "-A"]);
+    agent::apply_env(&mut add, env);
+    let add = add
+        .output()
+        .await
+        .map_err(|e| format!("git add failed: {e}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let mut commit = git::git_cmd(worktree, &["commit", "-m", message]);
+    agent::apply_env(&mut commit, env);
+    let commit = commit
+        .output()
+        .await
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
+    }
+    Ok(true)
+}
+
+/// A one-line commit message for auto-committed task work: the task title, so
+/// the branch history says what the work was.
+fn commit_message(title: &str) -> String {
+    title
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| "chore: task work".to_string())
 }
 
 /// Whether a succeeded task has fully finished, including its auto review, so
@@ -1264,6 +1377,14 @@ async fn start_opencode_loop(
                 set_task_result(&app, &run.id, summary);
             }
             if ok {
+                // Commit the worktree before success is recorded, so the branch
+                // carries the work (matching the CLI path's `finalize`). A
+                // failure fails the task instead of claiming a clean success
+                // whose changes are not on the branch.
+                if let Err(reason) = commit_worktree_work(&app, &run.id).await {
+                    finish_managed(&app, &run.id, false, Some(reason));
+                    return;
+                }
                 // Queue the auto review, matching the CLI path's `finalize`.
                 queue_review(&app, &run.id);
             }
@@ -2275,7 +2396,7 @@ fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
     emit_state(app);
 }
 
-fn reap_reviews(app: &AppHandle) {
+async fn reap_reviews(app: &AppHandle) {
     let st = app.state::<AppState>();
     let mut finished: Vec<(String, Option<i32>)> = Vec::new();
     let now = now();
@@ -2311,13 +2432,18 @@ fn reap_reviews(app: &AppHandle) {
         }
     }
     for (id, code) in finished {
-        finish_review(app, &id, code);
+        finish_review(app, &id, code).await;
     }
 }
 
-fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
+async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     let st = app.state::<AppState>();
     let text = std::fs::read_to_string(st.review_log_path(id)).unwrap_or_default();
+    // A reviewer in autofix mode may edit files without committing them. Land
+    // those edits on the task's branch before the review is considered settled,
+    // so a dependent cannot start (and the branch cannot read as "merged") while
+    // the fixes sit uncommitted. A failure is surfaced by failing the task.
+    let commit_error = commit_worktree_work(app, id).await.err();
     let mut outcome: Option<(String, ReviewStatus, Option<String>)> = None;
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2344,7 +2470,11 @@ fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
                 r.finished_at = Some(now());
                 pause = r.mode == ReviewMode::Pause && status == ReviewStatus::Issues;
             }
-            if pause {
+            if let Some(reason) = &commit_error {
+                t.status = TaskStatus::Failed;
+                t.error = Some(reason.clone());
+                t.finished_at = Some(now());
+            } else if pause {
                 let msg = summary
                     .clone()
                     .unwrap_or_else(|| "review found issues".into());
@@ -2358,15 +2488,22 @@ fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     crate::state::lock(&st.heartbeat).remove(id);
     st.save();
     emit_state(app);
+    if let Some(reason) = &commit_error {
+        log_note(app, id, &format!("Could not commit reviewer changes: {reason}"));
+    }
     if let Some((title, status, summary)) = outcome {
-        let body = match status {
-            ReviewStatus::Passed => format!("{title} — review passed"),
-            ReviewStatus::Issues => format!(
-                "{title} — review: {}",
-                summary.unwrap_or_else(|| "issues".into())
-            ),
-            ReviewStatus::Failed => format!("{title} — review failed"),
-            _ => format!("{title} — review done"),
+        let body = if commit_error.is_some() {
+            format!("{title} — could not commit reviewer changes")
+        } else {
+            match status {
+                ReviewStatus::Passed => format!("{title} — review passed"),
+                ReviewStatus::Issues => format!(
+                    "{title} — review: {}",
+                    summary.unwrap_or_else(|| "issues".into())
+                ),
+                ReviewStatus::Failed => format!("{title} — review failed"),
+                _ => format!("{title} — review done"),
+            }
         };
         notify(app, "Solayge review", &body);
     }
@@ -2465,9 +2602,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        active_heartbeat_ids, choose_branch, dispatch, local_clock, log_kind, mark_interrupted,
-        now, prepare_worktree, resolve_named_branch, review_clear, reviews_to_start,
-        source_statuses, stall_sweep, supervised_tick, BranchChoice,
+        active_heartbeat_ids, choose_branch, commit_all_changes, commit_message, dispatch,
+        local_clock, log_kind, mark_interrupted, now, prepare_worktree, resolve_named_branch,
+        review_clear, reviews_to_start, source_statuses, stall_sweep, supervised_tick, BranchChoice,
     };
     use std::path::Path;
     use crate::models::{
@@ -3234,6 +3371,50 @@ mod tests {
         assert!(none[0].worktree.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- auto-commit worktree work on success ----
+
+    #[tokio::test]
+    async fn commit_all_changes_lands_dirty_work_on_the_branch_and_skips_clean() {
+        let dir = std::env::temp_dir().join(format!("solayge-autocommit-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+
+        // A clean tree makes no commit.
+        assert!(
+            !commit_all_changes(&dir, "nothing to do", &[]).await.unwrap(),
+            "a clean worktree must not be committed"
+        );
+
+        // Uncommitted edits are staged and committed, leaving the tree clean.
+        std::fs::write(dir.join("feature.txt"), "the work").unwrap();
+        assert!(
+            commit_all_changes(&dir, "Add the feature", &[]).await.unwrap(),
+            "a dirty worktree must be committed"
+        );
+        assert!(
+            !crate::git::has_changes(&dir).await,
+            "the worktree must be clean after the commit"
+        );
+
+        // A second call is a no-op, not an empty commit.
+        assert!(!commit_all_changes(&dir, "again", &[]).await.unwrap());
+
+        // The work is now on the branch, under the task's message.
+        let out = crate::git::git_cmd(&dir, &["log", "-1", "--format=%s"])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Add the feature");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_message_uses_the_first_nonempty_line() {
+        assert_eq!(commit_message("Add dark mode"), "Add dark mode");
+        assert_eq!(commit_message("  \n Fix the parser \n more"), "Fix the parser");
+        assert_eq!(commit_message("   \n  "), "chore: task work");
     }
 
     #[tokio::test]

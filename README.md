@@ -214,7 +214,7 @@ overtaken by the next task.
 
 | Mode | Behaviour |
 | --- | --- |
-| **Worktree** | A dedicated worktree and `devtools/<id>` branch under `<repo>/.dev-tools/worktrees/` (excluded via `.git/info/exclude`). Parallel-safe. |
+| **Worktree** | A dedicated worktree and `devtools/<id>` branch under `<repo>/.dev-tools/worktrees/` (excluded via `.git/info/exclude`). Parallel-safe. When the task succeeds — and again after an auto-fix review that edited files — any uncommitted edits are committed to that branch automatically (message: the task title), so the branch actually carries the work instead of looking "merged" while the changes sit uncommitted. If that commit fails, the task is marked failed rather than reported as a clean success. |
 | **New branch** | Creates a branch in the project folder first. Name it yourself, or leave it blank and the agent suggests a short, unique name. Serialized per project. |
 | **Current branch** | Runs in the project folder on its current branch. Serialized per project. |
 
@@ -380,16 +380,19 @@ syntax-highlighted by file type, with added/deleted lines tinted and marked, and
 - **Branches** lists every local branch (plus remote-only ones) and answers the one
   question a worktree-based workflow can silently get wrong: *has this landed?*
   Each row shows **Merged** or **Not merged** against the default branch, with how
-  far it is ahead/behind and any worktree using it. A branch that has not landed
-  gets a **Merge into `<default>`** button (a local merge into the default branch).
-  Branches can be deleted locally, on the remote, or both at once; **Delete
-  merged** removes every merged branch in one go. The default branch never shows
-  delete controls, and deletions refuse the checked-out branch and any branch a
-  worktree holds.
-- **Worktrees** lists the linked worktrees with the same landing state and offers
-  **Remove worktree**, **Delete branch**, **Delete remote**, and **Delete local +
-  remote**, plus **Remove merged** to clear every merged worktree (and its merged
-  branch) at once.
+  far it is ahead/behind and any worktree using it. A branch whose worktree has
+  uncommitted changes carries an **Uncommitted** badge, so it is never mistaken
+  for cleanly landed while edits sit outside the branch. A branch that has not
+  landed gets a **Merge into `<default>`** button (a local merge into the default
+  branch). Branches can be deleted locally, on the remote, or both at once;
+  **Delete merged** removes every merged branch in one go. The default branch
+  never shows delete controls, and deletions refuse the checked-out branch and
+  any branch a worktree holds.
+- **Worktrees** lists the linked worktrees with the same landing state and the
+  same **Uncommitted** badge, and offers **Remove worktree**, **Delete branch**,
+  **Delete remote**, and **Delete local + remote**, plus **Remove merged** to
+  clear every merged worktree (and its merged branch) at once. A worktree with
+  uncommitted changes is never bulk-removed.
 
 Merging from here checks out the target first, refuses a dirty working tree, and
 aborts (rather than leaving the project mid-conflict) if the merge conflicts.

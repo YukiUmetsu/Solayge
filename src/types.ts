@@ -380,6 +380,8 @@ export interface BranchInfo {
   behind: number;
   worktree?: string | null;
   has_remote: boolean;
+  /** The branch's worktree (or the project folder) has uncommitted changes. */
+  dirty: boolean;
 }
 
 export interface FileDiff {
