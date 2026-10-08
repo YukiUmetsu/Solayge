@@ -335,6 +335,9 @@ async fn step(app: &AppHandle) {
     // Keep the heartbeat map bounded: finished and deleted tasks must not leave
     // entries behind forever.
     prune_heartbeat(app);
+    // Project the latest task state into analytics run records. Idempotent and a
+    // no-op unless something actually changed.
+    crate::analytics::sync_runs(app);
     for id in started {
         let a = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -1477,6 +1480,17 @@ async fn start_opencode_loop(
             Ok(m) => m,
             Err(_) => continue,
         };
+        // Capture model usage (tokens + provider-reported cost) from finalized
+        // assistant messages. Idempotent, so re-polling the transcript — or
+        // resuming a session after a restart — never double-counts.
+        crate::analytics::record_opencode_messages(
+            &app,
+            &run.id,
+            &run.project,
+            &format!("{}:{}", run.id, run.attempts),
+            &session,
+            &msgs,
+        );
         // Log each completed assistant message once.
         for m in &msgs {
             if m.get("type").and_then(|v| v.as_str()) != Some("assistant") {
@@ -1868,6 +1882,9 @@ fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
     let title = ask.title.clone();
     // The log lines are derived before the ask is moved onto the task.
     let lines = ask_log_lines(&ask);
+    // Keep a copy for the interaction record; analytics must not run while the
+    // state lock is held (it re-acquires it), so record after attaching.
+    let ask_for_analytics = ask.clone();
     // The concrete thing being requested (directory / command / URL), so the
     // notification says *what* and *where*, not just "permission".
     let detail = if ask.resources.is_empty() {
@@ -1891,6 +1908,7 @@ fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
     if !attached {
         return;
     }
+    crate::analytics::record_ask_surfaced(app, id, &ask_for_analytics);
     for line in &lines {
         log_note(app, id, line);
     }
@@ -1905,17 +1923,20 @@ fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
 
 fn clear_task_ask(app: &AppHandle, id: &str) {
     let st = app.state::<AppState>();
-    let changed = {
+    let ask_id = {
         let mut inner = crate::state::lock(&st.inner);
         match inner.tasks.iter_mut().find(|t| t.id == id) {
             Some(t) if t.ask.is_some() => {
+                let ask_id = t.ask.as_ref().map(|a| a.id.clone());
                 t.ask = None;
-                true
+                ask_id
             }
-            _ => false,
+            _ => None,
         }
     };
-    if changed {
+    if let Some(ask_id) = ask_id {
+        // The task stopped with the ask unanswered: close the interaction.
+        crate::analytics::record_ask_resolved(app, id, &ask_id, "canceled");
         st.save();
         emit_state(app);
     }

@@ -6,7 +6,7 @@ use tauri::{AppHandle, Manager};
 use crate::models::*;
 use crate::scheduler::{emit_state, now};
 use crate::state::AppState;
-use crate::{agent, cache, git, opencode, secrets};
+use crate::{agent, analytics, cache, git, opencode, secrets};
 
 #[tauri::command]
 pub fn get_snapshot(app: AppHandle) -> Snapshot {
@@ -1187,9 +1187,10 @@ pub async fn answer_task(
         .ok_or_else(|| "the question is not attached to a live session".to_string())?;
 
     let conn = crate::opencode_server::ensure_server().await?;
-    match ask.kind {
+    let outcome = match ask.kind {
         AskKind::Question => {
             crate::opencode_server::reply_form(&conn, &session, &ask.id, answer).await?;
+            "answered"
         }
         AskKind::Permission => {
             let decision = answer
@@ -1198,8 +1199,13 @@ pub async fn answer_task(
                 .unwrap_or("reject");
             crate::opencode_server::reply_permission(&conn, &session, &ask.id, decision, None)
                 .await?;
+            if decision == "reject" {
+                "rejected"
+            } else {
+                "answered"
+            }
         }
-    }
+    };
 
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1209,6 +1215,7 @@ pub async fn answer_task(
             }
         }
     }
+    crate::analytics::record_ask_resolved(&app, &task_id, &ask.id, outcome);
     st.save();
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
@@ -1540,10 +1547,13 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, S
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = settings;
         next.cache_retention_days = next.cache_retention_days.clamp(0, 3650);
+        next.analytics_retention_days = next.analytics_retention_days.clamp(0, 3650);
         inner.settings = next;
     }
     st.save();
     cache::prune(&st);
+    // Apply a shortened analytics retention immediately.
+    analytics::prune(&app);
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
 }
@@ -1928,6 +1938,203 @@ pub async fn list_models(
         };
     }
     Ok(models)
+}
+
+// ---- analytics ----
+//
+// Thin command wrappers over `crate::analytics`. All queries are read-only with
+// respect to task state; nothing here can run, cancel, or delete a task.
+
+fn analytics_project_names(app: &AppHandle) -> HashMap<String, String> {
+    let st = app.state::<AppState>();
+    let inner = crate::state::lock(&st.inner);
+    inner
+        .projects
+        .iter()
+        .map(|p| (p.path.clone(), p.name.clone()))
+        .collect()
+}
+
+#[tauri::command]
+pub fn get_analytics_overview(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::AnalyticsOverview {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::overview(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_timeseries(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::TimeSeriesPoint> {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::time_series(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_projects(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::ProjectMetric> {
+    let names = analytics_project_names(&app);
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::projects(&store, &filters, &names)
+}
+
+#[tauri::command]
+pub fn get_analytics_models(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::ModelMetric> {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::models(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_task_detail(
+    app: AppHandle,
+    task_id: String,
+) -> Option<analytics::TaskAnalyticsDetail> {
+    let st = app.state::<AppState>();
+    // Copy the task out first, then lock analytics — never hold the state lock
+    // and the analytics lock in the opposite order to the collector.
+    let task = {
+        let inner = crate::state::lock(&st.inner);
+        inner
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .or_else(|| {
+                inner
+                    .deleted_tasks
+                    .iter()
+                    .map(|d| &d.task)
+                    .find(|t| t.id == task_id)
+            })
+            .cloned()
+    };
+    let store = crate::state::lock(&st.analytics);
+    analytics::task_detail(&store, &task_id, task.as_ref())
+}
+
+#[tauri::command]
+pub fn get_analytics_collection_status(app: AppHandle) -> analytics::CollectionStatus {
+    let st = app.state::<AppState>();
+    let (enabled, retention_days, capture_error_examples) = {
+        let inner = crate::state::lock(&st.inner);
+        (
+            inner.settings.analytics_enabled,
+            inner.settings.analytics_retention_days,
+            inner.settings.analytics_capture_error_examples,
+        )
+    };
+    let store = crate::state::lock(&st.analytics);
+    analytics::collection_status(&store, enabled, retention_days, capture_error_examples)
+}
+
+#[tauri::command]
+pub fn get_analytics_reliability(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::ReliabilityResult {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::reliability(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_interactions(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::InteractionResult {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::interactions(&store, &filters)
+}
+
+#[tauri::command]
+pub fn clear_analytics(app: AppHandle) -> analytics::CollectionStatus {
+    analytics::clear(&app);
+    get_analytics_collection_status(app)
+}
+
+/// Export the current filters' project metrics to `path` (user-chosen, absolute).
+/// CSV guards against spreadsheet formula injection; JSON is inert.
+#[tauri::command]
+pub fn export_analytics(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+    format: String,
+    path: String,
+) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("no export path given".into());
+    }
+    let target = PathBuf::from(path);
+    if !target.is_absolute() {
+        return Err("export path must be absolute".into());
+    }
+    if let Some(parent) = target.parent() {
+        if !parent.is_dir() {
+            return Err("export folder does not exist".into());
+        }
+    }
+    let names = analytics_project_names(&app);
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    let generated_at_ms = analytics::now_ms();
+    let bytes = match format.as_str() {
+        "csv" => analytics::export_csv(&store, &filters, &names, generated_at_ms).into_bytes(),
+        "json" => {
+            let payload = serde_json::json!({
+                "generated_at_ms": generated_at_ms,
+                "currency": "USD",
+                "cost_basis": "provider_reported_not_a_bill",
+                "filters": filters,
+                "overview": analytics::overview(&store, &filters),
+                "projects": analytics::projects(&store, &filters, &names),
+                "models": analytics::models(&store, &filters),
+                "reliability": analytics::reliability(&store, &filters),
+                "interactions": analytics::interactions(&store, &filters),
+            });
+            serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("unsupported export format: {other}")),
+    };
+    // Atomic write: a crash mid-export must not leave a truncated file. On
+    // Windows `rename` refuses to overwrite an existing destination, so replace
+    // the previous export explicitly before the final rename.
+    let tmp = target.with_extension(format!(
+        "{}tmp",
+        target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("{e}."))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("could not write export: {e}"))?;
+    if let Err(first) = std::fs::rename(&tmp, &target) {
+        if target.exists() {
+            // Drop the stale export, then retry once; if the retry fails too,
+            // leave the temp file in place rather than losing the new data.
+            let _ = std::fs::remove_file(&target);
+            if let Err(e) = std::fs::rename(&tmp, &target) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("could not finalize export: {e}"));
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not finalize export: {first}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

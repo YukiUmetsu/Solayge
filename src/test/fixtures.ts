@@ -30,6 +30,9 @@ export function makeSettings(overrides: Partial<Settings> = {}): Settings {
       review_sound: null,
       attention_sound: null,
     },
+    analytics_enabled: true,
+    analytics_retention_days: 90,
+    analytics_capture_error_examples: false,
     ...overrides,
   };
 }

@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 
 mod agent;
+mod analytics;
 mod cache;
 mod commands;
 mod errorlog;
@@ -125,13 +126,25 @@ pub fn run() {
             commands::clear_error_log,
             commands::environment_check,
             commands::list_models,
+            commands::get_analytics_overview,
+            commands::get_analytics_timeseries,
+            commands::get_analytics_projects,
+            commands::get_analytics_models,
+            commands::get_analytics_reliability,
+            commands::get_analytics_interactions,
+            commands::get_analytics_task_detail,
+            commands::get_analytics_collection_status,
+            commands::clear_analytics,
+            commands::export_analytics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Don't leave the opencode server running after the app quits.
+                // Don't leave the opencode server running after the app quits,
+                // and flush any analytics still in memory.
                 opencode_server::shutdown();
+                analytics::flush(app);
             }
         });
 }

@@ -41,6 +41,7 @@ import { ShipModal } from "./components/ShipModal";
 import { MergeModal } from "./components/MergeModal";
 import { GitModal } from "./components/GitModal";
 import { AttentionPrompt } from "./components/AttentionPrompt";
+import { AnalyticsPage } from "./components/analytics/AnalyticsPage";
 import { useNow } from "./lib/useNow";
 
 const MAX_LOG_LINES = 4000;
@@ -164,6 +165,10 @@ export default function App() {
   const [showPast, setShowPast] = useState(false);
   const [remote, setRemote] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Which top-level surface the sidebar is driving: the project workspace or the
+  // cross-project analytics page.
+  const [view, setView] = useState<"workspace" | "analytics">("workspace");
+  const [analyticsProject, setAnalyticsProject] = useState<string | null>(null);
   const [dismissedAskIds, setDismissedAskIds] = useState<string[]>([]);
   // Ask id -> unix seconds until which its popup stays hidden ("remind me later").
   const [snoozeUntil, setSnoozeUntil] = useState<Record<string, number>>({});
@@ -485,6 +490,36 @@ export default function App() {
     }
   }
 
+  function openAnalytics() {
+    setAnalyticsProject(null);
+    setView("analytics");
+  }
+
+  function openProjectAnalytics(path: string) {
+    setAnalyticsProject(path);
+    setView("analytics");
+  }
+
+  function openProjectFromAnalytics(path: string) {
+    setSelectedProject(path);
+    setView("workspace");
+  }
+
+  function openTaskFromAnalytics(projectPath: string, taskId: string) {
+    setSelectedProject(projectPath);
+    setSelectedTaskId(taskId);
+    setRightOpen(true);
+    setView("workspace");
+  }
+
+  // Choosing a project from the sidebar always returns to the workspace; being on
+  // the Analytics page must not swallow the selection (the analytics view is a
+  // separate surface, not a project).
+  function selectProject(path: string) {
+    setSelectedProject(path);
+    setView("workspace");
+  }
+
   if (!snapshot) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-ink-subtle">
@@ -501,13 +536,16 @@ export default function App() {
             snapshot={snapshot}
             selected={selectedProject}
             width={leftWidth}
-            onSelect={setSelectedProject}
+            onSelect={selectProject}
             onAdd={addProject}
             onRemove={removeProject}
             onConcurrency={(n) => void runAction(() => api.setConcurrency(n))}
             onSettings={() => setShowSettings(true)}
             onReorder={(paths) => void runAction(() => api.reorderProjects(paths))}
             onCollapse={() => setLeftOpen(false)}
+            analyticsActive={view === "analytics"}
+            onAnalytics={openAnalytics}
+            onProjectAnalytics={openProjectAnalytics}
           />
           <ResizeHandle
             side="left"
@@ -522,10 +560,17 @@ export default function App() {
         {!leftOpen && (
           <EdgeTab side="left" onClick={() => setLeftOpen(true)} />
         )}
-        {!rightOpen && project && (
+        {view === "workspace" && !rightOpen && project && (
           <EdgeTab side="right" onClick={() => setRightOpen(true)} />
         )}
-        {project ? (
+        {view === "analytics" ? (
+          <AnalyticsPage
+            snapshot={snapshot}
+            initialProject={analyticsProject}
+            onOpenTask={openTaskFromAnalytics}
+            onOpenProject={openProjectFromAnalytics}
+          />
+        ) : project ? (
           <>
             <ProjectHeader
               project={project}

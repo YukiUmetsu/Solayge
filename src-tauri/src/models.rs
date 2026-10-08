@@ -718,6 +718,10 @@ fn default_retention_days() -> i64 {
     30
 }
 
+fn default_analytics_retention() -> i64 {
+    90
+}
+
 fn default_true() -> bool {
     true
 }
@@ -877,6 +881,18 @@ pub struct Settings {
     /// Desktop notification + sound preferences.
     #[serde(default)]
     pub notifications: NotificationSettings,
+    /// Collect local, content-free analytics (task/run lifecycle, model usage,
+    /// tokens, provider-reported cost). On by default; disabling stops new
+    /// collection without deleting existing records.
+    #[serde(default = "default_true")]
+    pub analytics_enabled: bool,
+    /// How long analytics records are kept, in days. `0` keeps forever.
+    #[serde(default = "default_analytics_retention")]
+    pub analytics_retention_days: i64,
+    /// Store a redacted, length-bounded sample alongside each error event.
+    /// Off by default: error summaries can contain sensitive fragments.
+    #[serde(default)]
+    pub analytics_capture_error_examples: bool,
 }
 
 impl Default for Settings {
@@ -896,6 +912,9 @@ impl Default for Settings {
             command_templates: CommandTemplates::default(),
             secret_store: None,
             notifications: NotificationSettings::default(),
+            analytics_enabled: true,
+            analytics_retention_days: default_analytics_retention(),
+            analytics_capture_error_examples: false,
         }
     }
 }

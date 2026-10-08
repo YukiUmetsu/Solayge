@@ -19,6 +19,15 @@ import type {
   Snapshot,
   TaskPatch,
   Worktree,
+  AnalyticsFilters,
+  AnalyticsOverview,
+  AnalyticsTimeSeriesPoint,
+  AnalyticsProjectMetric,
+  AnalyticsModelMetric,
+  AnalyticsTaskDetail,
+  AnalyticsCollectionStatus,
+  ReliabilityResult,
+  InteractionResult,
 } from "./types";
 
 export const api = {
@@ -155,4 +164,29 @@ export const api = {
 
   // ---- preflight ----
   environmentCheck: () => invoke<EnvironmentStatus>("environment_check"),
+
+  // ---- analytics ----
+  analyticsOverview: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsOverview>("get_analytics_overview", { filters }),
+  analyticsTimeseries: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsTimeSeriesPoint[]>("get_analytics_timeseries", { filters }),
+  analyticsProjects: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsProjectMetric[]>("get_analytics_projects", { filters }),
+  analyticsModels: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsModelMetric[]>("get_analytics_models", { filters }),
+  analyticsReliability: (filters: AnalyticsFilters) =>
+    invoke<ReliabilityResult>("get_analytics_reliability", { filters }),
+  analyticsInteractions: (filters: AnalyticsFilters) =>
+    invoke<InteractionResult>("get_analytics_interactions", { filters }),
+  analyticsTaskDetail: (taskId: string) =>
+    invoke<AnalyticsTaskDetail | null>("get_analytics_task_detail", { taskId }),
+  analyticsCollectionStatus: () =>
+    invoke<AnalyticsCollectionStatus>("get_analytics_collection_status"),
+  clearAnalytics: () =>
+    invoke<AnalyticsCollectionStatus>("clear_analytics"),
+  exportAnalytics: (
+    filters: AnalyticsFilters,
+    format: "csv" | "json",
+    path: string,
+  ) => invoke<void>("export_analytics", { filters, format, path }),
 };

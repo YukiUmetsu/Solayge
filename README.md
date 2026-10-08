@@ -124,6 +124,20 @@ Solayge turns that graph into something you can see and control:
   still queued or running is shown as **In review** (blue, with a pulsing dot)
   and is not counted as done until the review settles.
 - **Desktop notifications** when a task finishes, fails, or requests permission.
+- **Analytics** — a pinned **Analytics** item in the sidebar opens a local-only,
+  cross-project view (last 7/30/90 days or all time) with four tabs: **Overview**,
+  **Projects & Models**, **Reliability**, and **Interactions**. It shows task
+  outcomes and durations, model token usage and provider-reported cost, categorized
+  and fingerprinted error events with recovery/retry/first-pass rates, and the
+  structured questions and permission prompts that pause agents, with human-wait
+  and autonomy metrics. Project and model filters, sortable comparisons, per-task
+  drill-down, and CSV/JSON export are included. A project row also offers **View
+  analytics** to open it prefiltered. Token and cost figures come from opencode
+  agent runs and are labelled as estimates — never as a charge; shell, git, merge,
+  review, and other providers report no usage, which the view shows as
+  *unavailable* rather than zero. Errors and interactions store only categories,
+  fingerprints, and timing — never prompts, commands, or transcripts; redacted
+  error samples are opt-in in Settings.
 
 ### Projects
 
@@ -565,6 +579,10 @@ the previous failure stays readable.
   - Linux: `~/.local/share/com.solayge.desktop/`
 - Per-task logs: `<app data dir>/logs/<task-id>.log`
 - Scheduler/crash log: `<app data dir>/logs/scheduler.log`
+- Analytics records: `<app data dir>/analytics.json` (task/run lifecycle, model
+  usage, categorized errors, and structured interactions; controlled in
+  **Settings → Advanced → Analytics**, where you can turn collection off, opt in
+  to redacted error samples, set retention, or clear history)
 - Worktrees: `<project>/.dev-tools/worktrees/<short-id>` (branch `devtools/<short-id>`)
 - Secrets: never in `state.json` — either the OS keychain (macOS/Windows) or
   `<app data dir>/secrets.json` (AES-256-GCM; key in `secrets.key`, mode `0600`)

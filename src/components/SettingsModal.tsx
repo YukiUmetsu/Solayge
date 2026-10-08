@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentConfig,
+  AnalyticsCollectionStatus,
   CacheStats,
   CommandTemplates,
   EnvironmentStatus,
@@ -610,8 +611,140 @@ function AdvancedTab({
   refreshErrorLog: () => Promise<void>;
   clearErrors: () => Promise<void>;
 }) {
+  const [analyticsStatus, setAnalyticsStatus] =
+    useState<AnalyticsCollectionStatus | null>(null);
+  const [clearingAnalytics, setClearingAnalytics] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  useEffect(() => {
+    api
+      .analyticsCollectionStatus()
+      .then(setAnalyticsStatus)
+      .catch(() => {});
+  }, []);
+
+  async function clearAnalyticsHistory() {
+    setClearingAnalytics(true);
+    try {
+      setAnalyticsStatus(await api.clearAnalytics());
+      setConfirmClear(false);
+    } finally {
+      setClearingAnalytics(false);
+    }
+  }
+
+  const analyticsEmpty =
+    !analyticsStatus ||
+    (analyticsStatus.usage_count === 0 &&
+      analyticsStatus.run_count === 0 &&
+      (analyticsStatus.error_count ?? 0) === 0 &&
+      (analyticsStatus.interaction_count ?? 0) === 0);
+
   return (
     <>
+      <section className="space-y-2">
+        <div className="flex items-center justify-between">
+          <SectionLabel icon="chart">Analytics</SectionLabel>
+          <SavedPill show={flash === "analytics"} />
+        </div>
+        <div className="rounded-lg border border-line bg-well p-3">
+          <ToggleRow
+            label="Collect local analytics"
+            hint="Task/run lifecycle, model, token, and provider-reported cost. Stored only on this machine; no prompts, code, or terminal output."
+            checked={settings.analytics_enabled}
+            disabled={busy}
+            onChange={(v) => void persist({ analytics_enabled: v }, "analytics")}
+          />
+          <div className="mt-1 flex items-center justify-between gap-3 border-t border-line px-3 py-2.5 text-[12px]">
+            <span className="text-ink-muted">Keep analytics history for</span>
+            <select
+              className="select !w-auto"
+              disabled={busy}
+              value={settings.analytics_retention_days}
+              onChange={(e) =>
+                void persist(
+                  { analytics_retention_days: Number(e.target.value) },
+                  "analytics",
+                )
+              }
+            >
+              {RETENTION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="mt-1 border-t border-line">
+            <ToggleRow
+              label="Capture redacted error examples"
+              hint="Store a short, redacted sample beside each categorized error. Off by default; paths, URLs, ids, and secrets are stripped before saving."
+              checked={settings.analytics_capture_error_examples}
+              disabled={busy}
+              onChange={(v) =>
+                void persist({ analytics_capture_error_examples: v }, "analytics")
+              }
+            />
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-[11px] text-ink-subtle">
+              {analyticsStatus
+                ? `${analyticsStatus.usage_count} usage · ${analyticsStatus.run_count} runs · ${analyticsStatus.error_count ?? 0} errors · ${analyticsStatus.interaction_count ?? 0} interactions`
+                : "—"}
+            </span>
+            {confirmClear ? (
+              <div className="flex items-center gap-2">
+                <button
+                  className="btn btn-ghost"
+                  disabled={clearingAnalytics}
+                  onClick={() => setConfirmClear(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-danger"
+                  disabled={clearingAnalytics}
+                  onClick={() => void clearAnalyticsHistory()}
+                >
+                  <Icon name="trash" className="h-3.5 w-3.5" />
+                  Delete all analytics
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-danger"
+                disabled={busy || clearingAnalytics || analyticsEmpty}
+                onClick={() => setConfirmClear(true)}
+              >
+                <Icon name="trash" className="h-3.5 w-3.5" />
+                Clear analytics history
+              </button>
+            )}
+          </div>
+          {confirmClear && (
+            <p className="mt-2 text-[11px] leading-relaxed text-danger">
+              This permanently deletes every collected analytics record. Projects,
+              tasks, and their logs are untouched.
+            </p>
+          )}
+          <p className="mt-3 text-[11px] leading-relaxed text-ink-subtle">
+            Turning collection off stops new records without deleting existing
+            ones. Clearing history resets only analytics; projects, tasks, and
+            their logs are untouched.
+          </p>
+          {analyticsStatus && analyticsStatus.usage_count > 0 && (
+            <p className="mt-1 text-[11px] text-ink-subtle">
+              Telemetry quality: {analyticsStatus.usage_complete} complete,{" "}
+              {analyticsStatus.usage_partial} partial usage records
+              {analyticsStatus.capture_error_examples
+                ? " · redacted error examples on"
+                : ""}
+              .
+            </p>
+          )}
+        </div>
+      </section>
+
       <section className="space-y-2">
         <div className="flex items-center justify-between">
           <SectionLabel icon="trash">Cache</SectionLabel>

@@ -35,6 +35,9 @@ pub struct AppState {
     /// Last unix second a timestamp was emitted into a log (keyed by task id, or
     /// `review-<id>`), so a timestamp is only written after a quiet gap.
     pub log_stamp: Mutex<HashMap<String, i64>>,
+    /// Local-first analytics records (runs + model usage). Persisted separately
+    /// from `state.json` so task-history pruning/rewrites do not touch it.
+    pub analytics: Mutex<crate::analytics::AnalyticsStore>,
 }
 
 impl AppState {
@@ -51,6 +54,16 @@ impl AppState {
         if migrated || recovered || backfilled {
             let _ = save(&data_dir, &state);
         }
+        // Load analytics and drop anything past the retention window before the
+        // scheduler can add more.
+        let mut analytics = crate::analytics::load_store(&data_dir);
+        if crate::analytics::retain_recent(
+            &mut analytics,
+            state.settings.analytics_retention_days,
+            crate::analytics::now_ms(),
+        ) {
+            let _ = crate::analytics::save_store(&data_dir, &analytics);
+        }
         let st = AppState {
             data_dir,
             inner: Mutex::new(state),
@@ -61,6 +74,7 @@ impl AppState {
             models: Mutex::new(HashMap::new()),
             heartbeat: Mutex::new(HashMap::new()),
             log_stamp: Mutex::new(HashMap::new()),
+            analytics: Mutex::new(analytics),
         };
         // Drop cache that is already past its retention window.
         crate::cache::prune(&st);
@@ -255,7 +269,7 @@ fn migrate_legacy(data_dir: &Path, state: &mut PersistedState) -> bool {
 
         // Preserve file-store secrets. Keychain/DPAPI items are keyed by
         // service + account (not the identifier), so they carry over on their own.
-        for name in ["secrets.json", "secrets.key", "secrets.win.json"] {
+        for name in ["secrets.json", "secrets.key", "secrets.win.json", "analytics.json"] {
             let from = legacy.join(name);
             let to = data_dir.join(name);
             if from.is_file() && !to.exists() {
