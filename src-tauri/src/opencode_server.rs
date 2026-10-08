@@ -267,15 +267,38 @@ fn list(v: &Value) -> Vec<Value> {
     data(v).as_array().cloned().unwrap_or_default()
 }
 
-/// The terminal outcome of a session, read from its `idle` message.
+/// The terminal outcome of a session, read from its most recent `idle` message.
+///
+/// A session that is continued has several `idle` messages (one per turn), so
+/// the newest one must win. Messages arrive newest-first, but exports are
+/// oldest-first, so pick by completion time and fall back to position rather
+/// than trusting iteration order.
 pub fn session_outcome(messages: &[Value]) -> Option<String> {
-    messages.iter().rev().find_map(|m| {
-        if m.get("type").and_then(Value::as_str) == Some("idle") {
-            m.get("outcome").and_then(Value::as_str).map(str::to_string)
-        } else {
-            None
+    let mut best: Option<(i64, usize, String)> = None;
+    for (i, m) in messages.iter().enumerate() {
+        if m.get("type").and_then(Value::as_str) != Some("idle") {
+            continue;
         }
-    })
+        let Some(outcome) = m.get("outcome").and_then(Value::as_str) else {
+            continue;
+        };
+        let at = m
+            .get("time")
+            .and_then(|t| t.get("completed").or_else(|| t.get("created")))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let better = match &best {
+            None => true,
+            // A later time wins; on a tie the earlier index (newer-first) wins.
+            Some((previous, previous_i, _)) => {
+                at > *previous || (at == *previous && i < *previous_i)
+            }
+        };
+        if better {
+            best = Some((at, i, outcome.to_string()));
+        }
+    }
+    best.map(|(_, _, outcome)| outcome)
 }
 
 /// Collapse whitespace so a tool line stays a single line.
@@ -656,6 +679,34 @@ mod tests {
         ];
         assert_eq!(session_outcome(&msgs).as_deref(), Some("succeeded"));
         assert_eq!(session_outcome(&[]), None);
+    }
+
+    #[test]
+    fn a_continued_session_takes_the_newest_idle() {
+        // Newest-first: the top idle is the latest turn and must win over the
+        // older one, even though a naive `rev().find` would pick the oldest.
+        let newest_first = vec![
+            json!({"type":"idle","outcome":"failed","time":{"completed":200}}),
+            json!({"type":"assistant","content":[]}),
+            json!({"type":"idle","outcome":"succeeded","time":{"completed":100}}),
+        ];
+        assert_eq!(session_outcome(&newest_first).as_deref(), Some("failed"));
+
+        // Oldest-first must give the same answer by time.
+        let oldest_first = vec![
+            json!({"type":"idle","outcome":"succeeded","time":{"completed":100}}),
+            json!({"type":"assistant","content":[]}),
+            json!({"type":"idle","outcome":"failed","time":{"completed":200}}),
+        ];
+        assert_eq!(session_outcome(&oldest_first).as_deref(), Some("failed"));
+
+        // With no timestamps, position is the tiebreaker: the earlier index is
+        // the newer turn in the server's newest-first ordering.
+        let no_times = vec![
+            json!({"type":"idle","outcome":"failed"}),
+            json!({"type":"idle","outcome":"succeeded"}),
+        ];
+        assert_eq!(session_outcome(&no_times).as_deref(), Some("failed"));
     }
 
     #[test]

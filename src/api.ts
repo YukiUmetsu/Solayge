@@ -84,8 +84,8 @@ export const api = {
     invoke<Snapshot>("start_task_now", { taskId }),
   cancel: (taskId: string) => invoke<Snapshot>("cancel_task", { taskId }),
   retry: (taskId: string) => invoke<Snapshot>("retry_task", { taskId }),
-  retryReview: (taskId: string) =>
-    invoke<Snapshot>("retry_review", { taskId }),
+  retryReview: (taskId: string, prompt?: string | null) =>
+    invoke<Snapshot>("retry_review", { taskId, prompt: prompt ?? null }),
   answerTask: (taskId: string, answer: Record<string, unknown>) =>
     invoke<Snapshot>("answer_task", { taskId, answer }),
   sendTaskMessage: (taskId: string, text: string) =>

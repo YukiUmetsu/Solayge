@@ -710,6 +710,7 @@ fn dispatch(st: &AppState) -> (Vec<String>, bool) {
         inner.tasks[i].error = None;
         inner.tasks[i].exit_code = None;
         inner.tasks[i].last_permission = None;
+        inner.tasks[i].attempts = inner.tasks[i].attempts.saturating_add(1);
         if serial {
             shared_active.insert(project);
         }
@@ -807,6 +808,8 @@ struct TaskRun {
     new_branch: Option<String>,
     /// The branch recorded on a previous run, if any (for reuse on retry).
     branch: Option<String>,
+    /// How many times this task has been dispatched, including the current run.
+    attempts: u32,
 }
 
 /// A project's run-time context: encrypted env vars and its system prompt.
@@ -839,6 +842,7 @@ fn load_run(app: &AppHandle, id: &str) -> Option<TaskRun> {
         branch_mode: t.branch_mode,
         new_branch: t.new_branch.clone(),
         branch: t.branch.clone(),
+        attempts: t.attempts,
     })
 }
 
@@ -1258,7 +1262,15 @@ async fn start_task(app: AppHandle, id: String) {
     if run.kind == TaskKind::Agent && run.provider == Provider::Opencode {
         match opencode_setup(&app, &run).await {
             Ok((conn, session)) => {
-                start_opencode_loop(app, run, conn, session).await;
+                start_opencode_loop(
+                    app,
+                    run,
+                    conn,
+                    session,
+                    OpenCodeResume::default(),
+                    true,
+                )
+                .await;
                 return;
             }
             Err(e) => {
@@ -1317,7 +1329,7 @@ async fn start_agent_task(app: AppHandle, run: TaskRun) {
         current_branch: branch.as_deref(),
         env: &ctx.env,
     };
-    let base = agent::with_access_planning(&run.prompt);
+    let base = agent::compose_task_prompt(&run.prompt, run.attempts);
     let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
 
     let mut cmd = match agent::build_command(
@@ -1358,7 +1370,7 @@ async fn opencode_setup(
         current_branch: branch.as_deref(),
         env: &ctx.env,
     };
-    let base = agent::with_access_planning(&run.prompt);
+    let base = agent::compose_task_prompt(&run.prompt, run.attempts);
     let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
 
     let conn = opencode_server::ensure_server().await?;
@@ -1370,9 +1382,12 @@ async fn opencode_setup(
     )
     .await?;
     log_note(app, &run.id, &format!("opencode session {session}"));
+    // Send the initial prompt before recording the session: if the send fails
+    // the run falls back to the CLI, and a session that never received the task
+    // must not be offered to the user as resumable.
+    opencode_server::prompt(&conn, &session, &prompt).await?;
     // Remember the session so the user can send the agent messages while it runs.
     set_task_session(app, &run.id, &session);
-    opencode_server::prompt(&conn, &session, &prompt).await?;
     Ok((conn, session))
 }
 
@@ -1385,16 +1400,63 @@ fn set_task_session(app: &AppHandle, id: &str, session: &str) {
     }
 }
 
+/// Transcript state captured before resuming a finished opencode session. The
+/// watcher uses it to stream only new output and to ignore the session's
+/// previous `idle` message, so sending a follow-up does not immediately
+/// re-finalize the task on the old turn's outcome.
+#[derive(Default)]
+pub(crate) struct OpenCodeResume {
+    /// Ids of assistant messages already written to the log.
+    logged: HashSet<String>,
+    /// How many `idle` messages the session already had.
+    idle_baseline: usize,
+}
+
+impl OpenCodeResume {
+    /// Snapshot the parts of a session transcript that must not be replayed.
+    fn from_messages(messages: &[serde_json::Value]) -> Self {
+        let type_of = |m: &serde_json::Value| {
+            m.get("type").and_then(serde_json::Value::as_str).map(str::to_string)
+        };
+        let logged = messages
+            .iter()
+            .filter(|m| type_of(m).as_deref() == Some("assistant"))
+            .filter(|m| m.get("time").and_then(|t| t.get("completed")).is_some())
+            .filter_map(|m| {
+                m.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let idle_baseline = messages
+            .iter()
+            .filter(|m| type_of(m).as_deref() == Some("idle"))
+            .count();
+        Self {
+            logged,
+            idle_baseline,
+        }
+    }
+}
+
 /// Poll an opencode session: stream output to the task log, surface questions
-/// and permission requests, and finalize when the session goes idle.
+/// and permission requests, and finalize when the session goes idle. `resume`
+/// is empty for a fresh run and pre-seeded when a finished task is continued so
+/// the previous turn is not replayed; `review_on_success` is false when the
+/// continuation's review already settled, so it is not run again.
 async fn start_opencode_loop(
     app: AppHandle,
     run: TaskRun,
     conn: opencode_server::Connection,
     session: String,
+    resume: OpenCodeResume,
+    review_on_success: bool,
 ) {
-    use std::collections::HashSet;
-    let mut logged: HashSet<String> = HashSet::new();
+    let OpenCodeResume {
+        logged,
+        idle_baseline,
+    } = resume;
+    let mut logged = logged;
     let mut surfaced: Option<String> = None;
 
     loop {
@@ -1480,6 +1542,16 @@ async fn start_opencode_loop(
             }
         }
 
+        // Only a *new* idle ends this turn: on a resumed session the previous
+        // turn's idle is still in the transcript and must be ignored, otherwise
+        // the task would finalize the moment a follow-up is sent.
+        let idle_now = msgs
+            .iter()
+            .filter(|m| m.get("type").and_then(|v| v.as_str()) == Some("idle"))
+            .count();
+        if idle_now <= idle_baseline {
+            continue;
+        }
         if let Some(outcome) = opencode_server::session_outcome(&msgs) {
             clear_task_ask(&app, &run.id);
             let ok = outcome == "succeeded";
@@ -1498,7 +1570,11 @@ async fn start_opencode_loop(
                     return;
                 }
                 // Queue the auto review, matching the CLI path's `finalize`.
-                queue_review(&app, &run.id);
+                // A continuation after the review already settled does not
+                // re-review; the user can re-run it from the Review tab.
+                if review_on_success {
+                    queue_review(&app, &run.id);
+                }
             }
             finish_managed(
                 &app,
@@ -1513,6 +1589,114 @@ async fn start_opencode_loop(
             return;
         }
     }
+}
+
+/// Whether continuing a finished task should run its review again. A review that
+/// already reached a verdict (passed, or found issues) has been consumed and is
+/// not re-run; one that never completed still runs when the continuation
+/// succeeds. Pure, so the rule can be unit-tested.
+fn review_runs_on_resume(status: Option<ReviewStatus>) -> bool {
+    !matches!(status, Some(ReviewStatus::Passed | ReviewStatus::Issues))
+}
+
+/// Continue a finished interactive task by sending the user's `text` to its
+/// existing opencode session. The task flips back to `running`, the reply
+/// streams into its log, and the task finalizes again when the new turn ends.
+/// The already-settled review is not re-run.
+pub(crate) async fn resume_opencode_task(
+    app: AppHandle,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    // Claim the task by flipping it to `running` while still holding the lock, so
+    // two concurrent sends cannot both resume the same session and spawn two
+    // watchers. Captured fields are restored if the prompt never goes out. The
+    // review is left alone unless it never reached a verdict: a settled review
+    // (passed or found issues) must not be re-run, but a task that stopped before
+    // its review ever completed still gets one when the continuation succeeds.
+    let (session, previous, review_settled) = {
+        let mut inner = crate::state::lock(&st.inner);
+        let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) else {
+            return Err("task not found".into());
+        };
+        if t.status == TaskStatus::Running {
+            return Err("this task is already running".into());
+        }
+        let session = t
+            .session_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this task has no live agent session".to_string())?;
+        let review_settled = !review_runs_on_resume(t.review.as_ref().map(|r| r.status));
+        let previous = (t.status, t.started_at, t.finished_at, t.exit_code, t.error.clone());
+        t.status = TaskStatus::Running;
+        t.started_at = Some(now());
+        t.finished_at = None;
+        t.exit_code = None;
+        t.error = None;
+        t.ask = None;
+        (session, previous, review_settled)
+    };
+    st.save();
+    emit_state(&app);
+
+    // Snapshot the transcript before prompting so only new output is streamed
+    // and the previous turn's idle does not finalize the resumed task. The read
+    // must succeed: an empty snapshot would make the watcher treat the previous
+    // turn's idle as a new one and finalize the task immediately (replaying old
+    // output instead of the follow-up), so a read failure aborts the resume and
+    // the caller restores the finished state.
+    let sent: Result<(OpenCodeResume, opencode_server::Connection), String> = async {
+        let conn = opencode_server::ensure_server().await?;
+        let msgs = opencode_server::messages(&conn, &session).await?;
+        // A finished session always has history (at least its `idle`), so an
+        // empty read means the transcript could not be read (or came back in an
+        // unexpected shape) and must not be used as the idle baseline.
+        if msgs.is_empty() {
+            return Err(
+                "could not read the agent session transcript; the task was not resumed".into(),
+            );
+        }
+        let resume = OpenCodeResume::from_messages(&msgs);
+        // Send before the watcher starts: if the server rejects the message there
+        // is nothing to watch, so restore the finished state and surface the
+        // error rather than leaving the task running with no watcher.
+        opencode_server::prompt(&conn, &session, &text).await?;
+        Ok((resume, conn))
+    }
+    .await;
+
+    let (resume, conn) = match sent {
+        Ok(v) => v,
+        Err(e) => {
+            {
+                let mut inner = crate::state::lock(&st.inner);
+                if let Some(t) = inner.tasks.iter_mut().find(|t| t.id == id) {
+                    t.status = previous.0;
+                    t.started_at = previous.1;
+                    t.finished_at = previous.2;
+                    t.exit_code = previous.3;
+                    t.error = previous.4;
+                }
+            }
+            // Save after releasing the lock: `save` skips (rather than waits)
+            // while a caller holds it.
+            st.save();
+            emit_state(&app);
+            return Err(e);
+        }
+    };
+    log_note(&app, &id, &format!("You: {text}"));
+
+    let Some(run) = load_run(&app, &id) else {
+        return Ok(());
+    };
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move {
+        start_opencode_loop(a, run, conn, session, resume, !review_settled).await;
+    });
+    Ok(())
 }
 
 /// Set a succeeded task's review to `pending` so `resume_reviews` runs it.
@@ -2386,7 +2570,10 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
             }
             t.exit_code = Some(if ok { 0 } else { 1 });
             t.finished_at = Some(now());
-            t.session_id = None;
+            // Keep `session_id`: a finished interactive task can be sent another
+            // message to continue the same agent session. `reset_for_rerun`,
+            // `cancel_task_state`, and `fail_task` still clear it when the run
+            // is actually being torn down.
             if ok {
                 t.status = TaskStatus::Succeeded;
                 // An interactive success queues its review (via `queue_review`)
@@ -2487,7 +2674,7 @@ async fn start_merge_task(app: AppHandle, run: TaskRun) {
 
 /// Run the auto code review for a finished task.
 async fn start_review(app: AppHandle, id: String) {
-    let (cwd, title, task_prompt, mode, project, task_provider, task_model) = {
+    let (cwd, title, task_prompt, mode, project, task_provider, task_model, prompt_override) = {
         let st = app.state::<AppState>();
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(t) = inner.tasks.iter().find(|t| t.id == id) else {
@@ -2513,6 +2700,8 @@ async fn start_review(app: AppHandle, id: String) {
             t.project_path.clone(),
             t.provider,
             t.model.clone(),
+            // A prompt the user edited before this re-run wins over config.
+            r.prompt.clone(),
         )
     };
 
@@ -2527,9 +2716,10 @@ async fn start_review(app: AppHandle, id: String) {
         let proj = inner.projects.iter().find(|p| p.path == project);
         let (provider, model) =
             agent::resolve_reviewer(proj, &inner.settings, task_provider, task_model.as_deref());
-        let custom = proj
-            .and_then(|p| p.review_prompt.clone())
-            .or_else(|| inner.settings.review_prompt.clone());
+        let custom = prompt_override.or_else(|| {
+            proj.and_then(|p| p.review_prompt.clone())
+                .or_else(|| inner.settings.review_prompt.clone())
+        });
         (provider, model, custom)
     };
     {
@@ -2982,8 +3172,9 @@ mod tests {
     use super::{
         active_heartbeat_ids, ask_log_lines, choose_branch, commit_all_changes, commit_message,
         dispatch, local_clock, log_kind, mark_interrupted, now, prepare_worktree,
-        resolve_named_branch, review_clear, review_should_retry, reviews_to_start, source_statuses,
-        stall_sweep, supervised_tick, BranchChoice, MAX_REVIEW_ATTEMPTS,
+        resolve_named_branch, review_clear, review_runs_on_resume, review_should_retry,
+        reviews_to_start, source_statuses, stall_sweep, supervised_tick, BranchChoice,
+        OpenCodeResume, MAX_REVIEW_ATTEMPTS,
     };
     use std::path::Path;
     use crate::models::{
@@ -3023,6 +3214,7 @@ mod tests {
             created_at: now(),
             started_at: None,
             finished_at: None,
+            attempts: 0,
             provider: None,
             model: None,
             fallback_provider: None,
@@ -3071,6 +3263,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             attempts: 0,
+            prompt: None,
         });
         t
     }
@@ -3559,6 +3752,54 @@ mod tests {
     }
 
     #[test]
+    fn dispatching_counts_attempts_so_a_rerun_is_recognized() {
+        let st = state_with(
+            vec![task("t0", "/p", &[], Isolation::Worktree, None)],
+            3,
+        );
+        dispatch(&st);
+        assert_eq!(st.inner.lock().unwrap().tasks[0].attempts, 1);
+
+        // Re-queueing (what Retry / Execute do) lets it start again; the count
+        // becomes 2, which the prompt builder reads as "a re-run".
+        {
+            let mut inner = st.inner.lock().unwrap();
+            inner.tasks[0].status = TaskStatus::Ready;
+            inner.tasks[0].finished_at = None;
+        }
+        dispatch(&st);
+        assert_eq!(st.inner.lock().unwrap().tasks[0].attempts, 2);
+    }
+
+    #[test]
+    fn resume_snapshot_skips_the_previous_turn() {
+        let msgs = vec![
+            serde_json::json!({"type":"assistant","id":"m1","time":{"completed":1},"content":[]}),
+            serde_json::json!({"type":"assistant","id":"m2","content":[]}),
+            serde_json::json!({"type":"idle","outcome":"succeeded"}),
+        ];
+        let resume = OpenCodeResume::from_messages(&msgs);
+        // Only the completed assistant message is pre-logged; the in-flight one
+        // is not.
+        assert!(resume.logged.contains("m1"));
+        assert!(!resume.logged.contains("m2"));
+        // The previous idle is baselined, so it does not finalize the resume.
+        assert_eq!(resume.idle_baseline, 1);
+    }
+
+    #[test]
+    fn a_settled_review_is_not_re_run_on_resume() {
+        // A review that already reached a verdict is consumed.
+        assert!(!review_runs_on_resume(Some(ReviewStatus::Passed)));
+        assert!(!review_runs_on_resume(Some(ReviewStatus::Issues)));
+        // A review that never completed (or a task that failed before its review
+        // ran) still runs when the continuation succeeds.
+        assert!(review_runs_on_resume(Some(ReviewStatus::None)));
+        assert!(review_runs_on_resume(Some(ReviewStatus::Failed)));
+        assert!(review_runs_on_resume(None));
+    }
+
+    #[test]
     fn failed_dependency_blocks_downstream() {
         let mut a = task("a", "/p", &[], Isolation::Worktree, None);
         a.status = TaskStatus::Failed;
@@ -3592,6 +3833,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             attempts: 0,
+            prompt: None,
         });
         let b = task("b", "/p", &["a"], Isolation::Worktree, None);
         let st = state_with(vec![a, b], 3);

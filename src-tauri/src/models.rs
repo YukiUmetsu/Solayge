@@ -270,6 +270,11 @@ pub struct TaskReview {
     /// then it blocks the task so dependents do not run on unreviewed work.
     #[serde(default)]
     pub attempts: u32,
+    /// Review-only custom instructions for the next run, set when the user edits
+    /// the prompt before re-running a review. `None` falls back to the project
+    /// then account `review_prompt`. Cleared when the task is re-run.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// Whether an agent is asking a question or requesting permission.
@@ -436,6 +441,11 @@ pub struct Task {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// How many times the scheduler has dispatched this task. `0` means it has
+    /// never run; a value `> 1` marks the current run as a re-run of a previous
+    /// attempt, so the prompt can tell the agent to continue rather than repeat.
+    #[serde(default)]
+    pub attempts: u32,
 
     // ---- agent configuration, resolved when the task is created ----
     #[serde(default)]

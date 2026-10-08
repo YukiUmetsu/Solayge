@@ -15,9 +15,9 @@ function remainingMinutes(notBefore?: number | null): number {
 }
 
 /**
- * Edit a draft task. A draft has not been released yet, so every parameter the
- * New Task form can set is editable here; the backend rejects edits to any
- * other status.
+ * Edit a task that has not started yet: a draft, or one queued while it waits
+ * for dependencies or a slot. Every parameter the New Task form can set is
+ * editable here; the backend rejects edits to any other status.
  */
 export function EditTaskModal({
   task,
@@ -100,8 +100,8 @@ export function EditTaskModal({
 
   return (
     <Modal
-      title="Edit draft task"
-      subtitle="Change any parameter before the task is released."
+      title="Edit task"
+      subtitle="Change any parameter before the task starts."
       onClose={onClose}
       footer={
         <>

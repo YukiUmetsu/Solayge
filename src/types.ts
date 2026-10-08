@@ -105,6 +105,9 @@ export interface TaskReview {
   finished_at?: number | null;
   /** How many times the review has been started (automatic retries included). */
   attempts?: number;
+  /** Per-run reviewer instructions set when the user edits the prompt before a
+   *  re-run; `null` uses the project/account review prompt. */
+  prompt?: string | null;
 }
 
 export type SystemPromptPosition = "prefix" | "suffix";
@@ -302,6 +305,8 @@ export interface Task {
   created_at: number;
   started_at?: number | null;
   finished_at?: number | null;
+  /** How many times the task has been dispatched; `> 1` marks a re-run. */
+  attempts?: number;
   provider?: Provider | null;
   model?: string | null;
   fallback_provider?: Provider | null;

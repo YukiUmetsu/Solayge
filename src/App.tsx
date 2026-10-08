@@ -20,6 +20,7 @@ import type {
 } from "./types";
 import { classifyLine } from "./components/LogView";
 import { effectiveConfig } from "./lib/providers";
+import { canEditTask } from "./lib/tasks";
 import {
   handleNotification,
   primeNotificationPermission,
@@ -341,8 +342,9 @@ export default function App() {
   // the current project so switching projects never shows another project's task.
   const selectedTask =
     projectTasks.find((t) => t.id === selectedTaskId) ?? null;
-  // Only a draft is editable; resolve the id within the project so switching
-  // projects can never open another project's task.
+  // Not-yet-started tasks (draft/waiting/ready) are editable; resolve the id
+  // within the project so switching projects can never open another project's
+  // task.
   const editingTask =
     projectTasks.find((t) => t.id === editingTaskId) ?? null;
   const running = projectTasks.filter((t) => t.status === "running").length;
@@ -592,14 +594,15 @@ export default function App() {
                   <DetailPanel
                     task={selectedTask}
                     project={project}
+                    tasks={projectTasks}
                     logs={selectedTaskId ? logs[selectedTaskId] ?? [] : []}
                     width={rightWidth}
                     onEdit={setEditingTaskId}
                     onRemoveWorktree={(id) =>
                       void runAction(() => api.removeWorktree(id))
                     }
-                    onRetryReview={(id) =>
-                      void runAction(() => api.retryReview(id))
+                    onRetryReview={(id, prompt) =>
+                      void runAction(() => api.retryReview(id, prompt))
                     }
                     onOpenAsk={openAsk}
                     onCollapse={() => setRightOpen(false)}
@@ -628,7 +631,7 @@ export default function App() {
           onCreated={apply}
         />
       )}
-      {editingTask && editingTask.status === "draft" && project && (
+      {editingTask && canEditTask(editingTask) && project && (
         <EditTaskModal
           task={editingTask}
           project={project}

@@ -11,12 +11,13 @@ import {
   runDuration,
   shortId,
 } from "../lib/format";
-import { displayStatus, statusMeta } from "../lib/tasks";
+import { displayStatus, canEditTask, canMessageTask, statusMeta } from "../lib/tasks";
 import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskSeparation } from "../lib/providers";
 import { useNow } from "../lib/useNow";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
 import { classifyLine, LogBody } from "./LogView";
+import { ReviewPromptModal } from "./ReviewPromptModal";
 
 type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
 
@@ -26,6 +27,7 @@ const Markdown = lazy(() => import("./Markdown"));
 export function DetailPanel({
   task,
   project,
+  tasks,
   logs,
   width,
   onEdit,
@@ -36,11 +38,13 @@ export function DetailPanel({
 }: {
   task: Task | null;
   project: Project | null;
+  /** All tasks in the selected project, for the dependency check on resume. */
+  tasks: Task[];
   logs: LogEntry[];
   width: number;
   onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
-  onRetryReview: (id: string) => void;
+  onRetryReview: (id: string, prompt: string) => void;
   onOpenAsk: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -153,7 +157,11 @@ export function DetailPanel({
       {task?.status === "running" && task.ask && (
         <AskPanel task={task} onOpenAsk={onOpenAsk} />
       )}
-      {task?.status === "running" && task.session_id && <MessageComposer task={task} />}
+      {/* A running task is live; a finished one stays continuable while its
+          review has settled and nothing depends on it. */}
+      {task && canMessageTask(task, tasks) && (
+        <MessageComposer task={task} resuming={task.status !== "running"} />
+      )}
 
       {!task && tab !== "worktrees" ? (
         <EmptyDetail />
@@ -252,7 +260,11 @@ export function DetailPanel({
           )}
 
           {tab === "review" && task && (
-            <ReviewView task={task} onRetryReview={onRetryReview} />
+            <ReviewView
+              task={task}
+              projectPath={project?.path ?? null}
+              onRetryReview={onRetryReview}
+            />
           )}
 
           {tab === "details" && task && (
@@ -321,8 +333,9 @@ function AskPanel({
   );
 }
 
-/** Send a free-form message to a running agent, like typing at its prompt. */
-function MessageComposer({ task }: { task: Task }) {
+/** Send a free-form message to an agent, like typing at its prompt. On a
+ *  finished task this continues the same session, flipping it back to running. */
+function MessageComposer({ task, resuming }: { task: Task; resuming: boolean }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -348,7 +361,11 @@ function MessageComposer({ task }: { task: Task }) {
         <textarea
           className="scroll max-h-28 min-h-9 flex-1 resize-y rounded-lg border border-line bg-well px-2 py-1.5 text-[12px] text-ink outline-none focus:border-accent-line"
           rows={1}
-          placeholder="Message the agent — ask a question or add instructions…"
+          placeholder={
+            resuming
+              ? "Continue with the agent — the task resumes and starts running again…"
+              : "Message the agent — ask a question or add instructions…"
+          }
           value={text}
           disabled={busy}
           onChange={(e) => setText(e.target.value)}
@@ -370,8 +387,9 @@ function MessageComposer({ task }: { task: Task }) {
         </button>
       </div>
       <div className="mt-1 text-[10.5px] text-ink-subtle">
-        The agent keeps working; its reply streams into the log. Enter sends,
-        Shift+Enter adds a line.
+        {resuming
+          ? "This task is finished. Sending a message continues the same agent session and sets it back to running; a review that already finished is not re-run."
+          : "The agent keeps working; its reply streams into the log. Enter sends, Shift+Enter adds a line."}
       </div>
       {err && <p className="mt-1 text-[11px] text-danger">{err}</p>}
     </div>
@@ -456,36 +474,65 @@ function LogsView({
 
 function ReviewView({
   task,
+  projectPath,
   onRetryReview,
 }: {
   task: Task;
-  onRetryReview: (id: string) => void;
+  projectPath: string | null;
+  onRetryReview: (id: string, prompt: string) => void;
 }) {
   const review = task.review && task.review.mode !== "off" ? task.review : null;
   const [log, setLog] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
   const now = useNow();
 
   const status = review?.status ?? "none";
   const settled = status !== "pending" && status !== "running";
-  // Reload on task/verdict changes only. Depending on the `review` object made
-  // this refetch on every snapshot poll; the rendered body keys off `log`, so
-  // this alone avoids the "Loading…" flash.
+  const active = !settled;
+  // Primitive values, so a new snapshot object with the same review does not
+  // re-run the effect below.
+  const startedAt = review?.started_at ?? null;
+  const finishedAt = review?.finished_at ?? null;
+  // Poll the reviewer log while a review is queued or running so it updates
+  // live during a (re-)run, and reload on every settle. The body keys off
+  // `log`, so a background poll never flashes "Loading…" once output exists.
   useEffect(() => {
     if (!review) return;
     let alive = true;
-    setLoading(true);
-    api
-      .reviewLog(task.id)
-      .then((t) => alive && setLog(t))
-      .catch((e) => alive && setErr(String(e)))
-      .finally(() => alive && setLoading(false));
+    const load = (initial: boolean) => {
+      if (initial) setLoading(true);
+      api
+        .reviewLog(task.id)
+        .then((t) => {
+          // A successful poll must clear any earlier transient error, or one
+          // failed request would hide the (live-updating) log for the rest of
+          // the run since the render prefers `err` over `log`.
+          if (alive) {
+            setLog(t);
+            setErr(null);
+          }
+        })
+        .catch((e) => alive && setErr(String(e)))
+        .finally(() => alive && initial && setLoading(false));
+    };
+    setErr(null);
+    load(true);
+    if (!active) return () => { alive = false; };
+    const timer = window.setInterval(() => load(false), 1000);
     return () => {
       alive = false;
+      window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, status]);
+  }, [task.id, status, startedAt, finishedAt]);
+
+  // Follow the transcript as it grows, so a live re-run is visibly updating.
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
 
   if (!review) return <EmptyDetail />;
   const meta = reviewStatusMeta(review.status);
@@ -533,8 +580,8 @@ function ReviewView({
                 (task.status === "blocked" && review.status === "failed")) && (
                 <button
                   className="btn btn-ghost !px-2 !py-1"
-                  onClick={() => onRetryReview(task.id)}
-                  title="Run the review again (does not re-run the task)"
+                  onClick={() => setEditing(true)}
+                  title="Edit the prompt and run the review again (does not re-run the task)"
                 >
                   <Icon name="retry" className="h-3 w-3" />
                   Re-run review
@@ -543,7 +590,10 @@ function ReviewView({
           </div>
         </div>
       </div>
-      <div className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed">
+      <div
+        ref={logRef}
+        className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed"
+      >
         {loading && !log ? (
           <span className="text-[11px] text-ink-subtle">Loading…</span>
         ) : err ? (
@@ -556,6 +606,16 @@ function ReviewView({
           <span className="text-[11px] text-ink-subtle">No reviewer output yet.</span>
         )}
       </div>
+      {editing && (
+        <ReviewPromptModal
+          projectPath={projectPath}
+          onClose={() => setEditing(false)}
+          onStart={(prompt) => {
+            setEditing(false);
+            onRetryReview(task.id, prompt);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -651,14 +711,15 @@ function DetailsView({
       )}
 
       <Field label="Prompt">
-        {/* A draft has not run yet, so its prompt is still safe to change. */}
-        {task.status === "draft" && (
+        {/* A task that has not started yet (draft, waiting, or ready) can still
+            have its prompt changed. */}
+        {canEditTask(task) && (
           <button
             className="btn btn-ghost mb-1.5 !px-2 !py-1"
             onClick={() => onEdit(task.id)}
           >
             <Icon name="edit" className="h-3 w-3" />
-            Edit prompt
+            Edit task
           </button>
         )}
         <pre className="mono whitespace-pre-wrap rounded-lg border border-line bg-well-strong p-2.5 text-[11.5px] leading-relaxed text-ink-muted">

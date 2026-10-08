@@ -7,6 +7,7 @@ import {
 } from "../lib/format";
 import {
   canCancel,
+  canEditTask,
   canRun,
   displayStatus,
   isTerminalStatus,
@@ -183,8 +184,8 @@ export function TaskCard({
           {canRun(task) && (
             <IconBtn name="play" title="Start now" onClick={onStartNow} />
           )}
-          {task.status === "draft" && (
-            <IconBtn name="edit" title="Edit prompt" onClick={onEdit} />
+          {canEditTask(task) && (
+            <IconBtn name="edit" title="Edit task" onClick={onEdit} />
           )}
           {canCancel(task) && (
             <IconBtn name="stop" title="Cancel" onClick={onCancel} danger />

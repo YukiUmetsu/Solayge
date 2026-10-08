@@ -108,6 +108,7 @@ fn reset_for_rerun(t: &mut Task) {
         r.started_at = None;
         r.finished_at = None;
         r.attempts = 0;
+        r.prompt = None;
     }
     t.status = if t.depends_on.is_empty() {
         TaskStatus::Ready
@@ -594,6 +595,7 @@ pub fn create_tasks(
             created_at: base + i as i64,
             started_at: None,
             finished_at: None,
+            attempts: 0,
             provider: Some(resolved.provider),
             model: resolved.model.clone(),
             fallback_provider: resolved.fallback_provider,
@@ -611,6 +613,7 @@ pub fn create_tasks(
                     started_at: None,
                     finished_at: None,
                     attempts: 0,
+                    prompt: None,
                 })
             },
             kind: nt.kind.unwrap_or_default(),
@@ -665,13 +668,22 @@ pub fn create_tasks(
     Ok(crate::state::snapshot(&app))
 }
 
-/// Apply an edit to a task. Only a `draft` task may be edited: once it has been
-/// released (ready/waiting) it is queued to run, and once running its prompt is
-/// the instruction the agent was already given, so rewriting it would be a lie.
-/// Returns an error otherwise, which the UI surfaces to the user.
-fn apply_draft_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
-    if t.status != TaskStatus::Draft {
-        return Err("only draft tasks can be edited".into());
+/// Whether a task may still be edited. A `draft` has not been released; a
+/// `waiting` or `ready` task is queued but has not started, so rewriting its
+/// prompt is safe. Once `running` its prompt is the instruction the agent was
+/// already given, so rewriting it would be a lie.
+fn is_editable_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Draft | TaskStatus::Waiting | TaskStatus::Ready
+    )
+}
+
+/// Apply an edit to a not-yet-started task (`draft`, `waiting`, or `ready`).
+/// Returns an error for any other status, which the UI surfaces to the user.
+fn apply_task_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
+    if !is_editable_status(t.status) {
+        return Err("only draft, waiting, or ready tasks can be edited".into());
     }
     if let Some(v) = patch.title {
         t.title = v;
@@ -739,9 +751,17 @@ pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<
         let Some(pos) = inner.tasks.iter().position(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        if inner.tasks[pos].status != TaskStatus::Draft {
-            return Err("only draft tasks can be edited".into());
+        if !is_editable_status(inner.tasks[pos].status) {
+            return Err("only draft, waiting, or ready tasks can be edited".into());
         }
+        // A dependency or delay edit can change whether a queued task is ready.
+        // Demote a `ready` task back to `waiting` when either changed;
+        // `scheduler::dispatch` re-promotes it once its dependencies (and delay)
+        // are satisfied. Without this a `ready` task could be dispatched with a
+        // freshly-added unmet dependency.
+        let was_ready = inner.tasks[pos].status == TaskStatus::Ready;
+        let old_deps = inner.tasks[pos].depends_on.clone();
+        let old_hold = inner.tasks[pos].not_before;
         // A dependency edit must stay a valid DAG with real targets, or the
         // task (and anything downstream) would wait forever.
         if let Some(deps) = patch.depends_on.as_ref() {
@@ -769,7 +789,11 @@ pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<
                 return Err("that change would create a dependency cycle".into());
             }
         }
-        apply_draft_patch(&mut inner.tasks[pos], patch)?;
+        apply_task_patch(&mut inner.tasks[pos], patch)?;
+        let t = &mut inner.tasks[pos];
+        if was_ready && (t.depends_on != old_deps || t.not_before != old_hold) {
+            t.status = TaskStatus::Waiting;
+        }
     }
     st.save();
     emit_state(&app);
@@ -1038,9 +1062,10 @@ fn cancel_task_state(t: &mut Task) -> bool {
 /// Re-queue a task's auto-review so the scheduler runs it again, without
 /// re-running the (already finished) task. A task blocked because its review
 /// could not finish is restored to succeeded so the review can run again; the
-/// attempt budget is reset. Errors when there is nothing to re-run. Pure, so
-/// the rule can be unit-tested.
-fn requeue_review(t: &mut Task) -> Result<(), String> {
+/// attempt budget is reset. `prompt` overrides the review instructions for this
+/// run only (`None` falls back to the project/account prompt). Errors when
+/// there is nothing to re-run. Pure, so the rule can be unit-tested.
+fn requeue_review(t: &mut Task, prompt: Option<String>) -> Result<(), String> {
     let (mode, review_failed) = match t.review.as_ref() {
         Some(r) => (r.mode, r.status == ReviewStatus::Failed),
         None => return Err("this task has no review".into()),
@@ -1063,21 +1088,27 @@ fn requeue_review(t: &mut Task) -> Result<(), String> {
         r.started_at = None;
         r.finished_at = None;
         r.attempts = 0;
+        r.prompt = prompt;
     }
     Ok(())
 }
 
 /// Re-run a finished task's review (e.g. after it failed for an environmental
-/// reason) without re-running the task itself.
+/// reason) without re-running the task itself. `prompt`, when given, replaces
+/// the review instructions for this run only.
 #[tauri::command]
-pub fn retry_review(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
+pub fn retry_review(
+    app: AppHandle,
+    task_id: String,
+    prompt: Option<String>,
+) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let title = {
         let mut inner = crate::state::lock(&st.inner);
         let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        requeue_review(t)?;
+        requeue_review(t, prompt)?;
         t.title.clone()
     };
     st.save();
@@ -1179,9 +1210,27 @@ pub async fn answer_task(
     Ok(crate::state::snapshot(&app))
 }
 
-/// Send a free-form message to a running interactive (opencode) task, the way you
-/// would type at the agent's prompt. The agent keeps running; its reply streams
-/// into the task log like any other output.
+/// Whether a finished task may accept another agent message. A continuation is
+/// only safe when the opencode session outlived the run, the review has settled
+/// (a re-review is not wanted), and no other task depends on this one — resuming
+/// would change what a dependent already treated as final.
+fn can_resume_task(t: &Task, tasks: &[Task]) -> bool {
+    matches!(t.status, TaskStatus::Succeeded | TaskStatus::Failed)
+        && t.session_id.as_deref().is_some_and(|s| !s.is_empty())
+        && !matches!(
+            t.review.as_ref().map(|r| r.status),
+            Some(ReviewStatus::Pending | ReviewStatus::Running)
+        )
+        && !tasks
+            .iter()
+            .any(|d| d.id != t.id && d.depends_on.iter().any(|dep| dep == &t.id))
+}
+
+/// Send a free-form message to an interactive (opencode) task, the way you would
+/// type at the agent's prompt. While the task runs the agent keeps working and
+/// its reply streams into the log. On a finished task this continues the same
+/// session: the task flips back to `running` and finalizes again when the new
+/// turn ends (without re-running a settled review).
 #[tauri::command]
 pub async fn send_task_message(
     app: AppHandle,
@@ -1193,19 +1242,37 @@ pub async fn send_task_message(
         return Err("the message is empty".into());
     }
     let st = app.state::<AppState>();
-    let session = {
+    let (session, resume) = {
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(t) = inner.tasks.iter().find(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        if t.status != TaskStatus::Running {
-            return Err("this task is no longer running".into());
+        if t.status == TaskStatus::Running {
+            let session = t
+                .session_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "this task has no live agent session".to_string())?;
+            (session, false)
+        } else {
+            if !can_resume_task(t, &inner.tasks) {
+                return Err(
+                    "this task cannot be continued (it is unfinished, in review, or a \
+                     dependency of another task)"
+                        .into(),
+                );
+            }
+            let session = t
+                .session_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "this task has no live agent session".to_string())?;
+            (session, true)
         }
-        t.session_id
-            .clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this task has no live agent session".to_string())?
     };
+    if resume {
+        return crate::scheduler::resume_opencode_task(app, task_id, text).await;
+    }
     let conn = crate::opencode_server::ensure_server().await?;
     crate::opencode_server::prompt(&conn, &session, &text).await?;
     // Echo it into the transcript, so it is clear what the agent was told.
@@ -1862,9 +1929,9 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_draft_patch, archive_task, cancel_task_state, has_dependency_cycle, is_clearable,
-        log_tail, read_sound_file, render_diff, requeue_review, reset_for_rerun, restore_task_state,
-        sound_mime, valid_task_id,
+        apply_task_patch, archive_task, can_resume_task, cancel_task_state, has_dependency_cycle,
+        is_clearable, log_tail, read_sound_file, render_diff, requeue_review, reset_for_rerun,
+        restore_task_state, sound_mime, valid_task_id,
     };
     use crate::models::{
         BranchMode, DeletedTask, DiffResult, FileDiff, GitOp, Isolation, PermissionProfile,
@@ -1892,6 +1959,7 @@ mod tests {
             created_at: 1,
             started_at: None,
             finished_at: None,
+            attempts: 0,
             provider: None,
             model: None,
             fallback_provider: None,
@@ -1941,6 +2009,7 @@ mod tests {
             started_at: Some(10),
             finished_at: None,
             attempts: 2,
+            prompt: None,
         });
 
         reset_for_rerun(&mut t);
@@ -1970,6 +2039,53 @@ mod tests {
         t.depends_on = vec!["dep".into()];
         reset_for_rerun(&mut t);
         assert_eq!(t.status, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn a_finished_task_with_a_live_session_can_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        assert!(can_resume_task(&t, std::slice::from_ref(&t)));
+    }
+
+    #[test]
+    fn an_running_or_sessionless_task_cannot_be_continued() {
+        let mut running = task(TaskStatus::Running, Isolation::Shared);
+        running.session_id = Some("ses_1".into());
+        assert!(!can_resume_task(&running, std::slice::from_ref(&running)));
+
+        let mut finished = task(TaskStatus::Failed, Isolation::Shared);
+        finished.session_id = None;
+        assert!(!can_resume_task(&finished, std::slice::from_ref(&finished)));
+    }
+
+    #[test]
+    fn a_task_whose_review_is_still_running_cannot_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        t.review = Some(TaskReview {
+            mode: ReviewMode::Report,
+            status: ReviewStatus::Running,
+            provider: None,
+            model: None,
+            summary: None,
+            started_at: None,
+            finished_at: None,
+            attempts: 1,
+            prompt: None,
+        });
+        assert!(!can_resume_task(&t, std::slice::from_ref(&t)));
+    }
+
+    #[test]
+    fn a_task_another_depends_on_cannot_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        t.id = "dep".into();
+        let mut dependent = task(TaskStatus::Waiting, Isolation::Shared);
+        dependent.id = "child".into();
+        dependent.depends_on = vec!["dep".into()];
+        assert!(!can_resume_task(&t, &[t.clone(), dependent]));
     }
 
     #[test]
@@ -2017,7 +2133,7 @@ mod tests {
         t.title = "old title".into();
         t.prompt = "old prompt".into();
 
-        apply_draft_patch(&mut t, patch(Some("new title"), Some("new prompt"))).unwrap();
+        apply_task_patch(&mut t, patch(Some("new title"), Some("new prompt"))).unwrap();
 
         assert_eq!(t.title, "new title");
         assert_eq!(t.prompt, "new prompt");
@@ -2029,7 +2145,7 @@ mod tests {
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         t.not_before = None;
 
-        apply_draft_patch(
+        apply_task_patch(
             &mut t,
             TaskPatch {
                 title: Some("new title".into()),
@@ -2065,7 +2181,7 @@ mod tests {
         // stored empty string that later fails worktree creation.
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         t.base_ref = Some("main".into());
-        apply_draft_patch(
+        apply_task_patch(
             &mut t,
             TaskPatch {
                 title: None,
@@ -2090,7 +2206,7 @@ mod tests {
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         let mut p = patch(None, None);
         p.delay_seconds = Some(120);
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
         assert!(
             t.not_before.is_some_and(|nb| nb > super::now()),
             "a positive delay holds the task in the future"
@@ -2106,7 +2222,7 @@ mod tests {
         p.kind = Some(TaskKind::Shell);
         p.command = Some("npm test".into());
 
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
 
         assert_eq!(t.kind, TaskKind::Shell);
         assert_eq!(t.command.as_deref(), Some("npm test"));
@@ -2121,29 +2237,44 @@ mod tests {
         let mut p = patch(None, None);
         p.kind = Some(TaskKind::Agent);
 
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
 
         assert_eq!(t.kind, TaskKind::Agent);
         assert!(t.command.is_none(), "a stale shell command must be dropped");
     }
 
     #[test]
-    fn a_released_or_running_task_cannot_be_edited() {
-        // Once a task is queued or has run, its prompt is the instruction the
+    fn a_waiting_or_ready_task_can_be_edited() {
+        // A queued task that has not started may still be edited (e.g. while it
+        // waits for its dependencies to finish).
+        for status in [TaskStatus::Waiting, TaskStatus::Ready] {
+            let mut t = task(status, Isolation::Worktree);
+            t.prompt = "original".into();
+
+            apply_task_patch(&mut t, patch(Some("new title"), Some("rewritten"))).unwrap();
+
+            assert_eq!(t.prompt, "rewritten", "{status:?}");
+            assert_eq!(t.title, "new title", "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_or_finished_task_cannot_be_edited() {
+        // Once a task is running or has run, its prompt is the instruction the
         // agent was given; rewriting it must be rejected, not silently applied.
         for status in [
-            TaskStatus::Waiting,
-            TaskStatus::Ready,
             TaskStatus::Running,
             TaskStatus::Succeeded,
+            TaskStatus::Failed,
             TaskStatus::Interrupted,
+            TaskStatus::Blocked,
         ] {
             let mut t = task(status, Isolation::Worktree);
             t.prompt = "original".into();
 
-            let err = apply_draft_patch(&mut t, patch(None, Some("rewritten"))).unwrap_err();
+            let err = apply_task_patch(&mut t, patch(None, Some("rewritten"))).unwrap_err();
 
-            assert!(err.contains("draft"), "{status:?}: {err}");
+            assert!(err.contains("cannot") || err.contains("draft"), "{status:?}: {err}");
             assert_eq!(t.prompt, "original", "{status:?} prompt must not change");
         }
     }
@@ -2178,6 +2309,7 @@ mod tests {
                 started_at: None,
                 finished_at: None,
                 attempts: 0,
+                prompt: None,
             });
             assert!(!is_clearable(&t), "{status:?} must hold the task");
         }
@@ -2223,6 +2355,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             attempts: 0,
+            prompt: None,
         });
     }
 
@@ -2394,11 +2527,29 @@ mod tests {
         let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Failed);
         t.review.as_mut().unwrap().attempts = 3;
-        requeue_review(&mut t).unwrap();
+        requeue_review(&mut t, None).unwrap();
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::Pending);
         assert!(r.summary.is_none() && r.finished_at.is_none());
         assert_eq!(r.attempts, 0, "a manual re-run gets a fresh budget");
+    }
+
+    #[test]
+    fn a_manual_review_rerun_keeps_the_edited_prompt() {
+        // The user can edit the reviewer prompt before re-running; it is stored
+        // on the review so `start_review` uses it for this attempt.
+        let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Failed);
+        requeue_review(&mut t, Some("only check the parser".into())).unwrap();
+        assert_eq!(
+            t.review.as_ref().unwrap().prompt.as_deref(),
+            Some("only check the parser")
+        );
+
+        // A re-run with no edited prompt clears any previous override.
+        t.review.as_mut().unwrap().status = ReviewStatus::Failed;
+        requeue_review(&mut t, None).unwrap();
+        assert!(t.review.as_ref().unwrap().prompt.is_none());
     }
 
     #[test]
@@ -2408,7 +2559,7 @@ mod tests {
         let mut t = task(TaskStatus::Blocked, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Failed);
         t.error = Some("review could not finish".into());
-        requeue_review(&mut t).unwrap();
+        requeue_review(&mut t, None).unwrap();
         assert_eq!(t.status, TaskStatus::Succeeded);
         assert!(t.error.is_none());
         assert_eq!(
@@ -2421,10 +2572,10 @@ mod tests {
     fn a_review_cannot_be_requeued_unless_the_task_succeeded() {
         let mut t = task(TaskStatus::Running, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Running);
-        assert!(requeue_review(&mut t).is_err());
+        assert!(requeue_review(&mut t, None).is_err());
 
         let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
-        assert!(requeue_review(&mut t).is_err(), "no review to re-run");
+        assert!(requeue_review(&mut t, None).is_err(), "no review to re-run");
     }
 
     #[test]

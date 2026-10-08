@@ -315,6 +315,11 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
         }
     }
     for t in state.tasks.iter_mut() {
+        // No provider session survives a restart, so a saved session id is
+        // stale. Clear it before it is offered as a continuable session.
+        if t.session_id.take().is_some() {
+            changed = true;
+        }
         if let Some(r) = t.review.as_mut() {
             if r.status == ReviewStatus::Running {
                 // Re-queue so the scheduler runs (or re-runs) the review.
@@ -703,6 +708,32 @@ mod tests {
         assert_eq!(state.tasks[1].status, TaskStatus::Canceled);
 
         // Idempotent once the asks are gone.
+        assert!(!recover_interrupted(&root, &mut state));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recovery_forgets_saved_agent_sessions() {
+        // An opencode session belongs to a `opencode serve` process that does not
+        // survive a restart, so a persisted session id must not leave a finished
+        // task looking continuable.
+        let root = std::env::temp_dir().join(format!("solayge-recover4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state: PersistedState = serde_json::from_str(
+            r#"{"tasks":[
+                {"id":"done","project_path":"/p","title":"a","prompt":"p","status":"succeeded","created_at":1,
+                 "session_id":"ses_1"},
+                {"id":"run","project_path":"/p","title":"b","prompt":"p","status":"running","created_at":2,
+                 "session_id":"ses_2"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert!(recover_interrupted(&root, &mut state));
+        assert!(state.tasks[0].session_id.is_none(), "a finished run's session is stale");
+        assert!(state.tasks[1].session_id.is_none(), "an interrupted run's session is stale");
+        // Idempotent once the sessions are gone.
         assert!(!recover_interrupted(&root, &mut state));
 
         let _ = std::fs::remove_dir_all(&root);

@@ -93,6 +93,11 @@ Solayge turns that graph into something you can see and control:
   you or the agent), or the **current branch**.
 - **Task controls** — start now, cancel, retry, remove worktree, delete, clear
   finished.
+- **Edit before it runs** — a task that has not started yet (a **draft**, or one
+  **waiting** on its dependencies or **ready** in the queue) can still be edited:
+  title, prompt, kind, separation, delay, permissions, and dependencies. Editing
+  the dependencies or delay of a queued task moves it back to **waiting** until
+  they are satisfied again.
 
 ### Visibility
 
@@ -152,10 +157,16 @@ Solayge turns that graph into something you can see and control:
   requests spell out the action, the exact target(s), the provider's own
   details, and what **Always allow** would remember. While a task is running you
   can also send the agent an arbitrary message at any time — ask a follow-up or
-  add instructions mid-run — and its reply streams into the task log. Each
-  surfaced ask is also written to the task log (the question or the requested
-  target, the agent's reason, and — for questions — the choices), so you can look
-  back at why it decided to ask.
+  add instructions mid-run — and its reply streams into the task log. The message
+  box stays available after the task has finished, too: when its review has
+  settled and nothing depends on it, sending a message continues the same agent
+  session, flips the task back to **running**, streams the reply, and finalizes
+  it again — without re-running a review that already reached a verdict, unless
+  you choose **Re-run review**. A task that is still in review, or that another
+  task depends on, does not offer the box: resuming it would change what a review
+  or a dependent already consumed. Each surfaced ask is also written to the task log (the question or the
+  requested target, the agent's reason, and — for questions — the choices), so you
+  can look back at why it decided to ask.
 
 ## Requirements
 
@@ -223,10 +234,17 @@ draft → waiting → ready → running → succeeded | failed | canceled | bloc
 
 - **draft** — created, not yet released (the scheduler ignores it).
 - **blocked** — a dependency failed, or a conflict/review needs you.
+- **Editable while queued** — a **draft**, **waiting**, or **ready** task can still
+  be edited (its prompt and every creation parameter). Once it is **running** the
+  prompt is the instruction the agent was given, so edits are rejected.
 - **interrupted** — Solayge stopped while the task was running (crash, forced
   quit, out of disk, or a stalled run). The task did not finish; **Retry** (or
   **Execute**) runs it again, and the reason is written into its log. Nothing
   downstream starts until an interrupted dependency is retried.
+- **Retry after an error** — re-running a task that already ran prepends a
+  **re-run** instruction to its prompt: the agent is told the previous attempt
+  did not finish and to inspect the current state (`git status`, `git diff`, the
+  files in play) and continue rather than repeat work that is already done.
 
 A task that succeeds is not treated as "done" for its dependents until its
 automatic review (if enabled) has finished, so a review or auto-fix can never be
@@ -445,9 +463,11 @@ automatically (up to three starts in all). An earlier attempt's verdict never
 counts for a later one, and once the retries are spent the task is **blocked** so
 its dependents (a production build, the next step) cannot run on work the
 reviewer never actually checked. Re-run the review from the **Review** tab (or
-retry the task) once it can finish. Each attempt is appended to the reviewer log
-under a `---- new attempt ----` marker, and the log is only read up to its last
-attempt.
+retry the task) once it can finish. **Re-run review** opens a prompt editor
+prefilled with the effective reviewer instructions, so you can adjust them for
+that run only before starting it. The reviewer log streams live while an attempt
+is running, and each attempt is appended under a `---- new attempt ----` marker;
+only the last attempt's verdict counts.
 
 The reviewer is deliberately **skeptical**: it is told not to assume the change is
 correct, to distrust summaries and commit messages, to try to falsify the claim

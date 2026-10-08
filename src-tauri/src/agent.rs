@@ -166,6 +166,37 @@ pub fn with_access_planning(prompt: &str) -> String {
     format!("{ACCESS_PLANNING_INSTRUCTION}\n\n{prompt}")
 }
 
+/// Instruction prepended to a task prompt when the task is being run again after
+/// an earlier attempt stopped (usually an error). Without it the agent receives
+/// the identical prompt and may redo work that a previous attempt already
+/// finished. The agent is told to inspect the current state first and continue
+/// rather than start over.
+pub const RERUN_INSTRUCTION: &str = "\
+THIS IS A RE-RUN\n\
+This task was started before and did not finish. Some of the work may already be \
+done, and changes from the previous attempt may still be present. Before you start, \
+inspect the current state: `git status`, `git diff`, the recent history, and the files \
+this task touches. Continue from where the previous attempt left off. Do not repeat \
+work that is already complete, and do not discard, revert, or overwrite existing \
+changes unless the task requires it.";
+
+/// Wrap a re-run prompt (attempt 2 and later) with [`RERUN_INSTRUCTION`].
+pub fn with_rerun_context(prompt: &str, attempt: u32) -> String {
+    format!("{RERUN_INSTRUCTION}\n(attempt {attempt})\n\n{prompt}")
+}
+
+/// Build the base prompt for an agent task: the access-planning instruction,
+/// the re-run notice when this is not the first attempt, then the task prompt.
+/// A project system prompt is applied by the caller afterwards.
+pub fn compose_task_prompt(prompt: &str, attempt: u32) -> String {
+    let body = if attempt > 1 {
+        with_rerun_context(prompt, attempt)
+    } else {
+        prompt.to_string()
+    };
+    with_access_planning(&body)
+}
+
 /// Expand `{{project_name}}`, `{{project_path}}`, `{{current_branch}}` and
 /// `{{env.NAME}}` (also `{{env:NAME}}` and `{{$NAME}}`). Unknown tokens are
 /// left as-is so typos are visible.
@@ -834,6 +865,34 @@ mod tests {
         let composed = apply_system_prompt(&with_access_planning("do it"), Some(&prefix), &ctx);
         assert!(composed.starts_with("rules\n\n"));
         assert!(composed.contains(ACCESS_PLANNING_INSTRUCTION));
+    }
+
+    #[test]
+    fn a_rerun_prompt_tells_the_agent_to_continue() {
+        let wrapped = with_rerun_context("do the thing", 2);
+        assert!(wrapped.starts_with(RERUN_INSTRUCTION));
+        assert!(wrapped.contains("attempt 2"));
+        assert!(wrapped.ends_with("do the thing"));
+        // The original prompt is still present, so this is an addition not a
+        // replacement.
+        assert!(wrapped.contains("do the thing"));
+    }
+
+    #[test]
+    fn only_a_later_attempt_is_told_it_is_a_rerun() {
+        // First attempt: the exact task prompt, no re-run notice.
+        let first = compose_task_prompt("do the thing", 1);
+        assert!(!first.contains(RERUN_INSTRUCTION));
+        assert!(first.contains(ACCESS_PLANNING_INSTRUCTION));
+        assert!(first.contains("do the thing"));
+
+        // Second attempt: the re-run notice is present, on top of the same
+        // access-planning wrapper and original prompt.
+        let second = compose_task_prompt("do the thing", 2);
+        assert!(second.contains(RERUN_INSTRUCTION));
+        assert!(second.contains("attempt 2"));
+        assert!(second.contains(ACCESS_PLANNING_INSTRUCTION));
+        assert!(second.contains("do the thing"));
     }
 
     #[test]
