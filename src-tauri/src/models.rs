@@ -410,6 +410,10 @@ pub struct Task {
     pub project_path: String,
     pub title: String,
     pub prompt: String,
+    /// Absolute paths of files attached to the prompt. Passed to the provider
+    /// as real attachments (opencode) or listed in the prompt (other CLIs).
+    #[serde(default)]
+    pub attachments: Vec<String>,
     #[serde(default)]
     pub isolation: Isolation,
     #[serde(default)]
@@ -1103,6 +1107,9 @@ pub struct NewTask {
     pub local_id: Option<String>,
     pub title: String,
     pub prompt: String,
+    /// Absolute paths of files to attach to the prompt.
+    #[serde(default)]
+    pub attachments: Vec<String>,
     #[serde(default)]
     pub isolation: Option<Isolation>,
     #[serde(default)]
@@ -1134,6 +1141,9 @@ pub struct TaskPatch {
     pub title: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Absolute paths of files attached to the prompt; `None` leaves them.
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
     #[serde(default)]
     pub isolation: Option<Isolation>,
     #[serde(default)]

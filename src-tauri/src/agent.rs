@@ -197,6 +197,87 @@ pub fn compose_task_prompt(prompt: &str, attempt: u32) -> String {
     with_access_planning(&body)
 }
 
+/// One file attached to a task prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// A `file://` URL opencode's prompt API understands.
+    pub uri: String,
+    /// The original absolute path, kept for providers without real attachments.
+    pub path: String,
+    /// The file's display name (its basename).
+    pub name: String,
+}
+
+/// Turn an absolute path into a `file://` URL. Special characters are
+/// percent-encoded so paths with spaces or `#` still resolve. Windows paths
+/// (`C:\dir\file`) become `file:///C:/dir/file`.
+pub fn file_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut out = String::with_capacity(normalized.len() + 8);
+    out.push_str("file://");
+    if !normalized.starts_with('/') {
+        out.push('/');
+    }
+    for &b in normalized.as_bytes() {
+        let keep =
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~' | b':');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Build the attachments for a list of paths: trimmed, de-duplicated, blanks
+/// dropped, with each path's name and `file://` URL.
+pub fn attachments(paths: &[String]) -> Vec<Attachment> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in paths {
+        let path = raw.trim();
+        if path.is_empty() || !seen.insert(path.to_string()) {
+            continue;
+        }
+        let name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or(path)
+            .to_string();
+        out.push(Attachment {
+            uri: file_uri(path),
+            path: path.to_string(),
+            name,
+        });
+    }
+    out
+}
+
+/// Append a note listing the attached files. Every provider gets it, so a CLI
+/// (which cannot receive real attachments) can still open them by path; the
+/// opencode server additionally receives the files themselves.
+pub fn apply_attachments(prompt: &str, files: &[Attachment]) -> String {
+    if files.is_empty() {
+        return prompt.to_string();
+    }
+    let list = files
+        .iter()
+        .map(|f| format!("- {}", f.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{prompt}\n\nThe user attached the following file(s) to this task. Use them as \
+         needed:\n{list}"
+    )
+}
+
+/// Trim, drop blanks, and de-duplicate attachment paths (stored on a task).
+pub fn attachment_paths(paths: &[String]) -> Vec<String> {
+    attachments(paths).into_iter().map(|a| a.path).collect()
+}
+
 /// Expand `{{project_name}}`, `{{project_path}}`, `{{current_branch}}` and
 /// `{{env.NAME}}` (also `{{env:NAME}}` and `{{$NAME}}`). Unknown tokens are
 /// left as-is so typos are visible.
@@ -998,5 +1079,67 @@ mod tests {
         );
         assert_eq!(provider, Provider::Opencode);
         assert_eq!(model.as_deref(), Some("opencode-go/deepseek-v4.1-flash"));
+    }
+
+    #[test]
+    fn file_uris_encode_special_characters() {
+        assert_eq!(
+            file_uri("/Users/me/My Docs/a b#c.png"),
+            "file:///Users/me/My%20Docs/a%20b%23c.png"
+        );
+        assert_eq!(file_uri("/tmp/plain.txt"), "file:///tmp/plain.txt");
+    }
+
+    #[test]
+    fn file_uris_handle_windows_paths() {
+        assert_eq!(file_uri(r"C:\Users\me\a.txt"), "file:///C:/Users/me/a.txt");
+    }
+
+    #[test]
+    fn attachments_trim_dedupe_and_drop_blanks() {
+        let paths = vec![
+            "  /tmp/a.txt  ".to_string(),
+            "/tmp/a.txt".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "/tmp/img.png".to_string(),
+        ];
+        let files = attachments(&paths);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "/tmp/a.txt");
+        assert_eq!(files[0].name, "a.txt");
+        assert_eq!(files[0].uri, "file:///tmp/a.txt");
+        assert_eq!(files[1].name, "img.png");
+    }
+
+    #[test]
+    fn attachment_names_use_the_last_path_segment() {
+        let files = attachments(&["/a/b/c/report.pdf".to_string()]);
+        assert_eq!(files[0].name, "report.pdf");
+    }
+
+    #[test]
+    fn apply_attachments_lists_paths_and_is_a_no_op_when_empty() {
+        assert_eq!(apply_attachments("do it", &[]), "do it");
+        let files = attachments(&["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()]);
+        let out = apply_attachments("do it", &files);
+        assert!(out.starts_with("do it"));
+        assert!(out.contains("- /tmp/a.txt"));
+        assert!(out.contains("- /tmp/b.png"));
+        assert!(out.contains("attached"));
+    }
+
+    #[test]
+    fn attachment_paths_normalize_like_attachments() {
+        let paths = vec![
+            " /tmp/a.txt ".to_string(),
+            "/tmp/a.txt".to_string(),
+            "".to_string(),
+            "/tmp/b.png".to_string(),
+        ];
+        assert_eq!(
+            attachment_paths(&paths),
+            vec!["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()]
+        );
     }
 }

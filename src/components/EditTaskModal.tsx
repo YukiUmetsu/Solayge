@@ -40,6 +40,7 @@ export function EditTaskModal({
     kind: task.kind ?? "agent",
     title: task.title,
     prompt: task.prompt,
+    attachments: task.attachments ?? [],
     command: task.command ?? "",
     separation: taskSeparation(task),
     newBranch: task.new_branch ?? "",
@@ -75,6 +76,10 @@ export function EditTaskModal({
       const patch: TaskPatch = {
         title: form.title.trim(),
         prompt: shell ? form.command.trim() : form.prompt,
+        // Attachments only apply to agent prompts; switching to a command or a
+        // git/merge task clears any that were attached before.
+        attachments:
+          !special && form.kind === "agent" ? form.attachments : [],
         isolation,
         branch_mode,
         // Only a "new branch" task uses a branch name; clear it otherwise.

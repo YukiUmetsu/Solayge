@@ -14,6 +14,7 @@ import {
 import { displayStatus, canEditTask, canMessageTask, statusMeta } from "../lib/tasks";
 import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskSeparation } from "../lib/providers";
 import { useNow } from "../lib/useNow";
+import { fileName } from "../lib/attachments";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
 import { classifyLine, LogBody } from "./LogView";
@@ -726,6 +727,26 @@ function DetailsView({
           {task.prompt}
         </pre>
       </Field>
+
+      {task.attachments && task.attachments.length > 0 && (
+        <Field label="Attachments">
+          <ul className="space-y-1">
+            {task.attachments.map((path) => (
+              <li
+                key={path}
+                className="flex items-center gap-2 rounded-lg border border-line bg-well px-2.5 py-1.5 text-[11.5px] text-ink-muted"
+                title={path}
+              >
+                <Icon name="file" className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate text-ink">{fileName(path)}</span>
+                <span className="mono truncate text-[10.5px] text-ink-faint">
+                  {path}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Field>
+      )}
 
       {task.command && (
         <Field label="Command">

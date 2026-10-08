@@ -23,6 +23,9 @@ export function Modal({
         onClick={onClose}
       />
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className={`panel relative z-10 flex max-h-[88vh] w-full ${width} flex-col overflow-hidden rounded-2xl shadow-2xl`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">

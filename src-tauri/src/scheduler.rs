@@ -794,6 +794,8 @@ struct TaskRun {
     project: String,
     title: String,
     prompt: String,
+    /// Absolute paths of files attached to the prompt.
+    attachments: Vec<String>,
     isolation: Isolation,
     profile: PermissionProfile,
     base_ref: Option<String>,
@@ -829,6 +831,7 @@ fn load_run(app: &AppHandle, id: &str) -> Option<TaskRun> {
         project: t.project_path.clone(),
         title: t.title.clone(),
         prompt: t.prompt.clone(),
+        attachments: t.attachments.clone(),
         isolation: t.isolation,
         profile: t.profile,
         base_ref: t.base_ref.clone(),
@@ -1331,6 +1334,7 @@ async fn start_agent_task(app: AppHandle, run: TaskRun) {
     };
     let base = agent::compose_task_prompt(&run.prompt, run.attempts);
     let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
+    let prompt = agent::apply_attachments(&prompt, &agent::attachments(&run.attachments));
 
     let mut cmd = match agent::build_command(
         run.provider,
@@ -1372,6 +1376,8 @@ async fn opencode_setup(
     };
     let base = agent::compose_task_prompt(&run.prompt, run.attempts);
     let prompt = agent::apply_system_prompt(&base, ctx.system_prompt.as_ref(), &pctx);
+    let prompt = agent::apply_attachments(&prompt, &agent::attachments(&run.attachments));
+    let files = agent::attachments(&run.attachments);
 
     let conn = opencode_server::ensure_server().await?;
     let session = opencode_server::create_session(
@@ -1385,7 +1391,7 @@ async fn opencode_setup(
     // Send the initial prompt before recording the session: if the send fails
     // the run falls back to the CLI, and a session that never received the task
     // must not be offered to the user as resumable.
-    opencode_server::prompt(&conn, &session, &prompt).await?;
+    opencode_server::prompt_with_files(&conn, &session, &prompt, &files).await?;
     // Remember the session so the user can send the agent messages while it runs.
     set_task_session(app, &run.id, &session);
     Ok((conn, session))
@@ -3195,6 +3201,7 @@ mod tests {
             project_path: project.to_string(),
             title: id.to_string(),
             prompt: "p".to_string(),
+            attachments: Vec::new(),
             isolation,
             profile: PermissionProfile::default(),
             last_permission: None,

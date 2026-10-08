@@ -93,6 +93,9 @@ Solayge turns that graph into something you can see and control:
   you or the agent), or the **current branch**.
 - **Task controls** — start now, cancel, retry, remove worktree, delete, clear
   finished.
+- **Attachments** — attach any number of files to an agent task's prompt. Under
+  opencode the files reach the model directly (text and images); other providers
+  receive their paths in the prompt.
 - **Edit before it runs** — a task that has not started yet (a **draft**, or one
   **waiting** on its dependencies or **ready** in the queue) can still be edited:
   title, prompt, kind, separation, delay, permissions, and dependencies. Editing
@@ -216,10 +219,18 @@ Checks used in development:
 ```bash
 pnpm build                     # tsc + vite build (frontend)
 
+pnpm test                      # frontend unit/component tests (Vitest + Testing Library)
+pnpm test:coverage             # the same, with a coverage report
+pnpm test:e2e                  # end-to-end tests (Playwright, mocked Tauri IPC)
+
 cd src-tauri
 cargo test                     # unit tests
 cargo clippy --all-targets     # lints
 ```
+
+The Playwright suite drives the real Vite frontend with a mocked Tauri IPC
+bridge (`e2e/tauri-mock.ts`), so it needs no Rust toolchain, git, or provider
+CLIs. It starts its own dev server on port 4317 to stay clear of `tauri dev`.
 
 ## Concepts
 

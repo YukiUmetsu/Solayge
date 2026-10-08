@@ -574,6 +574,7 @@ pub fn create_tasks(
             project_path: project_path.clone(),
             title: nt.title.clone(),
             prompt: nt.prompt.clone(),
+            attachments: agent::attachment_paths(&nt.attachments),
             isolation: nt
                 .isolation
                 .unwrap_or(default_isolation.unwrap_or_default()),
@@ -690,6 +691,9 @@ fn apply_task_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
     }
     if let Some(v) = patch.prompt {
         t.prompt = v;
+    }
+    if let Some(v) = patch.attachments {
+        t.attachments = agent::attachment_paths(&v);
     }
     if let Some(v) = patch.isolation {
         t.isolation = v;
@@ -1944,6 +1948,7 @@ mod tests {
             project_path: "/p".into(),
             title: "t".into(),
             prompt: "p".into(),
+            attachments: Vec::new(),
             isolation,
             profile: PermissionProfile::default(),
             last_permission: None,
@@ -2115,6 +2120,7 @@ mod tests {
         TaskPatch {
             title: title.map(str::to_string),
             prompt: prompt.map(str::to_string),
+            attachments: None,
             isolation: None,
             profile: None,
             base_ref: None,
@@ -2150,6 +2156,7 @@ mod tests {
             TaskPatch {
                 title: Some("new title".into()),
                 prompt: Some("new prompt".into()),
+                attachments: Some(vec!["/tmp/a.png".into()]),
                 isolation: Some(Isolation::Shared),
                 profile: Some(PermissionProfile::Readonly),
                 base_ref: Some("main".into()),
@@ -2165,6 +2172,7 @@ mod tests {
 
         assert_eq!(t.title, "new title");
         assert_eq!(t.prompt, "new prompt");
+        assert_eq!(t.attachments, vec!["/tmp/a.png".to_string()]);
         assert_eq!(t.isolation, Isolation::Shared);
         assert_eq!(t.profile, PermissionProfile::Readonly);
         assert_eq!(t.base_ref.as_deref(), Some("main"));
@@ -2186,6 +2194,7 @@ mod tests {
             TaskPatch {
                 title: None,
                 prompt: None,
+                attachments: None,
                 isolation: None,
                 profile: None,
                 base_ref: Some("   ".into()),
@@ -2199,6 +2208,26 @@ mod tests {
         )
         .unwrap();
         assert!(t.base_ref.is_none(), "a blank base ref means unset");
+    }
+
+    #[test]
+    fn an_attachment_patch_replaces_and_can_clear_the_list() {
+        let mut t = task(TaskStatus::Draft, Isolation::Worktree);
+        t.attachments = vec!["/tmp/old.txt".into()];
+        let mut p = patch(None, None);
+        p.attachments = Some(vec![" /tmp/new.txt ".into(), "/tmp/new.txt".into()]);
+        apply_task_patch(&mut t, p).unwrap();
+        assert_eq!(t.attachments, vec!["/tmp/new.txt".to_string()]);
+
+        // An empty list clears the attachments; omitting the field leaves them.
+        let mut p = patch(None, None);
+        p.attachments = Some(Vec::new());
+        apply_task_patch(&mut t, p).unwrap();
+        assert!(t.attachments.is_empty());
+
+        t.attachments = vec!["/tmp/keep.txt".into()];
+        apply_task_patch(&mut t, patch(None, None)).unwrap();
+        assert_eq!(t.attachments, vec!["/tmp/keep.txt".to_string()]);
     }
 
     #[test]

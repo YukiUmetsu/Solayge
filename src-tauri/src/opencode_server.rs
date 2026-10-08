@@ -205,10 +205,42 @@ pub async fn create_session(
 }
 
 pub async fn prompt(conn: &Connection, session: &str, text: &str) -> Result<(), String> {
+    prompt_with_files(conn, session, text, &[]).await
+}
+
+/// Build the JSON body for a prompt. Attachments are sent as `files` parts so
+/// opencode can pass supported ones (text, directories, images) to the model.
+pub fn prompt_body(text: &str, files: &[crate::agent::Attachment]) -> Value {
+    let mut body = json!({ "text": text });
+    if !files.is_empty() {
+        body["files"] = Value::Array(
+            files
+                .iter()
+                .map(|f| json!({ "uri": f.uri, "name": f.name }))
+                .collect(),
+        );
+    }
+    body
+}
+
+/// Send a prompt with file attachments. The opencode server reads each file
+/// before admitting the prompt, so files the user attached work even when they
+/// live outside the task's directory.
+pub async fn prompt_with_files(
+    conn: &Connection,
+    session: &str,
+    text: &str,
+    files: &[crate::agent::Attachment],
+) -> Result<(), String> {
     let path = format!("/api/session/{session}/prompt");
-    request(conn, reqwest::Method::POST, &path, Some(json!({ "text": text })))
-        .await
-        .map(|_| ())
+    request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(prompt_body(text, files)),
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn interrupt(conn: &Connection, session: &str) -> Result<(), String> {
@@ -669,6 +701,28 @@ mod tests {
         );
         assert_eq!(model_ref(Some("bare-model")), None);
         assert_eq!(model_ref(None), None);
+    }
+
+    #[test]
+    fn a_plain_prompt_has_no_files_key() {
+        let body = prompt_body("do it", &[]);
+        assert_eq!(body["text"], "do it");
+        assert!(body.get("files").is_none());
+    }
+
+    #[test]
+    fn attachments_are_sent_as_file_parts() {
+        let files = crate::agent::attachments(&[
+            "/tmp/a.txt".to_string(),
+            "/tmp/pic.png".to_string(),
+        ]);
+        let body = prompt_body("look", &files);
+        assert_eq!(body["text"], "look");
+        let arr = body["files"].as_array().expect("files");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["uri"], "file:///tmp/a.txt");
+        assert_eq!(arr[0]["name"], "a.txt");
+        assert_eq!(arr[1]["name"], "pic.png");
     }
 
     #[test]

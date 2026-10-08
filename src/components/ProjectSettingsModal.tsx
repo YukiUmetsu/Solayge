@@ -542,10 +542,14 @@ function SystemPromptSection({
       <div className="flex items-center gap-2">
         <select
           className="select !w-auto"
-          disabled={disabled || !value.enabled}
+          disabled={disabled}
           value={value.position}
           onChange={(e) =>
-            onChange({ position: e.target.value as SystemPromptPosition })
+            // Changing the prompt turns it on, so the edit takes effect.
+            onChange({
+              position: e.target.value as SystemPromptPosition,
+              enabled: true,
+            })
           }
         >
           <option value="prefix">Before the prompt</option>
@@ -555,10 +559,19 @@ function SystemPromptSection({
       <textarea
         className="input mono min-h-[84px] resize-y !text-[11.5px]"
         placeholder="e.g. This project uses pnpm. Always run tests on {{current_branch}} before finishing."
-        disabled={disabled || !value.enabled}
+        disabled={disabled}
         value={value.text}
-        onChange={(e) => onChange({ text: e.target.value })}
+        onChange={(e) =>
+          // Typing enables the prompt; uncheck Enabled to keep the text without
+          // applying it.
+          onChange({ text: e.target.value, enabled: true })
+        }
       />
+      <p className="text-[11px] leading-relaxed text-ink-subtle">
+        {value.enabled
+          ? "This prompt is added to every task prompt in this project."
+          : "This prompt is kept but not applied. Type or pick a position to enable it."}
+      </p>
     </section>
   );
 }

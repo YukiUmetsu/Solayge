@@ -289,6 +289,8 @@ export interface Task {
   project_path: string;
   title: string;
   prompt: string;
+  /** Absolute paths of files attached to the prompt. */
+  attachments?: string[];
   isolation: Isolation;
   profile: PermissionProfile;
   last_permission?: string | null;
@@ -482,6 +484,8 @@ export interface NewTask {
   local_id?: string | null;
   title: string;
   prompt: string;
+  /** Absolute paths of files to attach to the prompt. */
+  attachments?: string[];
   isolation?: Isolation | null;
   profile?: PermissionProfile | null;
   after?: string[];
@@ -498,6 +502,8 @@ export interface NewTask {
 export interface TaskPatch {
   title?: string;
   prompt?: string;
+  /** Absolute paths of files attached to the prompt; `[]` clears them. */
+  attachments?: string[];
   isolation?: Isolation;
   profile?: PermissionProfile;
   base_ref?: string;

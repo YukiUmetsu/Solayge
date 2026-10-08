@@ -28,7 +28,9 @@ export type IconName =
   | "code"
   | "eye"
   | "expand"
-  | "collapse";
+  | "collapse"
+  | "paperclip"
+  | "file";
 
 const PATHS: Record<IconName, ReactNode> = {
   play: <polygon points="6 4 20 12 6 20 6 4" />,
@@ -167,6 +169,15 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <polyline points="7 11 12 6 17 11" />
       <polyline points="7 17 12 12 17 17" />
+    </>
+  ),
+  paperclip: (
+    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+  ),
+  file: (
+    <>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
     </>
   ),
 };
