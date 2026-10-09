@@ -20,6 +20,7 @@ import {
 import { Composer, type SendState } from "../components/Composer";
 import { EmptyState } from "../components/EmptyState";
 import { ErrorState } from "../components/ErrorState";
+import { Markdown } from "../components/Markdown";
 import { Modal } from "../components/Modal";
 import { StatusPill } from "../components/StatusPill";
 
@@ -200,6 +201,16 @@ export function SessionDetail({
         <div className="detail__meta">
           <span className="detail__agent">{agentLabel(header.agent)}</span>
           <StatusPill view={statusView} size="sm" />
+          <button
+            className="detail__refresh"
+            type="button"
+            onClick={() => void load()}
+            disabled={loading || isReadOnly}
+            aria-label="Reload this task from the desktop"
+            title="Reload this task from the desktop"
+          >
+            {loading ? "…" : "⟳"}
+          </button>
         </div>
       </header>
 
@@ -211,9 +222,31 @@ export function SessionDetail({
 
       <section className="detail__section" aria-label="Latest summary">
         <h2 className="detail__section-title">Latest summary</h2>
-        <p className="detail__summary">{session?.summary ?? "No summary reported yet."}</p>
+        {session?.summary ? (
+          <Markdown>{session.summary}</Markdown>
+        ) : (
+          <p className="detail__sub">No summary reported yet.</p>
+        )}
         <p className="detail__sub">Updated {relativeTime(header.updated_at, now())}</p>
       </section>
+
+      {session && (session.prompt || session.log_tail) ? (
+        <details className="disclosure detail__details">
+          <summary>Task details</summary>
+          {session.prompt ? (
+            <div className="detail__block">
+              <h3 className="detail__block-title">Prompt</h3>
+              <pre className="detail__code mono">{session.prompt}</pre>
+            </div>
+          ) : null}
+          {session.log_tail ? (
+            <div className="detail__block">
+              <h3 className="detail__block-title">Recent log</h3>
+              <pre className="detail__code mono">{session.log_tail}</pre>
+            </div>
+          ) : null}
+        </details>
+      ) : null}
 
       <section className="detail__section" aria-label="Current step">
         <h2 className="detail__section-title">Current step</h2>

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { MockRemoteClient } from "../client/mock";
 import { FIXED_NOW, renderWithClient } from "../test/render";
@@ -38,6 +39,32 @@ describe("Sessions home", () => {
       new MockRemoteClient({ empty: true, now: () => FIXED_NOW }),
     );
     expect(await screen.findByText("No sessions yet")).toBeInTheDocument();
+  });
+
+  it("shows draft tasks under their own group", async () => {
+    renderWithClient(
+      <SessionsHome onOpenSession={() => {}} />,
+      new MockRemoteClient({
+        now: () => FIXED_NOW,
+        drafts: [{ title: "Plan the migration" }],
+      }),
+    );
+    expect(await screen.findByText("Plan the migration")).toBeInTheDocument();
+    const drafts = screen.getByRole("region", { name: "Drafts" });
+    expect(within(drafts).getByText("Plan the migration")).toBeInTheDocument();
+    expect(within(drafts).getByText("Draft")).toBeInTheDocument();
+  });
+
+  it("reloads all task data from the desktop", async () => {
+    const user = userEvent.setup();
+    const c = new MockRemoteClient({ now: () => FIXED_NOW });
+    const spy = vi.spyOn(c, "listSessions");
+    renderWithClient(<SessionsHome onOpenSession={() => {}} />, c);
+    await screen.findByText("Refactor UI");
+
+    const before = spy.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Reload all tasks from the desktop" }));
+    expect(spy.mock.calls.length).toBeGreaterThan(before);
   });
 
   it("shows an error state when the desktop is unreachable and nothing is cached", async () => {

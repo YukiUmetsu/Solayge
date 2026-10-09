@@ -5,6 +5,7 @@ import { needsInput as sessionNeedsInput } from "./status";
 export type InboxFilter = "decision" | "questions";
 
 export interface GroupedSessions {
+  drafts: SessionSummary[];
   needsInput: SessionSummary[];
   active: SessionSummary[];
   recent: SessionSummary[];
@@ -15,16 +16,19 @@ export function isActiveStatus(status: string): boolean {
 }
 
 /**
- * Order the sessions home: needs-input first, then active, then recent; each
- * group sorted by most recent activity (mobile spec section 7.2 B).
+ * Order the sessions home: drafts, then needs-input, then active, then recent;
+ * each group sorted by most recent activity (mobile spec section 7.2 B).
  */
 export function groupSessions(sessions: SessionSummary[]): GroupedSessions {
   const sorted = [...sessions].sort((a, b) => b.updated_at - a.updated_at);
+  const drafts: SessionSummary[] = [];
   const needsInput: SessionSummary[] = [];
   const active: SessionSummary[] = [];
   const recent: SessionSummary[] = [];
   for (const session of sorted) {
-    if (sessionNeedsInput(session.status, session.pending_decisions)) {
+    if (session.status === "draft") {
+      drafts.push(session);
+    } else if (sessionNeedsInput(session.status, session.pending_decisions)) {
       needsInput.push(session);
     } else if (isActiveStatus(session.status)) {
       active.push(session);
@@ -32,7 +36,7 @@ export function groupSessions(sessions: SessionSummary[]): GroupedSessions {
       recent.push(session);
     }
   }
-  return { needsInput, active, recent };
+  return { drafts, needsInput, active, recent };
 }
 
 /** The Inbox filter: permission requests vs agent questions. */

@@ -21,6 +21,7 @@ import {
   type RemoteClient,
   type TransportMode,
 } from "./remote";
+import type { TaskCache } from "./cache";
 import type { ConnectionStatus } from "./status";
 
 export interface ClientData {
@@ -72,6 +73,8 @@ export interface ClientProviderProps {
   onAddDesktop?: () => void;
   /** Periodic refresh interval; 0 disables it (tests do this). */
   refreshIntervalMs?: number;
+  /** On-device cache for the offline view. Omitted in tests (no caching). */
+  cache?: TaskCache;
   children: ReactNode;
 }
 
@@ -85,6 +88,7 @@ export function ClientProvider({
   onTransportModeChange,
   onAddDesktop,
   refreshIntervalMs = 0,
+  cache,
   children,
 }: ClientProviderProps) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -135,12 +139,14 @@ export function ClientProvider({
       ]);
       if (token !== refreshToken.current) return;
       setDesktop(metadata);
-      setData({
+      const next: ClientData = {
         projects,
         sessions,
         approvals,
         updatedAt: now(),
-      });
+      };
+      setData(next);
+      cache?.write(desktopId, next, next.updatedAt ?? now());
       setStatus("online");
     } catch (caught) {
       if (token !== refreshToken.current) return;
@@ -166,19 +172,29 @@ export function ClientProvider({
     } finally {
       if (token === refreshToken.current) setLoading(false);
     }
-  }, [client, now]);
+  }, [client, now, cache, desktopId]);
 
   // Host-scoped data must never survive a desktop switch. Otherwise the
   // previous desktop's sessions and approvals would remain visible — and
   // actionable — under the newly selected desktop until its reads complete,
-  // which could send a decision to the wrong host. Reset to a read-only
-  // "connecting" state before the new host's data loads.
+  // which could send a decision to the wrong host. Reset to the new host's
+  // cached (read-only) view, or to empty when there is no cache.
   useEffect(() => {
-    setData(EMPTY_DATA);
+    const cached = cache?.read(desktopId, now());
+    setData(
+      cached
+        ? {
+            projects: cached.projects,
+            sessions: cached.sessions,
+            approvals: cached.approvals,
+            updatedAt: cached.savedAt,
+          }
+        : EMPTY_DATA,
+    );
     setDesktop(null);
     setStatus("connecting");
     setError(null);
-  }, [client, desktopId]);
+  }, [client, desktopId, now, cache]);
 
   useEffect(() => {
     void refresh();

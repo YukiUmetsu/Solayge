@@ -29,6 +29,16 @@ describe("session grouping", () => {
     expect(grouped.active.map((s) => s.id)).toEqual(["active"]);
     expect(grouped.recent.map((s) => s.id)).toEqual(["recent"]);
   });
+
+  it("groups drafts separately and first", () => {
+    const sessions = [
+      session({ id: "draft", status: "draft", updated_at: 5 }),
+      session({ id: "run", status: "running", updated_at: 10 }),
+    ];
+    const grouped = groupSessions(sessions);
+    expect(grouped.drafts.map((s) => s.id)).toEqual(["draft"]);
+    expect(grouped.active.map((s) => s.id)).toEqual(["run"]);
+  });
 });
 
 describe("approval filtering", () => {

@@ -132,6 +132,8 @@ export function sessionStatusView(
     case "completed":
     case "succeeded":
       return { label: "Completed", icon: "✓", tone: "success" };
+    case "draft":
+      return { label: "Draft", icon: "✎", tone: "neutral" };
     case "failed":
       return { label: "Failed", icon: "!", tone: "danger" };
     case "canceled":

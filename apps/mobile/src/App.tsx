@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AddDesktopFlow } from "./AddDesktopFlow";
 import { ClientProvider, useClientContext } from "./client/ClientContext";
+import { createLocalStorageCache } from "./client/cache";
 import { MockRemoteClient } from "./client/mock";
 import type { PairedDesktop, RemoteClient, TransportMode } from "./client/remote";
 import { TauriRemoteClient } from "./client/tauri";
@@ -69,6 +70,13 @@ export default function App({
     [clientFactory, desktopId],
   );
 
+  // The shipped app caches task data for offline use; tests (which pass their
+  // own desktops) opt out so cache state never leaks between cases.
+  const cache = useMemo(
+    () => (controlled ? undefined : createLocalStorageCache()),
+    [controlled],
+  );
+
   const handlePaired = useCallback(
     (record: PairedDesktopRecord) => {
       setDesktops((prev) => [
@@ -101,6 +109,7 @@ export default function App({
       onSelectDesktop={setDesktopId}
       onAddDesktop={addDesktop}
       refreshIntervalMs={30_000}
+      cache={cache}
     >
       {showAddDesktop ? (
         <div className="app">

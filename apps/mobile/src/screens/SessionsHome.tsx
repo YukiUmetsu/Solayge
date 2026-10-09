@@ -69,17 +69,45 @@ export function SessionsHome({ onOpenSession }: { onOpenSession: (id: string) =>
 
   if (data.sessions.length === 0) {
     return (
-      <EmptyState
-        icon="≣"
-        title="No sessions yet"
-        body="When your desktop runs a task, it appears here with its project, agent, and status."
-      />
+      <div className="sessions-home">
+        <EmptyState
+          icon="≣"
+          title="No sessions yet"
+          body="When your desktop runs a task, it appears here with its project, agent, and status."
+        />
+        <button
+          className="sessions-home__refresh btn"
+          type="button"
+          onClick={() => void refresh()}
+          disabled={loading}
+        >
+          <span aria-hidden="true">⟳</span> {loading ? "Loading…" : "Reload from desktop"}
+        </button>
+      </div>
     );
   }
 
   return (
     <div className="sessions-home">
-      <h1 className="sr-only">Sessions</h1>
+      <div className="sessions-home__bar">
+        <h1 className="sr-only">Sessions</h1>
+        <button
+          className="sessions-home__refresh btn"
+          type="button"
+          onClick={() => void refresh()}
+          disabled={loading}
+          aria-label="Reload all tasks from the desktop"
+          title="Reload all tasks from the desktop"
+        >
+          <span aria-hidden="true">⟳</span> {loading ? "Loading…" : "Reload all"}
+        </button>
+      </div>
+      <SessionGroup
+        label="Drafts"
+        sessions={grouped.drafts}
+        projectName={projectName}
+        onOpenSession={onOpenSession}
+      />
       <SessionGroup
         label="Needs your input"
         sessions={grouped.needsInput}

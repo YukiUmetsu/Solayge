@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClientDiagnostics, TransportMode } from "../client/remote";
 import { useClientContext } from "../client/ClientContext";
+import {
+  clearCachedData,
+  DEFAULT_RETENTION_DAYS,
+  loadRetention,
+  retentionFor,
+  setProjectRetention,
+  type RetentionConfig,
+} from "../client/cache";
 import { connectionStatusView } from "../client/status";
 import { Modal } from "../components/Modal";
 import { StatusPill } from "../components/StatusPill";
@@ -40,6 +48,17 @@ export function Settings({
   const [copied, setCopied] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [records, setRecords] = useState<PairedDesktopRecord[]>([]);
+  const [retention, setRetention] = useState<RetentionConfig>(() => loadRetention());
+  const [cacheCleared, setCacheCleared] = useState(false);
+
+  function updateRetention(projectId: string, days: number) {
+    setRetention(setProjectRetention(projectId, days));
+  }
+
+  function clearCache() {
+    clearCachedData(desktopId);
+    setCacheCleared(true);
+  }
 
   useEffect(() => {
     pairingApi
@@ -208,6 +227,39 @@ export function Settings({
         </ul>
         <button className="btn" type="button" onClick={() => setAddOpen(true)}>
           + Add a desktop
+        </button>
+      </section>
+
+      <section className="detail__section" aria-label="Task data caching">
+        <h2 className="detail__section-title">Task data caching</h2>
+        <p className="detail__sub">
+          How long task data is kept on this device for offline viewing. Default {DEFAULT_RETENTION_DAYS}{" "}
+          days; set 0 to keep nothing. Cached data is read-only and never used to authorize actions.
+        </p>
+        <ul className="cache-list">
+          {data.projects.map((project) => (
+            <li key={project.id} className="cache-row">
+              <span className="cache-row__name">{project.name}</span>
+              <label className="cache-row__days">
+                <input
+                  type="number"
+                  className="cache-row__input"
+                  min={0}
+                  max={3650}
+                  value={retentionFor(project.id, retention)}
+                  onChange={(event) => updateRetention(project.id, Number(event.target.value))}
+                  aria-label={`Retention for ${project.name} in days`}
+                />
+                <span>days</span>
+              </label>
+            </li>
+          ))}
+          {data.projects.length === 0 ? (
+            <li className="detail__sub">Connect to a desktop to configure per-project caching.</li>
+          ) : null}
+        </ul>
+        <button className="btn btn--small" type="button" onClick={clearCache}>
+          {cacheCleared ? "Cached data cleared" : "Clear cached data"}
         </button>
       </section>
 

@@ -24,6 +24,27 @@ describe("Session detail (loopback client)", () => {
     expect(screen.getByRole("button", { name: /Run command\?/ })).toBeInTheDocument();
   });
 
+  it("shows the prompt and log in an expandable details section, and reloads on demand", async () => {
+    const user = userEvent.setup();
+    const c = client();
+    const spy = vi.spyOn(c, "getSession");
+    renderWithClient(
+      <SessionDetail sessionId="ses_1" onOpenApproval={() => {}} pollMs={0} />,
+      c,
+    );
+    await screen.findByRole("heading", { name: "Refactor UI" });
+
+    // Collapsed by default.
+    expect(screen.queryByText(/Refactor the header and network panels/)).toBeNull();
+    await user.click(await screen.findByText("Task details"));
+    expect(screen.getByText(/Refactor the header and network panels/)).toBeInTheDocument();
+    expect(screen.getByText(/pnpm test/)).toBeInTheDocument();
+
+    const before = spy.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Reload this task from the desktop" }));
+    expect(spy.mock.calls.length).toBeGreaterThan(before);
+  });
+
   it("keeps the transcript collapsed until expanded", async () => {
     const user = userEvent.setup();
     renderWithClient(

@@ -46,6 +46,8 @@ export interface MockClientOptions {
   autoAdvance?: boolean;
   /** The clock used to seed relative timestamps (seconds since epoch). */
   now?: () => number;
+  /** Extra draft sessions to seed (drafts are otherwise not in the fixture). */
+  drafts?: { title: string; project_id?: string }[];
 }
 
 const AGENT_FIXTURE = "Claude Code";
@@ -102,6 +104,22 @@ export class MockRemoteClient implements RemoteClient {
     this.sessions = [];
     this.approvals = [];
     if (!options.empty) this.seed();
+    (options.drafts ?? []).forEach((draft, index) => {
+      this.sessions.push(
+        detail({
+          id: `draft_${index + 1}`,
+          project_id: draft.project_id ?? "/repo/solayge",
+          title: draft.title,
+          agent: AGENT_FIXTURE,
+          status: "draft",
+          pending_decisions: 0,
+          started_at: this.now(),
+          updated_at: this.now(),
+          summary: null,
+          files_changed: 0,
+        }),
+      );
+    });
   }
 
   // ---- connection ----
@@ -366,6 +384,9 @@ export class MockRemoteClient implements RemoteClient {
         started_at: now - 720,
         updated_at: now - 45,
         summary: "Updated 3 components; now running frontend tests.",
+        prompt: "Refactor the header and network panels, then run the frontend tests.",
+        log_tail:
+          "[12:01] Editing src/SessionView.tsx\n[12:02] Editing src/NetworkPanel.tsx\n[12:04] $ pnpm test\nRunning frontend tests…",
         files_changed: 2,
       }),
       detail({
