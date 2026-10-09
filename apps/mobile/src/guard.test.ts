@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 /**
- * The UI must not reach an OS capability directly. Screens, presentational
- * components, and the client seam talk only to `RemoteClient`; the sole
- * exception is the Tauri-backed barcode scanner inside the pairing onboarding
- * (`src/AddDesktopFlow.tsx` / `src/pairing.ts`), which is not scanned here.
+ * The UI must not reach an OS capability directly. Screens and presentational
+ * components talk only to `RemoteClient`; the allowed native boundaries are the
+ * transport clients under `src/client/` and the barcode scanner inside the
+ * pairing onboarding (`src/AddDesktopFlow.tsx`), which are not scanned here.
  *
  * Source text is loaded with Vite's `import.meta.glob` so the test needs no
  * filesystem access.
  */
-const sources = import.meta.glob("./{screens,components,client}/**/*.{ts,tsx}", {
+const sources = import.meta.glob("./{screens,components}/**/*.{ts,tsx}", {
   query: "?raw",
   import: "default",
   eager: true,

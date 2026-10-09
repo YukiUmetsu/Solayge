@@ -1566,6 +1566,11 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, S
 
 /// Send a test notification through the same path real ones use, so the user can
 /// confirm their OS notification settings allow Solayge to show anything.
+///
+/// On macOS a denied/failed delivery is reported through the Notifications tab's
+/// status banner (re-read right after this call) instead of being hidden in the
+/// error log. Delivery is always attempted so enabling notifications in System
+/// Settings takes effect without restarting the app.
 #[tauri::command]
 pub fn test_notification(app: AppHandle) -> Result<(), String> {
     crate::scheduler::notify(
@@ -1575,6 +1580,34 @@ pub fn test_notification(app: AppHandle) -> Result<(), String> {
         "This is a test notification.",
     );
     Ok(())
+}
+
+/// Whether the OS currently allows Solayge to show desktop notifications.
+/// `authorized`, `denied`, `undetermined`, or `supported` on platforms where the
+/// question does not apply.
+#[tauri::command]
+pub fn notification_status() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_notify::status_word().to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "supported".to_string()
+    }
+}
+
+/// Open the OS notification settings for Solayge when the platform can.
+#[tauri::command]
+pub fn open_notification_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_notify::open_settings()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Open your system settings and allow notifications for Solayge.".to_string())
+    }
 }
 
 /// The MIME type for a supported audio file extension (lowercased), or `None`.

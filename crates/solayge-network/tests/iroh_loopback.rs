@@ -22,7 +22,11 @@ struct MockHostHandler {
 }
 
 impl FrameHandler for MockHostHandler {
-    fn handle<'a>(&'a self, request: Envelope) -> BoxFuture<'a, Envelope> {
+    fn handle<'a>(
+        &'a self,
+        _session: &'a solayge_network::ConnectionSession,
+        request: Envelope,
+    ) -> BoxFuture<'a, Envelope> {
         Box::pin(async move {
             // Keep a copy so a failure can be reported as a correlated error
             // frame instead of dropping the connection.
@@ -253,7 +257,11 @@ async fn identity_verification_is_meaningful_for_dials_and_unknown_for_inbound()
 struct PendingHandler;
 
 impl FrameHandler for PendingHandler {
-    fn handle<'a>(&'a self, _request: Envelope) -> BoxFuture<'a, Envelope> {
+    fn handle<'a>(
+        &'a self,
+        _session: &'a solayge_network::ConnectionSession,
+        _request: Envelope,
+    ) -> BoxFuture<'a, Envelope> {
         Box::pin(std::future::pending())
     }
 }

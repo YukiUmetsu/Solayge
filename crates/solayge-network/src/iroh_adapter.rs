@@ -313,11 +313,15 @@ impl IrohTransport {
         connection: iroh::endpoint::Connection,
         expected_remote: Option<EndpointId>,
     ) -> IrohConnection {
+        // Bind the application session to the peer's transport endpoint id, so
+        // pairing and auth proofs are scoped to this connection.
+        let session = ConnectionSession::new(format!("iroh:{}", connection.remote_id()));
         IrohConnection {
             connection,
             endpoint: self.endpoint.clone(),
             role: self.role,
             expected_remote,
+            session,
             last_error: Mutex::new(None),
         }
     }
@@ -362,9 +366,71 @@ impl IrohTransport {
     }
 }
 
+/// Per-connection authentication state handed to a [`FrameHandler`].
+///
+/// The transport is deliberately identity-agnostic: it proves which *endpoint*
+/// key is on the other side, not which Solayge device. This cell lets the
+/// application layer bind an authenticated device id to exactly one connection,
+/// so a request can never be authorized by a device that authenticated on a
+/// different socket. The [`FrameHandler`] must clear or replace it if the
+/// transport re-authenticates.
+pub struct ConnectionSession {
+    authenticated_device: Mutex<Option<String>>,
+    transport_binding: String,
+}
+
+impl ConnectionSession {
+    /// A fresh, unauthenticated session bound to a transport-level identifier
+    /// (the remote endpoint id). The binding is signed into pairing and auth
+    /// transcripts so a proof cannot be replayed onto another connection.
+    pub fn new(transport_binding: impl Into<String>) -> Self {
+        ConnectionSession {
+            authenticated_device: Mutex::new(None),
+            transport_binding: transport_binding.into(),
+        }
+    }
+
+    /// The transport binding for this connection.
+    pub fn transport_binding(&self) -> &str {
+        &self.transport_binding
+    }
+
+    /// The authenticated device id, if the handshake has completed.
+    pub fn authenticated_device(&self) -> Option<String> {
+        self.authenticated_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Mark this connection as authenticated for `device_id`.
+    pub fn set_authenticated_device(&self, device_id: impl Into<String>) {
+        *self
+            .authenticated_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(device_id.into());
+    }
+
+    /// Drop the authentication (for example when the device is revoked).
+    pub fn clear_authenticated_device(&self) {
+        *self
+            .authenticated_device
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
 /// Authorization-agnostic frame handler used by the host listener and tests.
+///
+/// The [`ConnectionSession`] is per connection, so a handler can enforce its own
+/// per-connection authorization without the transport knowing anything about
+/// Solayge identities.
 pub trait FrameHandler: Send + Sync + 'static {
-    fn handle<'a>(&'a self, request: Envelope) -> BoxFuture<'a, Envelope>;
+    fn handle<'a>(
+        &'a self,
+        session: &'a ConnectionSession,
+        request: Envelope,
+    ) -> BoxFuture<'a, Envelope>;
 }
 
 /// One established, QUIC-authenticated Iroh connection.
@@ -376,6 +442,8 @@ pub struct IrohConnection {
     /// for inbound connections, whose identity is only established by the
     /// application-level authentication that follows.
     expected_remote: Option<EndpointId>,
+    /// The per-connection application session (authenticated device id).
+    session: ConnectionSession,
     last_error: Mutex<Option<String>>,
 }
 
@@ -464,7 +532,7 @@ impl IrohConnection {
     ) -> Result<(), NetworkError> {
         let request_bytes = read_frame(recv).await?;
         let request = Envelope::decode(&request_bytes).map_err(NetworkError::Protocol)?;
-        let response = handler.handle(request).await;
+        let response = handler.handle(&self.session, request).await;
         let response_bytes = response.encode().map_err(NetworkError::Protocol)?;
         write_frame(send, &response_bytes).await
     }
@@ -703,6 +771,30 @@ impl IrohRemoteClient {
     pub fn remote_endpoint_id(&self) -> &str {
         &self.endpoint_id
     }
+}
+
+/// Parse a published endpoint id string into a dial target. Addresses are left
+/// empty so the configured discovery service resolves them; a relay/direct hint
+/// is not invented here.
+pub fn endpoint_addr_from_id(id: &str) -> Result<EndpointAddr, String> {
+    let id: EndpointId = id
+        .parse()
+        .map_err(|e| format!("invalid Iroh endpoint id '{id}': {e}"))?;
+    Ok(EndpointAddr::new(id))
+}
+
+/// Build a stable endpoint secret key from 32 persisted bytes, so a host keeps
+/// the same endpoint id across restarts and a paired phone can still dial it.
+pub fn secret_key_from_seed(seed: &[u8; 32]) -> SecretKey {
+    SecretKey::from_bytes(seed)
+}
+
+/// [`IrohRemoteClient::connect`] from a published endpoint id string, resolving
+/// addresses through the configured discovery service.
+pub fn connect_by_endpoint_id(config: IrohConfig, endpoint_id: &str) -> Result<IrohRemoteClient, NetworkError> {
+    let peer = endpoint_addr_from_id(endpoint_id)
+        .map_err(NetworkError::internal)?;
+    IrohRemoteClient::connect(config, peer)
 }
 
 impl solayge_protocol::RemoteClient for IrohRemoteClient {

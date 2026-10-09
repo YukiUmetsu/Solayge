@@ -105,6 +105,17 @@ export function ClientProvider({
     setLoading(true);
     setError(null);
 
+    if (!client.isConnected() && client.connect) {
+      // A transport may have dropped since the last refresh; try to re-establish
+      // it before reporting offline so a transient loss recovers on its own.
+      try {
+        await client.connect();
+      } catch {
+        /* fall through to the offline state below */
+      }
+      if (token !== refreshToken.current) return;
+    }
+
     if (!client.isConnected()) {
       if (token === refreshToken.current) {
         setStatus("offline");
@@ -136,8 +147,15 @@ export function ClientProvider({
       const code = caught instanceof RemoteError ? caught.code : "internal";
       const message = caught instanceof Error ? caught.message : String(caught);
       if (code === "not_authorized") {
-        setStatus("revoked");
-        setError("This phone's access was revoked on the desktop.");
+        // A revoked device and a device missing a scope share the same wire
+        // code; only the first is terminal, so tell them apart by message.
+        if (/revo|no longer authorized/i.test(message)) {
+          setStatus("revoked");
+          setError("This phone's access was revoked on the desktop.");
+        } else {
+          setStatus("error");
+          setError(message);
+        }
       } else if (code === "transport") {
         setStatus("offline");
         setError(message);

@@ -304,6 +304,157 @@ body {
   letter-spacing: 0.12em;
 }
 
+/* ---- onboarding wizard ---- */
+
+.wizard__trail {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0 16px 8px;
+  list-style: none;
+}
+
+.wizard__trail-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.wizard__trail-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.wizard__trail-item--current {
+  color: var(--text);
+}
+
+.wizard__trail-item--current .wizard__trail-mark {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.wizard__trail-item--done .wizard__trail-mark {
+  border-color: transparent;
+  background: var(--success-soft);
+  color: var(--success, #15803d);
+}
+
+.wizard__trail-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wizard__points,
+.wizard__steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.wizard__steps li strong {
+  color: var(--text);
+}
+
+.wizard__waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.wizard__spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: wizard-spin 0.9s linear infinite;
+}
+
+@keyframes wizard-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.onboarding__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  resize: vertical;
+}
+
+.celebrate {
+  align-items: center;
+  text-align: center;
+}
+
+.celebrate__badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--success-soft);
+  color: var(--success, #15803d);
+  font-size: 32px;
+  font-weight: 700;
+  animation: celebrate-pop 0.4s ease-out;
+}
+
+@keyframes celebrate-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.celebrate__title {
+  margin: 4px 0 0;
+  font-size: 22px;
+}
+
+.celebrate .onboarding__facts {
+  width: 100%;
+  text-align: left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wizard__spinner,
+  .celebrate__badge {
+    animation: none;
+  }
+}
+
+
 /* ---- information architecture ---- */
 
 :root {
@@ -1158,6 +1309,20 @@ body {
   margin-left: auto;
   color: var(--muted);
   font-size: 13px;
+}
+
+.desktop-row__fingerprint {
+  margin-left: auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.desktop-row--static .btn--small {
+  flex-shrink: 0;
 }
 
 .desktop-list > li + li {

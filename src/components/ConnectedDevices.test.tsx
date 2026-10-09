@@ -35,12 +35,13 @@ const OFFER: PairingOffer = {
   qr_string: '{"protocol_version":1,"pairing_id":"pair_1"}',
   desktop_id: "did_desktop",
   desktop_fingerprint: "1234 5678 9ABC DEF0",
+  reachable: true,
 };
 
 beforeEach(() => {
   apiMock.devicesList.mockReset().mockResolvedValue([PHONE]);
   apiMock.pairingStart.mockReset().mockResolvedValue(OFFER);
-  apiMock.pairingStatus.mockReset().mockResolvedValue("pending");
+  apiMock.pairingStatus.mockReset().mockResolvedValue({ state: "pending" });
   apiMock.pairingApprove.mockReset().mockResolvedValue(PHONE);
   apiMock.pairingReject.mockReset().mockResolvedValue(undefined);
   apiMock.deviceRevoke.mockReset().mockResolvedValue(undefined);
@@ -94,6 +95,21 @@ describe("Connected devices", () => {
         "sessions.message",
       ]),
     );
+  });
+
+  it("shows the verification code and phone details once pairing begins", async () => {
+    const user = userEvent.setup();
+    apiMock.pairingStatus.mockResolvedValue({
+      state: "pending",
+      verification_code: "123456",
+      device_name: "Pixel 9",
+      device_platform: "android",
+    });
+    render(<ConnectedDevices />);
+    await user.click(await screen.findByRole("button", { name: /add phone/i }));
+
+    expect(await screen.findByText("123 456")).toBeInTheDocument();
+    expect(screen.getByText(/Pixel 9 · android/)).toBeInTheDocument();
   });
 
   it("never offers device administration as a pairing scope", async () => {

@@ -1,13 +1,15 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AddDesktopFlow } from "./AddDesktopFlow";
 import { ClientProvider, useClientContext } from "./client/ClientContext";
 import { MockRemoteClient } from "./client/mock";
 import type { PairedDesktop, RemoteClient, TransportMode } from "./client/remote";
+import { TauriRemoteClient } from "./client/tauri";
 import { AppHeader } from "./components/AppHeader";
 import { HostSwitcher } from "./components/HostSwitcher";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { isRootRoute, routeTab, type Route } from "./navigation";
+import { pairingApi, type PairedDesktopRecord } from "./pairing";
 import { ApprovalDetail } from "./screens/ApprovalDetail";
 import { DesktopSelector } from "./screens/DesktopSelector";
 import { Inbox } from "./screens/Inbox";
@@ -18,15 +20,9 @@ import { SessionsHome } from "./screens/SessionsHome";
 import { Settings } from "./screens/Settings";
 import { TABS, type TabId } from "./tabs";
 
-const DEFAULT_DESKTOP: PairedDesktop = { id: "desk_mock", name: "Mock Desktop", platform: "macos" };
-
+/** The production client: a real, authenticated Iroh connection per desktop. */
 function defaultClientFactory(desktopId: string): RemoteClient {
-  return new MockRemoteClient({
-    desktopId,
-    hostName: "Mock Desktop",
-    platform: "macos",
-    autoAdvance: true,
-  });
+  return new TauriRemoteClient(desktopId);
 }
 
 export interface AppProps {
@@ -40,15 +36,60 @@ export default function App({
   desktops: desktopsProp,
   initialTransportMode = "automatic",
 }: AppProps = {}) {
-  const desktops = desktopsProp ?? [DEFAULT_DESKTOP];
-  const [desktopId, setDesktopId] = useState(desktops[0]?.id ?? DEFAULT_DESKTOP.id);
+  // Tests pass `desktops`/`clientFactory` explicitly; the shipped app loads its
+  // paired desktops from the backend and never seeds a placeholder host.
+  const controlled = desktopsProp !== undefined;
+  const [desktops, setDesktops] = useState<PairedDesktop[]>(desktopsProp ?? []);
+  const [loadingDesktops, setLoadingDesktops] = useState(!controlled);
+  const [desktopId, setDesktopId] = useState(desktopsProp?.[0]?.id ?? "");
   const [route, setRoute] = useState<Route>({ name: "sessions" });
   const [transportMode, setTransportMode] = useState<TransportMode>(initialTransportMode);
   const [showAddDesktop, setShowAddDesktop] = useState(false);
 
-  const client = useMemo(() => clientFactory(desktopId), [clientFactory, desktopId]);
+  const reloadDesktops = useCallback(async () => {
+    try {
+      const records = await pairingApi.pairedDesktops();
+      const next = records.map((r) => ({ id: r.id, name: r.name, platform: r.platform }));
+      setDesktops(next);
+      setDesktopId((prev) => prev || next[0]?.id || "");
+    } catch {
+      setDesktops([]);
+    } finally {
+      setLoadingDesktops(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (controlled) return;
+    void reloadDesktops();
+  }, [controlled, reloadDesktops]);
+
+  const client = useMemo<RemoteClient>(
+    () => clientFactory(desktopId),
+    [clientFactory, desktopId],
+  );
+
+  const handlePaired = useCallback(
+    (record: PairedDesktopRecord) => {
+      setDesktops((prev) => [
+        ...prev.filter((d) => d.id !== record.id),
+        { id: record.id, name: record.name, platform: record.platform },
+      ]);
+      setDesktopId(record.id);
+      void reloadDesktops();
+    },
+    [reloadDesktops],
+  );
 
   const addDesktop = useCallback(() => setShowAddDesktop(true), []);
+
+  if (loadingDesktops) {
+    return (
+      <div className="app">
+        <main className="app__content" />
+      </div>
+    );
+  }
 
   return (
     <ClientProvider
@@ -64,7 +105,10 @@ export default function App({
       {showAddDesktop ? (
         <div className="app">
           <main className="app__content">
-            <AddDesktopFlow onClose={() => setShowAddDesktop(false)} />
+            <AddDesktopFlow
+              onClose={() => setShowAddDesktop(false)}
+              onPaired={handlePaired}
+            />
           </main>
         </div>
       ) : (

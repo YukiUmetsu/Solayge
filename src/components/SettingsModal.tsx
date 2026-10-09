@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentConfig,
@@ -485,10 +485,58 @@ function NotificationsTab({
   onChange: (p: Partial<NotificationSettings>) => void;
   onError: (e: string | null) => void;
 }) {
+  const [osStatus, setOsStatus] = useState<string | null>(null);
+
+  const refreshStatus = useCallback(() => {
+    api
+      .notificationStatus()
+      .then(setOsStatus)
+      .catch(() => setOsStatus(null));
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  const blocked = osStatus === "denied";
   return (
     <>
       <section className="space-y-3">
         <SectionLabel icon="zap">Desktop notifications</SectionLabel>
+
+        {blocked && (
+          <div
+            className="flex items-start justify-between gap-3 rounded-lg border border-danger/40 bg-danger/10 p-3"
+            role="alert"
+          >
+            <div className="text-[12px] leading-relaxed text-ink">
+              <div className="font-medium">macOS is blocking notifications</div>
+              <p className="mt-0.5 text-ink-subtle">
+                Allow Solayge under System Settings → Notifications, then test
+                again. In-app toasts and sounds keep working either way.
+              </p>
+            </div>
+            <div className="flex shrink-0 flex-col gap-1.5">
+              <button
+                className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+                type="button"
+                onClick={() => {
+                  api.openNotificationSettings().catch((e) => onError(String(e)));
+                }}
+              >
+                Open settings
+              </button>
+              <button
+                className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+                type="button"
+                onClick={refreshStatus}
+              >
+                Re-check
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-lg border border-line bg-well p-3">
           <ToggleRow
             label="Enable notifications"
@@ -535,7 +583,11 @@ function NotificationsTab({
               onError(null);
               api
                 .testNotification()
-                .catch((e) => onError(String(e)));
+                .then(() => refreshStatus())
+                .catch((e) => {
+                  onError(String(e));
+                  refreshStatus();
+                });
             }}
           >
             <Icon name="zap" className="h-3 w-3" />

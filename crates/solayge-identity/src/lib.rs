@@ -62,6 +62,7 @@
 pub mod error;
 pub mod fingerprint;
 pub mod identity;
+pub mod auth;
 pub mod pairing;
 pub mod qr;
 pub mod registry;
@@ -70,6 +71,9 @@ pub mod store;
 pub mod transcript;
 
 pub use error::{IdentityError, Result};
+pub use auth::{
+    auth_message, prove, verify, AuthRequest, AuthResponse, ChallengeStore, AUTH_CONTEXT, AUTH_TTL_SECS,
+};
 pub use fingerprint::{fingerprint_bytes, format_fingerprint, verification_code, VerificationCode};
 pub use identity::{DeviceId, DeviceIdentity, PublicIdentity};
 pub use pairing::{

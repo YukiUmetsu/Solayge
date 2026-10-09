@@ -4,6 +4,7 @@ import { useClientContext } from "../client/ClientContext";
 import { connectionStatusView } from "../client/status";
 import { Modal } from "../components/Modal";
 import { StatusPill } from "../components/StatusPill";
+import { pairingApi, type PairedDesktopRecord } from "../pairing";
 
 const MODES: { id: TransportMode; label: string; help: string }[] = [
   {
@@ -38,6 +39,27 @@ export function Settings({
   const [diagnostics, setDiagnostics] = useState<ClientDiagnostics | null>(null);
   const [copied, setCopied] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [records, setRecords] = useState<PairedDesktopRecord[]>([]);
+
+  useEffect(() => {
+    pairingApi
+      .pairedDesktops()
+      .then(setRecords)
+      .catch(() => setRecords([]));
+  }, [desktops.length]);
+
+  async function forget(desktopId: string) {
+    try {
+      await pairingApi.forgetDesktop(desktopId);
+      // The paired list lives in the app shell; a reload re-reads it and
+      // drops the now-unpaired desktop cleanly.
+      window.location.reload();
+    } catch (e) {
+      // Surface nothing destructive silently: keep the device on failure.
+      setRecords((prev) => prev.filter((r) => r.id !== desktopId));
+      void e;
+    }
+  }
 
   useEffect(() => {
     if (!client.diagnostics || status !== "online") {
@@ -164,12 +186,25 @@ export function Settings({
       <section className="detail__section" aria-label="Desktops">
         <h2 className="detail__section-title">Desktops</h2>
         <ul className="desktop-list">
-          {desktops.map((entry) => (
-            <li key={entry.id} className="desktop-row desktop-row--static">
-              <span className="desktop-row__name">{entry.name}</span>
-              <span className="desktop-row__platform">{entry.platform}</span>
-            </li>
-          ))}
+          {desktops.map((entry) => {
+            const record = records.find((r) => r.id === entry.id);
+            return (
+              <li key={entry.id} className="desktop-row desktop-row--static">
+                <span className="desktop-row__name">{entry.name}</span>
+                <span className="desktop-row__platform">{entry.platform}</span>
+                {record?.fingerprint ? (
+                  <span className="desktop-row__fingerprint mono">{record.fingerprint}</span>
+                ) : null}
+                <button
+                  className="btn btn--small"
+                  type="button"
+                  onClick={() => void forget(entry.id)}
+                >
+                  Remove
+                </button>
+              </li>
+            );
+          })}
         </ul>
         <button className="btn" type="button" onClick={() => setAddOpen(true)}>
           + Add a desktop

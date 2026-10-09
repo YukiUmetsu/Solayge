@@ -17,22 +17,32 @@ and never runs coding agents itself.
 - `src/client/` — the UI's only data boundary:
   - `remote.ts` — the TypeScript `RemoteClient` mirroring the Rust
     `solayge-protocol` trait, returning `@solayge/shared-types` DTOs.
-  - `mock.ts` — an in-memory loopback client seeded like the Rust `MockHost`,
-    used for local development and every UI test. Networking, identity, and
-    host logic are intentionally **not** implemented here.
+  - `tauri.ts` — the real client: every call is one `remote_call` command the
+    Rust side turns into an Iroh frame on the authenticated connection.
+  - `mock.ts` — an in-memory loopback client used only by tests and local UI
+    work; it is never the default host.
   - `ClientContext.tsx` — connection state, cached last-known data, transport
     preference, and the offline/read-only projection.
-- `src-tauri/` — the Rust side (`solayge_mobile_lib`). Registers the official
-  barcode-scanner plugin on mobile and exposes `protocol_version`.
+- `src/pairing.ts` — the identity/pairing command bindings (including the real
+  `pair_with_qr` / `pair_poll` handshake over the transport).
+- `src/AddDesktopFlow.tsx` — the step-by-step pairing wizard.
+- `src-tauri/` — the Rust side (`solayge_mobile_lib`). It owns the phone's
+  Ed25519 identity, the live authenticated `IrohRemoteClient`, and the persisted
+  list of paired desktops (`paired-desktops.json`, owner-only). Registers the
+  official barcode-scanner plugin on mobile and exposes the `remote_call` bridge.
 - `src-tauri/capabilities/default.json` — capability granting `core` plus the
   barcode-scanner commands.
 - `src-tauri/Info.ios.plist` — iOS `NSCameraUsageDescription` (merged into the
   generated Xcode project at build time).
 - `src-tauri/gen/` — generated Android (`android/`) and iOS (`apple/`) projects.
 
-The P0 information architecture is validated only against the in-memory
-loopback client: transport, pairing identity, host authorization, and agent
-control are later phases. See `docs/MOBILE_FEATURES.md` sections 7 and 9.
+The mobile app speaks the real Iroh transport against the desktop host: it pairs
+with a QR code (or a pasted pairing link), compares the six-digit verification
+code, waits for desktop approval, authenticates with a signed challenge, and
+then reads the desktop's projects, tasks, and pending questions. Remote prompt
+sends and approval responses are the next phase; those actions are reported as
+unsupported rather than silently accepted. See `docs/MOBILE_FEATURES.md`
+sections 7 and 9.
 
 ## Commands
 
@@ -67,3 +77,13 @@ pnpm --filter @solayge/mobile tauri ios init --ci
 ```
 
 iOS builds also need Xcode and CocoaPods (`pod`).
+
+## Android networking note
+
+The Iroh transport resolves the desktop's endpoint through the public n0
+discovery service, which uses the system DNS resolver. On Android that resolver
+reads the system configuration over JNI; Tauri's Android runtime publishes the
+process context, and iroh otherwise falls back to its bundled fallback
+resolvers. If pairing cannot resolve the desktop on a particular device, treat
+it as a diagnostics case: the connection still authenticates cryptographically,
+so a wrong host cannot be trusted.

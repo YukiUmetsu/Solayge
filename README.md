@@ -513,7 +513,20 @@ Open **Settings** from the gear in the sidebar. It is organised into tabs:
   for projects without their own, and secret storage.
 - **Agent** — provider, model, backup, review, editor, and command templates.
 - **Notifications** — desktop notifications and sounds (see below).
+- **Devices** — the approved phones (see [Mobile companion](#mobile-companion)).
 - **Advanced** — cache retention and stats, and the error log.
+
+### Mobile companion
+
+**Settings → Devices** pairs the Solayge mobile app. **Add phone** opens a
+five-step walkthrough and shows a QR code (plus a copyable **pairing link** for
+when the phone's camera is unavailable). The phone dials the desktop over the
+encrypted Iroh transport; once it sends `pair.begin`, this dialog shows the same
+six-digit verification code and the phone's name for you to compare, and
+**Approve phone** grants it **View + Message** by default. Each phone keeps its
+own revocable identity; revoking one ends its sessions on every transport
+immediately. The desktop listener starts by default (disable it with
+`SOLAYGE_IROH_HOST=0`); it binds loopback unless `SOLAYGE_IROH_BIND` widens it.
 
 ### Notifications
 
@@ -529,10 +542,12 @@ UserNotifications framework (`UNUserNotificationCenter`); the older
 therefore the Tauri notification plugin) use is treated as a legacy connection
 and refused by `usernoted`, so notifications built on it are silently dropped.
 macOS asks for permission the first time the app runs — allow Solayge there.
-Every notification is also surfaced as an in-app toast and plays its sound, so a
-denied OS notification is never the only feedback. Use **Test notification** in
-the Notifications tab to check that the OS allows Solayge to post; failures are
-recorded in the **Advanced** tab's error log.
+If macOS refuses delivery (`UNErrorDomain error 1` — most often permission was
+denied, or the app is running as an unbundled dev binary), the **Notifications**
+tab shows a banner explaining how to allow Solayge and a shortcut to System
+Settings, and the **Test notification** button reports the reason instead of
+hiding it. Every notification is also surfaced as an in-app toast and plays its
+sound, so a denied OS notification is never the only feedback.
 
 Prompts you write for tasks and planner goals are cached and offered as one-click
 suggestions in **New task** and **Plan with AI**. Task logs are treated as cache
@@ -624,6 +639,9 @@ src/                  React + TypeScript frontend
 src-tauri/            Tauri app (Rust)
   src/commands.rs     Tauri command surface
   src/scheduler.rs    dispatch loop and task execution (agent/shell/git/merge)
+  src/host.rs         Iroh host: pairing, challenge-response auth, remote reads
+  src/iroh_host.rs    desktop Iroh listener lifecycle and configuration
+  src/devices.rs      desktop identity, QR offers, and the device registry
   src/agent.rs        provider commands, prompt templating, review
   src/permissions.rs  permission profiles and hard rails
   src/git.rs          repository/worktree/diff operations
@@ -642,9 +660,12 @@ src-tauri/            Tauri app (Rust)
    approve/reject and steerable sessions (interrupt, queue prompts), and apply
    permission profiles to providers other than opencode. *opencode is done; Claude
    Code (stream-json control protocol) and the remaining providers are next.*
-3. **Control plane** — an authenticated HTTP/WS API, bound to the Tailscale
-   interface, for a mobile client.
-4. **Mobile client** — monitor, steer, and approve over the tailnet.
+3. **Control plane** — the desktop host pairs and authenticates phones over
+   Iroh and serves projects, tasks, and pending questions. A Tailscale transport
+   is still a planned alternative.
+4. **Mobile client** — pairing, approval, verification, connection, and
+   read-only monitoring are wired over the real Iroh transport. Remote prompt
+   sends, approval responses, and Tailscale fallback are next.
 
 ## Contributing
 

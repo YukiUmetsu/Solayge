@@ -1,36 +1,86 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   formatVerificationCode,
   isExpired,
-  isManualCodeComplete,
-  normalizeManualCode,
   pairingApi,
   scanErrorMessage,
-  type ParsedPairing,
+  type PairStart,
+  type PairedDesktopRecord,
 } from "./pairing";
 
-type Phase = "choose" | "scan" | "manual" | "verify" | "manualWaiting";
+type Phase = "intro" | "prep" | "scan" | "confirm" | "paste" | "done";
+
+/** The four milestones shown as an accomplishment trail. */
+const STEPS = [
+  { id: "prep", label: "Get the desktop ready" },
+  { id: "scan", label: "Scan the QR code" },
+  { id: "confirm", label: "Approve on the desktop" },
+  { id: "done", label: "Connected" },
+] as const;
+
+const PHASE_STEP: Record<Phase, number> = {
+  intro: 0,
+  prep: 0,
+  scan: 1,
+  paste: 1,
+  confirm: 2,
+  done: 3,
+};
 
 /**
- * The "Add desktop" onboarding flow.
+ * The "Add a desktop" onboarding wizard.
  *
- * The camera permission is requested only when the scanner opens, and every
- * failure path (no camera, denied permission, unreadable code) degrades to the
- * manual pairing-code fallback. The verification step shows the short code the
- * user compares with the desktop; approval always happens on the desktop.
+ * It walks the user through preparing the desktop, scanning the QR, comparing
+ * the verification code, approving the phone on the desktop, and celebrating the
+ * finished connection. Every failure degrades to the paste-a-link fallback, so a
+ * missing camera or denied permission is never a dead end.
  */
-export function AddDesktopFlow({ onClose }: { onClose: () => void }) {
-  const [phase, setPhase] = useState<Phase>("choose");
+export function AddDesktopFlow({
+  onClose,
+  onPaired,
+}: {
+  onClose: () => void;
+  onPaired?: (desktop: PairedDesktopRecord) => void;
+}) {
+  const [phase, setPhase] = useState<Phase>("intro");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [parsed, setParsed] = useState<ParsedPairing | null>(null);
-  const [manualCode, setManualCode] = useState("");
+  const [code, setCode] = useState<PairStart | null>(null);
+  const [paired, setPaired] = useState<PairedDesktopRecord | null>(null);
+  const [pasteValue, setPasteValue] = useState("");
 
-  async function startScan() {
+  const handleQr = useCallback(async (qr: string) => {
     setError(null);
-    setPhase("scan");
     setBusy(true);
+    try {
+      const parsed = await pairingApi.parsePairingQr(qr);
+      if (isExpired(parsed.expires_at)) {
+        setError("This pairing code has expired. Show a new one on the desktop and try again.");
+        setPhase("prep");
+        return;
+      }
+      if (!parsed.reachable) {
+        setError(
+          "This code has no connection address. On the desktop, open Solayge and keep it running, then show a new code.",
+        );
+        setPhase("prep");
+        return;
+      }
+      const start = await pairingApi.pairWithQr(qr);
+      setCode(start);
+      setPhase("confirm");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const startScan = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    setPhase("scan");
     try {
       const { scan, Format, checkPermissions, requestPermissions } = await import(
         "@tauri-apps/plugin-barcode-scanner"
@@ -40,70 +90,125 @@ export function AddDesktopFlow({ onClose }: { onClose: () => void }) {
         permission = await requestPermissions();
       }
       if (permission !== "granted") {
-        setError("Camera access was denied. Enter the pairing code instead.");
-        setPhase("manual");
+        setError("Camera access was denied. Paste the pairing link instead.");
+        setPhase("paste");
         return;
       }
       const result = await scan({ formats: [Format.QRCode], cameraDirection: "back" });
-      const next = await pairingApi.parsePairingQr(result.content);
-      if (isExpired(next.expires_at)) {
-        setError("This pairing code has expired. Ask your desktop to show a new one.");
-        setPhase("choose");
-        return;
-      }
-      setParsed(next);
-      setPhase("verify");
+      await handleQr(result.content);
     } catch (e) {
       setError(scanErrorMessage(e));
-      setPhase("manual");
+      setPhase("paste");
     } finally {
       setBusy(false);
     }
-  }
+  }, [handleQr]);
 
-  async function submitManual() {
-    setError(null);
-    setBusy(true);
+  // Poll for desktop approval while the confirmation step is visible.
+  useEffect(() => {
+    if (phase !== "confirm") return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await pairingApi.pairPoll();
+        if (cancelled) return;
+        if (status.state === "approved" && status.desktop) {
+          setPaired(status.desktop);
+          setPhase("done");
+        } else if (status.state === "error") {
+          setError(status.message ?? "The desktop became unreachable. Check both devices and try again.");
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [phase]);
+
+  const cancelPairing = useCallback(async () => {
     try {
-      const result = await pairingApi.manualPairingRequest(normalizeManualCode(manualCode));
-      setManualCode(result.manual_code);
-      setPhase("manualWaiting");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
+      await pairingApi.pairCancel();
+    } catch {
+      /* an expired challenge is fine to drop */
     }
-  }
+  }, []);
+
+  const back = useCallback(() => {
+    setError(null);
+    if (phase === "done") {
+      if (paired) onPaired?.(paired);
+      onClose();
+      return;
+    }
+    if (phase === "confirm") void cancelPairing();
+    setPhase(phase === "confirm" || phase === "paste" ? "prep" : "intro");
+  }, [phase, paired, onPaired, onClose, cancelPairing]);
+
+  const finish = useCallback(() => {
+    if (paired) onPaired?.(paired);
+    onClose();
+  }, [paired, onPaired, onClose]);
 
   return (
     <section className="onboarding" aria-label="Add a desktop">
       <header className="onboarding__header">
-        <button className="onboarding__back" type="button" onClick={onClose}>
-          Cancel
+        <button className="onboarding__back" type="button" onClick={back}>
+          {phase === "intro" ? "Cancel" : "Back"}
         </button>
-        <h1 className="onboarding__title">Add a desktop</h1>
+        <h1 className="onboarding__title">Connect to a desktop</h1>
       </header>
 
-      {phase === "choose" && (
+      <StepTrail current={PHASE_STEP[phase]} />
+
+      {phase === "intro" && (
         <div className="onboarding__body">
           <p className="onboarding__lead">
-            Your computer must be running Solayge. Scan the QR code it shows, or
-            enter the pairing code.
+            Leave the desk without leaving your agents unattended. Pair this
+            phone once, then monitor and answer your agents from anywhere on your
+            own encrypted connection.
+          </p>
+          <ul className="wizard__points">
+            <li>The desktop stays in charge of running tasks.</li>
+            <li>You approve this phone on the computer — never automatically.</li>
+            <li>The connection is end-to-end encrypted by Solayge.</li>
+          </ul>
+          <button className="btn btn-primary" type="button" onClick={() => setPhase("prep")}>
+            Get started
+          </button>
+          <button className="btn" type="button" onClick={onClose}>
+            Not now
+          </button>
+        </div>
+      )}
+
+      {phase === "prep" && (
+        <div className="onboarding__body">
+          <p className="onboarding__lead">On your computer, do this first:</p>
+          <ol className="wizard__steps">
+            <li>Open the Solayge desktop app.</li>
+            <li>
+              Go to <strong>Settings → Devices</strong>.
+            </li>
+            <li>
+              Choose <strong>Add phone</strong>. Keep that screen open — it shows
+              the QR code you&apos;ll scan next.
+            </li>
+          </ol>
+          <p className="onboarding__note">
+            Both devices need to be online. You can use different networks; the
+            connection is relayed securely when a direct path isn&apos;t available.
           </p>
           <button className="btn btn-primary" type="button" onClick={startScan} disabled={busy}>
             Scan QR code
           </button>
-          <button className="btn" type="button" onClick={() => setPhase("manual")} disabled={busy}>
-            Enter pairing code
+          <button className="btn" type="button" onClick={() => setPhase("paste")} disabled={busy}>
+            Paste pairing link
           </button>
-          <details className="onboarding__help">
-            <summary>How it works</summary>
-            <p>
-              The QR code contains only public information. You still approve this
-              phone on the desktop, and both devices show the same short
-              verification code.
-            </p>
-          </details>
         </div>
       )}
 
@@ -113,78 +218,85 @@ export function AddDesktopFlow({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      {phase === "manual" && (
+      {phase === "paste" && (
         <div className="onboarding__body">
-          <label className="onboarding__label" htmlFor="pairing-code">
-            Pairing code
+          <label className="onboarding__label" htmlFor="pairing-link">
+            Paste pairing link
           </label>
-          <input
-            id="pairing-code"
-            className="onboarding__input"
-            value={manualCode}
-            inputMode="text"
-            autoCapitalize="characters"
-            autoComplete="off"
+          <p className="onboarding__note">
+            On the desktop choose <strong>Copy pairing link</strong>, then paste it
+            here. Useful when the camera is unavailable.
+          </p>
+          <textarea
+            id="pairing-link"
+            className="onboarding__textarea mono"
+            value={pasteValue}
+            rows={4}
+            placeholder='{"protocol_version":1,…}'
             spellCheck={false}
-            placeholder="ABCD-EFGH"
-            onChange={(e) => setManualCode(normalizeManualCode(e.target.value))}
+            onChange={(e) => setPasteValue(e.target.value)}
           />
           <button
             className="btn btn-primary"
             type="button"
-            onClick={submitManual}
-            disabled={busy || !isManualCodeComplete(manualCode)}
+            onClick={() => void handleQr(pasteValue.trim())}
+            disabled={busy || pasteValue.trim().length === 0}
           >
             Continue
           </button>
-          <button className="btn" type="button" onClick={() => setPhase("choose")} disabled={busy}>
-            Back
+          <button className="btn" type="button" onClick={startScan} disabled={busy}>
+            Scan QR code instead
           </button>
         </div>
       )}
 
-      {phase === "manualWaiting" && (
-        <div className="onboarding__body" role="status">
-          <p className="onboarding__lead">
-            On your desktop, choose <strong>Approve phone</strong>.
-          </p>
-          <p className="onboarding__meta">
-            Code <span className="mono">{manualCode}</span>
-          </p>
-          <p className="onboarding__note">
-            When you approve, this phone and the desktop will show the same short
-            verification code. Compare them before you trust the connection.
-          </p>
-          <button className="btn" type="button" onClick={onClose}>
-            Close
-          </button>
-        </div>
-      )}
-
-      {phase === "verify" && parsed && (
+      {phase === "confirm" && code && (
         <div className="onboarding__body">
-          <p className="onboarding__lead">Compare these codes on both devices.</p>
+          <p className="onboarding__lead">Check that these match, then approve this phone.</p>
           <div className="verification" aria-label="Verification code">
             <span className="verification__code">
-              {formatVerificationCode(parsed.verification_code)}
+              {formatVerificationCode(code.verification_code)}
             </span>
           </div>
           <p className="onboarding__note">
-            They must match exactly. If they don&apos;t, cancel and try again — this
-            protects you from connecting to the wrong computer.
+            On the desktop, the same six digits appear. They must match exactly —
+            if they don&apos;t, tap Back and start again. This protects you from
+            connecting to the wrong computer.
+          </p>
+          <p className="onboarding__note">
+            Then choose <strong>Approve phone</strong> on the desktop.
+          </p>
+          <div className="wizard__waiting" role="status" aria-live="polite">
+            <span className="wizard__spinner" aria-hidden="true" />
+            Waiting for approval…
+          </div>
+          <button className="btn" type="button" onClick={back}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {phase === "done" && paired && (
+        <div className="onboarding__body celebrate" role="status">
+          <div className="celebrate__badge" aria-hidden="true">
+            ✓
+          </div>
+          <h2 className="celebrate__title">You&apos;re connected!</h2>
+          <p className="onboarding__lead">
+            This phone is now trusted by <strong>{paired.name}</strong>.
           </p>
           <dl className="onboarding__facts">
             <div>
+              <dt>Platform</dt>
+              <dd>{paired.platform || "unknown"}</dd>
+            </div>
+            <div>
               <dt>Desktop fingerprint</dt>
-              <dd className="mono">{parsed.desktop_fingerprint}</dd>
+              <dd className="mono">{paired.fingerprint}</dd>
             </div>
           </dl>
-          <p className="onboarding__note">
-            Now approve this phone on your desktop. This phone will connect once
-            it is approved.
-          </p>
-          <button className="btn" type="button" onClick={onClose}>
-            Close
+          <button className="btn btn-primary" type="button" onClick={finish}>
+            Start using Solayge
           </button>
         </div>
       )}
@@ -195,5 +307,24 @@ export function AddDesktopFlow({ onClose }: { onClose: () => void }) {
         </p>
       )}
     </section>
+  );
+}
+
+function StepTrail({ current }: { current: number }) {
+  return (
+    <ol className="wizard__trail" aria-label="Setup progress">
+      {STEPS.map((step, index) => {
+        const state =
+          index < current ? "done" : index === current ? "current" : "pending";
+        return (
+          <li key={step.id} className={`wizard__trail-item wizard__trail-item--${state}`}>
+            <span className="wizard__trail-mark" aria-hidden="true">
+              {state === "done" ? "✓" : index + 1}
+            </span>
+            <span className="wizard__trail-label">{step.label}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }

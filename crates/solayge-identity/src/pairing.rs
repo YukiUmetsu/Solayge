@@ -718,6 +718,28 @@ impl PairingServer {
         lock(&self.inner).sessions.get(pairing_id).map(|s| s.state)
     }
 
+    /// The short human-comparable verification code once `pair.begin` has bound
+    /// a device (both nonces are then known). `None` before that or after the
+    /// session is pruned, because neither side can derive it sooner.
+    pub fn verification_code(&self, pairing_id: &str) -> Option<String> {
+        let inner = lock(&self.inner);
+        let session = inner.sessions.get(pairing_id)?;
+        session
+            .transcript(&self.desktop.public())
+            .map(|transcript| transcript.verification_code().to_string())
+    }
+
+    /// The claimed name and platform of the device bound to a session, once
+    /// `pair.begin` has arrived. Used by the desktop approval dialog.
+    pub fn pending_device(&self, pairing_id: &str) -> Option<(String, String)> {
+        let inner = lock(&self.inner);
+        inner
+            .sessions
+            .get(pairing_id)
+            .and_then(|session| session.device.as_ref())
+            .map(|device| (device.name.clone(), device.platform.clone()))
+    }
+
     /// Route a wire decision (`pair.approve`/`pair.reject`) to the state machine.
     pub fn handle_decision(
         &self,

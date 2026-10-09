@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
-import type { ConnectedDevice, PairingOffer } from "../types";
+import type { ConnectedDevice, PairingOffer, PairingStatus } from "../types";
 import { clock, relTime } from "../lib/format";
 import { ErrorNote } from "./Field";
 import { Icon } from "./Icons";
@@ -31,19 +31,35 @@ function scopeLabel(scope: string): string {
   return SCOPE_LABELS[scope] ?? scope;
 }
 
+/** Render a verification code as `123 456`. */
+function formatVerificationCode(code: string): string {
+  const digits = code.replace(/\D/g, "").slice(0, 6);
+  return digits.length <= 3 ? digits : `${digits.slice(0, 3)} ${digits.slice(3)}`;
+}
+
+/** The step-by-step pairing walkthrough, mirrored by the phone wizard. */
+const PAIRING_STEPS = [
+  "Install Solayge Mobile on your phone and open it.",
+  "Choose “Add a desktop”, then “Scan QR code”.",
+  "Scan the code below — or copy the pairing link and paste it on the phone.",
+  "Compare the six-digit code shown on both devices.",
+  "Approve the phone here.",
+];
+
 /**
  * Settings → Connected devices. Lists approved phones and pairs new ones with a
- * QR code (or manual code), defaulting the grant to View + Message. Revoking a
- * device invalidates it on every transport.
+ * QR code (or a copyable pairing link), defaulting the grant to View + Message.
+ * Revoking a device invalidates it on every transport.
  */
 export function ConnectedDevices() {
   const [devices, setDevices] = useState<ConnectedDevice[] | null>(null);
   const [offer, setOffer] = useState<PairingOffer | null>(null);
   const [scopes, setScopes] = useState<string[]>(DEFAULT_SCOPES);
-  const [status, setStatus] = useState<string>("pending");
+  const [status, setStatus] = useState<PairingStatus>({ state: "pending" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -60,23 +76,26 @@ export function ConnectedDevices() {
   // Poll the in-flight challenge while the Add-phone dialog is open.
   useEffect(() => {
     if (!offer) return;
-    const timer = window.setInterval(() => {
+    const poll = () => {
       api
         .pairingStatus(offer.pairing_id)
         .then((next) => {
           if (next) setStatus(next);
         })
         .catch(() => {});
-    }, 1500);
+    };
+    poll();
+    const timer = window.setInterval(poll, 1500);
     return () => window.clearInterval(timer);
   }, [offer]);
 
   async function addPhone() {
     setBusy(true);
     setError(null);
+    setCopied(false);
     try {
       setScopes(DEFAULT_SCOPES);
-      setStatus("pending");
+      setStatus({ state: "pending" });
       setOffer(await api.pairingStart());
     } catch (e) {
       setError(String(e));
@@ -133,6 +152,20 @@ export function ConnectedDevices() {
     );
   }
 
+  async function copyLink() {
+    if (!offer) return;
+    try {
+      await navigator.clipboard.writeText(offer.qr_string);
+      setCopied(true);
+    } catch {
+      setError("Could not copy the pairing link. Select the code instead.");
+    }
+  }
+
+  const phoneConnected =
+    status.state === "pending" && Boolean(status.verification_code);
+  const approved = status.state === "approved";
+
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
@@ -155,21 +188,55 @@ export function ConnectedDevices() {
             <div>
               <div className="text-[12.5px] font-medium text-ink">Add a phone</div>
               <p className="mt-0.5 text-[11px] leading-relaxed text-ink-subtle">
-                Scan with Solayge Mobile. You&apos;ll approve the request here.
+                Pair Solayge Mobile with this computer in five short steps.
               </p>
             </div>
             <span
-              className="text-[11px] text-ink-subtle"
+              className="shrink-0 text-[11px] text-ink-subtle"
               role="status"
               aria-live="polite"
             >
-              {status === "approved"
+              {approved
                 ? "Approved"
-                : status === "rejected"
+                : status.state === "rejected"
                   ? "Rejected"
-                  : "Waiting for phone"}
+                  : phoneConnected
+                    ? "Phone connected"
+                    : "Waiting for phone"}
             </span>
           </div>
+
+          {!offer.reachable && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-ink">
+              <div className="font-medium">The desktop mobile host isn&apos;t ready</div>
+              <p className="mt-0.5 text-ink-subtle">
+                This code has no connection address yet, so a phone can&apos;t dial
+                it. Keep Solayge running and try again; restart the app if this
+                persists.
+              </p>
+            </div>
+          )}
+
+          <ol className="space-y-1.5 text-[11px] leading-relaxed text-ink-muted">
+            {PAIRING_STEPS.map((step, index) => {
+              const reached = approved ? true : phoneConnected ? index <= 2 : index <= 1;
+              return (
+                <li key={step} className="flex gap-2">
+                  <span
+                    className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold ${
+                      reached
+                        ? "bg-success/15 text-success"
+                        : "bg-well text-ink-faint ring-1 ring-line"
+                    }`}
+                    aria-hidden="true"
+                  >
+                    {reached ? "✓" : index + 1}
+                  </span>
+                  <span className={reached ? "text-ink" : undefined}>{step}</span>
+                </li>
+              );
+            })}
+          </ol>
 
           <div className="flex flex-wrap items-start gap-5">
             <QrCode value={offer.qr_string} size={200} />
@@ -182,6 +249,28 @@ export function ConnectedDevices() {
                   {offer.manual_code}
                 </div>
               </div>
+
+              {phoneConnected ? (
+                <div className="rounded-lg border border-line bg-surface p-3">
+                  <div className="text-[10.5px] font-semibold uppercase tracking-wide text-ink-subtle">
+                    Verification code
+                  </div>
+                  <div className="mono mt-1 text-2xl font-bold tracking-[0.2em] text-ink">
+                    {formatVerificationCode(status.verification_code ?? "")}
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-ink-subtle">
+                    {status.device_name ? `${status.device_name} · ` : ""}
+                    {status.device_platform ?? "phone"} — this must match the
+                    phone exactly.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-ink-subtle">
+                  The six-digit code appears here as soon as the phone scans this
+                  code and starts pairing.
+                </p>
+              )}
+
               <div>
                 <div className="text-[10.5px] font-semibold uppercase tracking-wide text-ink-subtle">
                   Desktop fingerprint
@@ -190,6 +279,10 @@ export function ConnectedDevices() {
                   {offer.desktop_fingerprint}
                 </div>
               </div>
+              <button className="btn btn-ghost !px-2.5 !py-1 text-[11px]" onClick={copyLink}>
+                <Icon name="layers" className="h-3 w-3" />
+                {copied ? "Link copied" : "Copy pairing link"}
+              </button>
             </div>
           </div>
 

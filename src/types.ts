@@ -447,6 +447,17 @@ export interface PairingOffer {
   qr_string: string;
   desktop_id: string;
   desktop_fingerprint: string;
+  /** Whether the Iroh listener advertised a dialable address. */
+  reachable: boolean;
+}
+
+/** The live state of a pairing challenge, polled by the Add-phone dialog. */
+export interface PairingStatus {
+  state: string;
+  /** Present only once the phone has begun pairing (both nonces are bound). */
+  verification_code?: string;
+  device_name?: string;
+  device_platform?: string;
 }
 
 export interface CacheStats {

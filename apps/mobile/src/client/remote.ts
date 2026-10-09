@@ -51,6 +51,12 @@ export interface RemoteClient {
   /** The selected desktop's public id. */
   readonly desktopId: string;
 
+  /**
+   * Establish the transport and authenticate. Optional: in-memory clients are
+   * always connected, real transports dial on demand.
+   */
+  connect?(): Promise<void>;
+
   /** Whether a transport is currently established. */
   isConnected(): boolean;
 

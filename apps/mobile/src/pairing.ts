@@ -1,15 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * Mobile pairing surface. The transport (Iroh/Tailscale) is a separate layer;
- * these commands produce and verify *identity* material only:
+ * Mobile pairing surface.
  *
- * - `mobileIdentity` loads the installation's stable public identity.
- * - `parsePairingQr` validates a scanned QR and derives the verification code
- *   the user compares with the desktop (the QR carries the desktop's public
- *   identity and nonce, so both sides can compute it independently).
- * - `manualPairingRequest` builds a `pair.begin` for a typed code when no camera
- *   is available.
+ * The first three commands work on identity material alone (offline preview and
+ * manual-code shaping). The `pair*` commands run the real handshake over the
+ * Iroh transport and wait for the desktop user to approve the phone.
  */
 
 export interface IdentityView {
@@ -26,13 +22,33 @@ export interface ParsedPairing {
   expires_at: number;
   verification_code: string;
   device_id: string;
-  begin_request: unknown;
+  /** Whether the QR carried an address the phone can dial. */
+  reachable: boolean;
 }
 
 export interface ManualPairing {
   device_id: string;
   manual_code: string;
-  begin_request: unknown;
+}
+
+export interface PairStart {
+  pairing_id: string;
+  device_id: string;
+  desktop_id: string;
+  verification_code: string;
+}
+
+export interface PairedDesktopRecord {
+  id: string;
+  name: string;
+  platform: string;
+  fingerprint: string;
+}
+
+export interface PairStatus {
+  state: "none" | "pending" | "approved" | "error";
+  desktop?: PairedDesktopRecord;
+  message?: string;
 }
 
 export const pairingApi = {
@@ -41,6 +57,12 @@ export const pairingApi = {
     invoke<ParsedPairing>("parse_pairing_qr", { qr }),
   manualPairingRequest: (code: string) =>
     invoke<ManualPairing>("manual_pairing_request", { code }),
+  pairWithQr: (qr: string) => invoke<PairStart>("pair_with_qr", { qr }),
+  pairPoll: () => invoke<PairStatus>("pair_poll"),
+  pairCancel: () => invoke<void>("pair_cancel"),
+  pairedDesktops: () => invoke<PairedDesktopRecord[]>("paired_desktops"),
+  forgetDesktop: (desktopId: string) =>
+    invoke<void>("forget_desktop", { desktopId }),
 };
 
 /**

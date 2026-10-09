@@ -4584,6 +4584,7 @@ dependencies = [
  "serde",
  "serde_json",
  "solayge-identity",
+ "solayge-network",
  "solayge-protocol",
  "tauri",
  "tauri-build",

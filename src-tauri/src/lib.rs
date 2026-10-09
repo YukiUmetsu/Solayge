@@ -9,6 +9,9 @@ mod commands;
 mod devices;
 mod errorlog;
 mod git;
+mod host_runtime;
+#[cfg(feature = "mobile-network")]
+mod host;
 #[cfg(feature = "mobile-network")]
 mod iroh_host;
 #[cfg(target_os = "macos")]
@@ -77,7 +80,7 @@ pub fn run() {
             macos_notify::init();
             scheduler::spawn_scheduler(app.handle().clone());
             #[cfg(feature = "mobile-network")]
-            iroh_host::maybe_spawn();
+            iroh_host::maybe_spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -122,6 +125,8 @@ pub fn run() {
             commands::update_settings,
             commands::read_sound_file,
             commands::test_notification,
+            commands::notification_status,
+            commands::open_notification_settings,
             commands::get_prompt_history,
             commands::get_cache_stats,
             commands::clear_cache,

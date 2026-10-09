@@ -41,6 +41,9 @@
 // Re-exported so downstream host/client crates can name protocol types without
 // adding a second dependency on `solayge-protocol`.
 pub use solayge_protocol;
+// The endpoint secret-key type, so callers can persist a stable transport key
+// without depending on `iroh` themselves.
+pub use iroh::SecretKey;
 
 pub mod diagnostics;
 pub mod error;
@@ -51,9 +54,11 @@ pub mod manager;
 pub use diagnostics::{ConnectionDiagnostics, EndpointType, PathKind, TransportDiagnostics};
 pub use error::{ErrorClass, NetworkError};
 pub use iroh_adapter::{
-    DiscoveryConfig, FrameHandler, IrohConfig, IrohConnection, IrohRemoteClient, IrohTransport,
-    IrohTransportFactory, RelayConfig, DEFAULT_EXCHANGE_TIMEOUT, SOLAYGE_ALPN,
+    connect_by_endpoint_id, endpoint_addr_from_id, secret_key_from_seed, DiscoveryConfig,
+    FrameHandler, IrohConfig, IrohConnection, IrohRemoteClient, IrohTransport, IrohTransportFactory,
+    RelayConfig, DEFAULT_EXCHANGE_TIMEOUT, SOLAYGE_ALPN,
 };
+pub use iroh_adapter::ConnectionSession;
 pub use manager::{
     Backoff, BackoffPolicy, BoxFuture, ConnectionManager, ConnectionState, Delay, Jitter,
     SyncReport, TokioDelay, Transport, TransportFactory,

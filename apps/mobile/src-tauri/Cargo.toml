@@ -21,3 +21,5 @@ serde_json.workspace = true
 solayge-protocol = { path = "../../../crates/solayge-protocol" }
 # Per-device identity, secure storage, and the QR pairing state machine.
 solayge-identity = { path = "../../../crates/solayge-identity" }
+# The Iroh-encrypted transport used to reach the desktop host.
+solayge-network = { path = "../../../crates/solayge-network" }

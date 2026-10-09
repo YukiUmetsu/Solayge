@@ -57,7 +57,10 @@ impl DeviceManager {
     /// Build a manager over an explicit secure store. Tests use the encrypted
     /// file store so they never touch the developer's real keychain.
     #[cfg(test)]
-    fn with_store(data_dir: &Path, store: &dyn solayge_identity::SecureStore) -> Result<Self> {
+    pub(crate) fn with_store(
+        data_dir: &Path,
+        store: &dyn solayge_identity::SecureStore,
+    ) -> Result<Self> {
         let data_dir = data_dir.to_path_buf();
         std::fs::create_dir_all(&data_dir).context("creating the app data directory")?;
         let identity = load_or_create_identity(store).context("loading the desktop identity")?;
@@ -90,6 +93,16 @@ impl DeviceManager {
         self.server.desktop_identity()
     }
 
+    /// The pairing authority, for the transport host handler.
+    pub(crate) fn pairing_server(&self) -> &PairingServer {
+        &self.server
+    }
+
+    /// The desktop's own device id, as a string.
+    pub(crate) fn desktop_id_string(&self) -> String {
+        self.server.desktop_id().to_string()
+    }
+
     fn device_view(device: &solayge_identity::PairedDevice) -> DeviceView {
         DeviceView {
             device_id: device.device_id.clone(),
@@ -111,6 +124,23 @@ pub struct DesktopIdentityView {
     pub desktop_id: String,
     /// A short, grouped-hex fingerprint.
     pub fingerprint: String,
+}
+
+/// The live state of a pairing challenge, including the verification code the
+/// phone derives once it has sent `pair.begin`.
+#[derive(Debug, Serialize)]
+pub struct PairingStatusView {
+    /// `awaiting_proof` | `pending` | `approved` | `rejected` | `consumed`.
+    pub state: String,
+    /// The short code only once both nonces are bound; `None` before then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_code: Option<String>,
+    /// The claimed phone name, once `pair.begin` arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// The claimed platform, once `pair.begin` arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_platform: Option<String>,
 }
 
 /// One approved phone, as shown in Settings → Connected devices.
@@ -149,6 +179,8 @@ pub struct PairingOfferView {
     pub desktop_id: String,
     /// A short fingerprint of the desktop's public key.
     pub desktop_fingerprint: String,
+    /// Whether the Iroh listener advertised an address the phone can dial.
+    pub reachable: bool,
 }
 
 fn now() -> i64 {
@@ -233,7 +265,18 @@ pub fn devices_list(manager: State<'_, DeviceManager>) -> Vec<DeviceView> {
 /// Start a new pairing challenge (desktop **Add phone**).
 #[tauri::command]
 pub fn pairing_start(manager: State<'_, DeviceManager>) -> Result<PairingOfferView, String> {
-    let offer = manager.server.start(now()).map_err(|e| e.to_string())?;
+    // Advertise the Iroh endpoint id when the listener is running, so the phone
+    // can dial this desktop. The hint carries no secret; trust still requires
+    // approve-on-desktop and both sides' identity proofs.
+    let hints = solayge_identity::ReachabilityHints {
+        iroh_endpoint_id: crate::host_runtime::endpoint_id(),
+        ..Default::default()
+    };
+    let reachable = hints.iroh_endpoint_id.is_some();
+    let offer = manager
+        .server
+        .start_with_hints(now(), hints)
+        .map_err(|e| e.to_string())?;
     let qr_string = offer.qr.to_qr_string().map_err(|e| e.to_string())?;
     let desktop = manager.desktop_public();
     Ok(PairingOfferView {
@@ -243,16 +286,25 @@ pub fn pairing_start(manager: State<'_, DeviceManager>) -> Result<PairingOfferVi
         qr_string,
         desktop_id: desktop.device_id().to_string(),
         desktop_fingerprint: desktop.short_fingerprint(),
+        reachable,
     })
 }
 
-/// The current state of a challenge (`pending`, `approved`, `rejected`, …).
+/// The live state of a challenge, including the verification code once the phone
+/// has begun pairing. `None` when the id is unknown.
 #[tauri::command]
-pub fn pairing_status(manager: State<'_, DeviceManager>, pairing_id: String) -> Option<String> {
-    manager
-        .server
-        .session_state(&pairing_id)
-        .map(|state| state.wire_name().to_string())
+pub fn pairing_status(
+    manager: State<'_, DeviceManager>,
+    pairing_id: String,
+) -> Option<PairingStatusView> {
+    let state = manager.server.session_state(&pairing_id)?;
+    let device = manager.server.pending_device(&pairing_id);
+    Some(PairingStatusView {
+        state: state.wire_name().to_string(),
+        verification_code: manager.server.verification_code(&pairing_id),
+        device_name: device.as_ref().map(|(name, _)| name.clone()),
+        device_platform: device.as_ref().map(|(_, platform)| platform.clone()),
+    })
 }
 
 /// Approve a phone. `scopes` of `None`/empty defaults to View + Message; the UI

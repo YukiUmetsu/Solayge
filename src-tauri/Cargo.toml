@@ -33,15 +33,23 @@ rand = "0.8"
 base64 = "0.22"
 # Per-device identity, QR pairing, and device revocation for the mobile host.
 solayge-identity = { path = "../crates/solayge-identity" }
+# The versioned, transport-neutral remote protocol DTOs the host serves.
+solayge-protocol = { path = "../crates/solayge-protocol" }
 # Optional: the Iroh-encrypted transport and connection manager. Enabled with
 # the `mobile-network` feature; a normal desktop build does not pull it in.
 solayge-network = { path = "../crates/solayge-network", optional = true }
 
 [features]
-default = []
-# Enables the desktop Iroh listener that remote Solayge Mobile clients connect
-# to. The listener is additionally opt-in at runtime via `SOLAYGE_IROH_HOST=1`.
+default = ["mobile-network"]
+# The Iroh-encrypted host listener phone clients connect to. On by default so a
+# paired phone can reach the desktop; the listener is additionally opt-out at
+# runtime via `SOLAYGE_IROH_HOST=0`.
 mobile-network = ["dep:solayge-network"]
+
+[dev-dependencies]
+# Enables `tauri::test::mock_app`, so the host handshake can be tested without a
+# real window or a real network endpoint.
+tauri = { version = "2", features = ["test"] }
 
 # macOS desktop notifications go through the modern UserNotifications
 # framework. The older `NSUserNotificationCenter` (used by `notify-rust` /

@@ -1,13 +1,15 @@
 //! Desktop Iroh listener for Solayge Mobile remotes.
 //!
-//! Compiled only with the `mobile-network` cargo feature. The listener is a
-//! second, separate opt-in at runtime (`SOLAYGE_IROH_HOST=1`) so a normal
-//! desktop launch never opens a network listener.
+//! Compiled only with the `mobile-network` cargo feature (on by default). The
+//! listener is enabled unless `SOLAYGE_IROH_HOST=0`, so a normal desktop launch
+//! is reachable by a phone the user chooses to pair. Data still requires
+//! authentication: only pairing and health are allowed before the phone proves
+//! possession of its paired key (see [`crate::host`]).
 //!
-//! Configuration is explicit and environment-driven; there is no hidden relay
-//! or discovery setup:
+//! Configuration is explicit and environment-driven; there is no hidden setup:
 //!
-//! * `SOLAYGE_IROH_HOST=1` — enable the listener.
+//! * `SOLAYGE_IROH_HOST=0` — disable the listener (any other value or unset
+//!   enables it).
 //! * `SOLAYGE_IROH_BIND` — UDP bind address (default `127.0.0.1:0`; set
 //!   `0.0.0.0:0` for LAN direct connectivity).
 //! * `SOLAYGE_IROH_RELAY` — `disabled`, `default`/`n0`, `staging`, or a
@@ -20,28 +22,22 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use solayge_network::solayge_protocol::{Envelope, MockHost, RemoteClient};
+use tauri::Manager;
+
 use solayge_network::{
-    BoxFuture, DiscoveryConfig, EndpointType, FrameHandler, IrohConfig, IrohTransport, RelayConfig,
+    secret_key_from_seed, DiscoveryConfig, EndpointType, IrohConfig, IrohTransport, RelayConfig,
+    SecretKey,
 };
 
-/// Serves the in-memory protocol host over Iroh. The real desktop authorization
-/// layer replaces this in the host phase; the transport wiring is identical.
-struct ProtocolHost {
-    host: Arc<MockHost>,
-}
+use crate::host::HostHandler;
 
-impl FrameHandler for ProtocolHost {
-    fn handle<'a>(&'a self, request: Envelope) -> BoxFuture<'a, Envelope> {
-        Box::pin(async move {
-            let request_for_error = request.clone();
-            let client = self.host.client();
-            match client.exchange(request) {
-                Ok(response) => response,
-                Err(error) => Envelope::error_to(&request_for_error, &error),
-            }
-        })
-    }
+/// The secure-store namespace for the desktop's transport key. Kept separate
+/// from the app identity so the QUIC endpoint key is not the same secret.
+const TRANSPORT_KEY_APP_ID: &str = "com.solayge.desktop/iroh";
+
+/// Whether the user explicitly disabled the listener.
+fn disabled_by_env() -> bool {
+    matches!(std::env::var("SOLAYGE_IROH_HOST").ok().as_deref(), Some("0"))
 }
 
 /// Read the listener configuration from the environment, or `Err` with a
@@ -66,35 +62,60 @@ pub fn config_from_env() -> Result<IrohConfig, String> {
     Ok(config)
 }
 
-/// Start the listener when `SOLAYGE_IROH_HOST=1`. No-op otherwise.
-pub fn maybe_spawn() {
-    if std::env::var("SOLAYGE_IROH_HOST").ok().as_deref() != Some("1") {
+/// Load (or create) the desktop's stable transport key. Keeping it in the OS
+/// credential store means the Iroh endpoint id survives a restart, so a phone
+/// paired once can keep reconnecting.
+fn transport_secret_key(app: &tauri::AppHandle) -> Result<SecretKey, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let identity = match solayge_identity::load_or_create_identity(
+        solayge_identity::default_store(TRANSPORT_KEY_APP_ID, &data_dir).as_ref(),
+    ) {
+        Ok(identity) => identity,
+        Err(_) => solayge_identity::load_or_create_identity(&solayge_identity::FileStore::new(
+            &data_dir,
+            TRANSPORT_KEY_APP_ID,
+        ))
+        .map_err(|e| e.to_string())?,
+    };
+    let seed = identity.secret_bytes();
+    Ok(secret_key_from_seed(&seed))
+}
+
+/// Start the listener unless `SOLAYGE_IROH_HOST=0`.
+pub fn maybe_spawn(app: tauri::AppHandle) {
+    if disabled_by_env() {
         return;
     }
-    let config = match config_from_env() {
+    let mut config = match config_from_env() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("solayge: Iroh host not started: {error}");
             return;
         }
     };
+    match transport_secret_key(&app) {
+        Ok(key) => config.secret_key = Some(key),
+        Err(error) => eprintln!("solayge: using an ephemeral Iroh identity: {error}"),
+    }
     let relay = config.relay.as_str();
     let discovery = config.discovery.as_str();
     let bind = config.bind_addr;
-    let handler = Arc::new(ProtocolHost {
-        host: Arc::new(MockHost::new()),
-    });
+    let handler = Arc::new(HostHandler::new(app));
 
     tauri::async_runtime::spawn(async move {
         match IrohTransport::bind(config).await {
             Ok(transport) => {
                 let transport = Arc::new(transport);
+                let endpoint_id = transport.endpoint_id().to_string();
+                // Publish the endpoint id so the Add-phone QR can advertise a
+                // direct dial target; the hint is public.
+                crate::host_runtime::set_endpoint_id(endpoint_id.clone());
                 eprintln!(
                     "solayge: Iroh host listening (endpoint {}, bind {}, relay {}, discovery {})",
-                    transport.endpoint_id(),
-                    bind,
-                    relay,
-                    discovery
+                    endpoint_id, bind, relay, discovery
                 );
                 if let Err(error) = transport.serve(handler).await {
                     eprintln!("solayge: Iroh host listener stopped: {error}");

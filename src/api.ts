@@ -31,6 +31,7 @@ import type {
   ConnectedDevice,
   DesktopIdentity,
   PairingOffer,
+  PairingStatus,
 } from "./types";
 
 export const api = {
@@ -140,6 +141,8 @@ export const api = {
   clearErrorLog: () => invoke<void>("clear_error_log"),
   readSound: (path: string) => invoke<string>("read_sound_file", { path }),
   testNotification: () => invoke<void>("test_notification"),
+  notificationStatus: () => invoke<string>("notification_status"),
+  openNotificationSettings: () => invoke<void>("open_notification_settings"),
 
   // ---- projects ----
   reorderProjects: (paths: string[]) =>
@@ -170,7 +173,7 @@ export const api = {
   devicesList: () => invoke<ConnectedDevice[]>("devices_list"),
   pairingStart: () => invoke<PairingOffer>("pairing_start"),
   pairingStatus: (pairingId: string) =>
-    invoke<string | null>("pairing_status", { pairingId }),
+    invoke<PairingStatus | null>("pairing_status", { pairingId }),
   pairingApprove: (pairingId: string, scopes?: string[] | null) =>
     invoke<ConnectedDevice>("pairing_approve", {
       pairingId,
