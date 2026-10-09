@@ -10,7 +10,7 @@
 //! material is invented or duplicated.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -28,55 +28,78 @@ const APP_ID: &str = "com.solayge.desktop";
 const REGISTRY_FILE: &str = "connected-devices.json";
 
 /// The desktop-side device manager, managed by Tauri.
+///
+/// The approved-device registry is a plain file, but the Ed25519 identity lives
+/// in the OS credential store. That store can prompt (macOS asks for the login
+/// password when the item's owning app changed, e.g. after a reinstall), so the
+/// identity is loaded lazily: a fresh install that never uses mobile never
+/// touches the keychain. The first use — pairing or the transport host — loads
+/// it once.
 pub struct DeviceManager {
     data_dir: PathBuf,
     registry: Arc<DeviceRegistry>,
-    server: PairingServer,
+    server: OnceLock<PairingServer>,
+    /// Serializes first-use identity creation so two callers cannot each mint a
+    /// different identity (and clobber the other's persisted key).
+    init: Mutex<()>,
 }
 
 impl DeviceManager {
-    /// Load the desktop identity and the approved-device registry, creating both
-    /// on first run. If the native credential store is unavailable the encrypted
-    /// file store is used instead, so host functionality is preserved.
+    /// Open the manager over the app data directory. Reads only the registry
+    /// file; the identity is loaded on first use ([`Self::ensure_server`]).
     pub fn new(data_dir: &Path) -> Result<Self> {
         let data_dir = data_dir.to_path_buf();
         std::fs::create_dir_all(&data_dir).context("creating the app data directory")?;
-
-        let identity = match load_or_create_identity(default_store(APP_ID, &data_dir).as_ref()) {
-            Ok(identity) => identity,
-            Err(error) => {
-                eprintln!("[devices] native identity store unavailable, using file store: {error}");
-                load_or_create_identity(&FileStore::new(&data_dir, APP_ID))
-                    .context("loading the desktop identity")?
-            }
-        };
-
-        DeviceManager::with_identity(data_dir, identity)
+        let registry = Arc::new(DeviceRegistry::from_snapshot(read_registry(&data_dir)));
+        Ok(DeviceManager {
+            data_dir,
+            registry,
+            server: OnceLock::new(),
+            init: Mutex::new(()),
+        })
     }
 
-    /// Build a manager over an explicit secure store. Tests use the encrypted
-    /// file store so they never touch the developer's real keychain.
+    /// Build a manager over an explicit secure store, loading the identity at
+    /// once. Tests use the encrypted file store so they never touch the
+    /// developer's real keychain.
     #[cfg(test)]
     pub(crate) fn with_store(
         data_dir: &Path,
         store: &dyn solayge_identity::SecureStore,
     ) -> Result<Self> {
-        let data_dir = data_dir.to_path_buf();
-        std::fs::create_dir_all(&data_dir).context("creating the app data directory")?;
+        let manager = DeviceManager::new(data_dir)?;
         let identity = load_or_create_identity(store).context("loading the desktop identity")?;
-        DeviceManager::with_identity(data_dir, identity)
+        manager.install_identity(identity);
+        Ok(manager)
     }
 
-    fn with_identity(data_dir: PathBuf, identity: DeviceIdentity) -> Result<Self> {
-        let registry = Arc::new(DeviceRegistry::from_snapshot(read_registry(&data_dir)));
+    fn install_identity(&self, identity: DeviceIdentity) {
         let server =
-            PairingServer::with_registry(identity, PairingConfig::default(), registry.clone());
+            PairingServer::with_registry(identity, PairingConfig::default(), self.registry.clone());
+        let _ = self.server.set(server);
+    }
 
-        Ok(DeviceManager {
-            data_dir,
-            registry,
-            server,
-        })
+    /// Load and install the desktop identity on first use; a no-op afterwards.
+    /// The native store is preferred, falling back to the encrypted file store
+    /// so host functionality is preserved when the keychain is unavailable.
+    fn ensure_server(&self) -> Result<&PairingServer> {
+        if let Some(server) = self.server.get() {
+            return Ok(server);
+        }
+        let _guard = self.init.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(server) = self.server.get() {
+            return Ok(server);
+        }
+        let identity = match load_or_create_identity(default_store(APP_ID, &self.data_dir).as_ref()) {
+            Ok(identity) => identity,
+            Err(error) => {
+                eprintln!("[devices] native identity store unavailable, using file store: {error}");
+                load_or_create_identity(&FileStore::new(&self.data_dir, APP_ID))
+                    .context("loading the desktop identity")?
+            }
+        };
+        self.install_identity(identity);
+        self.server.get().context("installing the desktop identity")
     }
 
     /// The shared registry, for the transport layer's per-request authorization.
@@ -89,18 +112,20 @@ impl DeviceManager {
         write_registry(&self.data_dir, &self.registry.snapshot())
     }
 
-    fn desktop_public(&self) -> PublicIdentity {
-        self.server.desktop_identity()
+    fn desktop_public(&self) -> Result<PublicIdentity> {
+        Ok(self.ensure_server()?.desktop_identity())
     }
 
-    /// The pairing authority, for the transport host handler.
-    pub(crate) fn pairing_server(&self) -> &PairingServer {
-        &self.server
+    /// The pairing authority, for the transport host handler. Loads the identity
+    /// on first call.
+    pub(crate) fn pairing_server(&self) -> Result<&PairingServer> {
+        self.ensure_server()
     }
 
     /// The desktop's own device id, as a string.
-    pub(crate) fn desktop_id_string(&self) -> String {
-        self.server.desktop_id().to_string()
+    #[allow(dead_code)] // read by the mobile-network host handler
+    pub(crate) fn desktop_id_string(&self) -> Result<String> {
+        Ok(self.ensure_server()?.desktop_id().to_string())
     }
 
     fn device_view(device: &solayge_identity::PairedDevice) -> DeviceView {
@@ -243,12 +268,12 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// The desktop's public identity.
 #[tauri::command]
-pub fn desktop_identity(manager: State<'_, DeviceManager>) -> DesktopIdentityView {
-    let public = manager.desktop_public();
-    DesktopIdentityView {
+pub fn desktop_identity(manager: State<'_, DeviceManager>) -> Result<DesktopIdentityView, String> {
+    let public = manager.desktop_public().map_err(|e| e.to_string())?;
+    Ok(DesktopIdentityView {
         desktop_id: public.device_id().to_string(),
         fingerprint: public.short_fingerprint(),
-    }
+    })
 }
 
 /// Every approved phone, oldest pairing first.
@@ -263,8 +288,31 @@ pub fn devices_list(manager: State<'_, DeviceManager>) -> Vec<DeviceView> {
 }
 
 /// Start a new pairing challenge (desktop **Add phone**).
+///
+/// This is the first point at which the desktop actually needs its mobile
+/// identity and transport key, so starting the listener here is what triggers
+/// the OS credential-store prompt — only when the user adds a phone, never on
+/// first launch.
 #[tauri::command]
-pub fn pairing_start(manager: State<'_, DeviceManager>) -> Result<PairingOfferView, String> {
+pub async fn pairing_start(
+    app: tauri::AppHandle,
+    manager: State<'_, DeviceManager>,
+) -> Result<PairingOfferView, String> {
+    #[cfg(feature = "mobile-network")]
+    {
+        crate::iroh_host::ensure_started(app.clone());
+        // Let the listener publish its endpoint id so the QR carries a direct
+        // dial hint; the fallback after the wait is the manual/relay path.
+        for _ in 0..20 {
+            if crate::host_runtime::endpoint_id().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    #[cfg(not(feature = "mobile-network"))]
+    let _ = &app;
+
     // Advertise the Iroh endpoint id when the listener is running, so the phone
     // can dial this desktop. The hint carries no secret; trust still requires
     // approve-on-desktop and both sides' identity proofs.
@@ -274,11 +322,12 @@ pub fn pairing_start(manager: State<'_, DeviceManager>) -> Result<PairingOfferVi
     };
     let reachable = hints.iroh_endpoint_id.is_some();
     let offer = manager
-        .server
+        .pairing_server()
+        .map_err(|e| e.to_string())?
         .start_with_hints(now(), hints)
         .map_err(|e| e.to_string())?;
     let qr_string = offer.qr.to_qr_string().map_err(|e| e.to_string())?;
-    let desktop = manager.desktop_public();
+    let desktop = manager.desktop_public().map_err(|e| e.to_string())?;
     Ok(PairingOfferView {
         pairing_id: offer.pairing_id,
         manual_code: offer.manual_code,
@@ -297,11 +346,12 @@ pub fn pairing_status(
     manager: State<'_, DeviceManager>,
     pairing_id: String,
 ) -> Option<PairingStatusView> {
-    let state = manager.server.session_state(&pairing_id)?;
-    let device = manager.server.pending_device(&pairing_id);
+    let server = manager.pairing_server().ok()?;
+    let state = server.session_state(&pairing_id)?;
+    let device = server.pending_device(&pairing_id);
     Some(PairingStatusView {
         state: state.wire_name().to_string(),
-        verification_code: manager.server.verification_code(&pairing_id),
+        verification_code: server.verification_code(&pairing_id),
         device_name: device.as_ref().map(|(name, _)| name.clone()),
         device_platform: device.as_ref().map(|(_, platform)| platform.clone()),
     })
@@ -320,7 +370,8 @@ pub fn pairing_approve(
         None => None,
     };
     let device = manager
-        .server
+        .pairing_server()
+        .map_err(|e| e.to_string())?
         .approve(&pairing_id, grants, now())
         .map_err(|e| e.to_string())?;
     manager.persist().map_err(|e| e.to_string())?;
@@ -331,7 +382,8 @@ pub fn pairing_approve(
 #[tauri::command]
 pub fn pairing_reject(manager: State<'_, DeviceManager>, pairing_id: String) -> Result<(), String> {
     manager
-        .server
+        .pairing_server()
+        .map_err(|e| e.to_string())?
         .reject(&pairing_id, now())
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -351,7 +403,7 @@ pub fn device_revoke(manager: State<'_, DeviceManager>, device_id: String) -> Re
 impl DeviceManager {
     /// The current session state, if the id is known.
     pub fn state_of(&self, pairing_id: &str) -> Option<PairingState> {
-        self.server.session_state(pairing_id)
+        self.pairing_server().ok()?.session_state(pairing_id)
     }
 
     /// Touch a device's `last_seen` after an authorized connection.
@@ -363,8 +415,8 @@ impl DeviceManager {
     }
 
     /// The signed-in desktop identity (for host-side signing).
-    pub fn identity(&self) -> &DeviceIdentity {
-        self.server.desktop_identity_ref()
+    pub fn identity(&self) -> Result<&DeviceIdentity> {
+        Ok(self.ensure_server()?.desktop_identity_ref())
     }
 }
 
@@ -385,21 +437,27 @@ mod tests {
         let dir = temp_dir();
         let store = || solayge_identity::FileStore::new(&dir, "test-identity");
         let manager = DeviceManager::with_store(&dir, &store()).unwrap();
-        let offer = manager.server.start(now()).unwrap();
+        let offer = manager.pairing_server().unwrap().start(now()).unwrap();
 
         // A phone completes pairing.
         let phone = DeviceIdentity::generate();
         let mut client = solayge_identity::PairingClient::new(phone, "Pixel", "android");
         let begin = client.begin_request(&offer).unwrap();
-        let response = manager.server.handle_begin(begin, now() + 1).unwrap();
+        let response = manager
+            .pairing_server()
+            .unwrap()
+            .handle_begin(begin, now() + 1)
+            .unwrap();
         client.accept_begin(&response).unwrap();
         let proof = client.prove_identity_request(&response).unwrap();
         manager
-            .server
+            .pairing_server()
+            .unwrap()
             .handle_prove_identity(proof, now() + 2)
             .unwrap();
         let device = manager
-            .server
+            .pairing_server()
+            .unwrap()
             .approve(&offer.pairing_id, None, now() + 3)
             .unwrap();
         manager.persist().unwrap();

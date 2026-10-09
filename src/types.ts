@@ -506,6 +506,42 @@ export interface BranchInfo {
   dirty: boolean;
 }
 
+/** One commit in a worktree's history, summarized for the Git view. */
+export interface CommitSummary {
+  id: string;
+  short_id: string;
+  subject: string;
+  author: string;
+  committed_at: number;
+  files_changed: number;
+  additions: number;
+  deletions: number;
+}
+
+/** One file touched by a commit, with its change counts. */
+export interface CommitFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
+/** Landing detail for a worktree, computed on demand when expanded. */
+export interface WorktreeDetail {
+  path: string;
+  branch?: string | null;
+  base: string;
+  head?: string | null;
+  commit_count: number;
+  files_changed: number;
+  additions: number;
+  deletions: number;
+  last_commit_at?: number | null;
+  last_commit_subject?: string | null;
+  dirty: boolean;
+  commits: CommitSummary[];
+}
+
 export interface FileDiff {
   path: string;
   status: string;

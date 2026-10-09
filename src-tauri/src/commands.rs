@@ -206,6 +206,38 @@ pub async fn project_worktrees(path: String) -> Result<Vec<Worktree>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Landing detail for one worktree: commit/file counts, last commit, and its
+/// recent commits. Computed only when the user expands a worktree.
+#[tauri::command]
+pub async fn worktree_detail(
+    path: String,
+    worktree: String,
+    limit: Option<usize>,
+) -> Result<WorktreeDetail, String> {
+    git::worktree_detail(Path::new(&path), Path::new(&worktree), limit.unwrap_or(50))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The files one commit touched, with add/delete counts.
+#[tauri::command]
+pub async fn worktree_commit_files(
+    path: String,
+    commit: String,
+) -> Result<Vec<CommitFile>, String> {
+    git::commit_files(Path::new(&path), &commit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Undo a commit by reverting it (a new commit that inverts its changes).
+#[tauri::command]
+pub async fn git_revert_commit(path: String, commit: String) -> Result<String, String> {
+    git::revert_commit(Path::new(&path), &commit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Local (and remote-only) branches with their landing state against the default
 /// branch, so the Git view can flag work that never reached `main`.
 #[tauri::command]

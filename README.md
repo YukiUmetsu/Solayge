@@ -213,12 +213,22 @@ git clone https://github.com/YukiUmetsu/Solayge.git
 cd Solayge
 pnpm install
 pnpm tauri dev      # run the app with hot reload
+pnpm --filter @solayge/mobile tauri android dev # run the android app
 ```
 
 Build a bundle:
 
 ```bash
 pnpm tauri build    # bundles for the host OS (dmg/app, msi/nsis, deb/rpm/AppImage)
+
+# build dmg for macos
+pnpm tauri build --bundles dmg -v
+
+# build for android app (debug)
+pnpm --filter @solayge/mobile tauri android build --debug --apk --target aarch64
+
+# install android debug apk to your mobile phone
+adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
 
 On macOS, `pnpm tauri build` goes through `scripts/tauri.mjs`, which wraps the

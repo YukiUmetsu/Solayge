@@ -1,6 +1,7 @@
-import { useCallback, useState } from "react";
-import type { BranchInfo, Project, Worktree } from "../types";
+import { useCallback, useEffect, useState } from "react";
+import type { BranchInfo, CommitFile, Project, Worktree, WorktreeDetail } from "../types";
 import { api } from "../api";
+import { relTime } from "../lib/format";
 import { Icon } from "./Icons";
 
 /**
@@ -331,6 +332,203 @@ export function GitBranches({
   );
 }
 
+/** Small inline add/delete change counts, e.g. `+12 −3`. */
+function ChangeCounts({ additions, deletions }: { additions: number; deletions: number }) {
+  if (!additions && !deletions) return null;
+  return (
+    <span className="shrink-0 font-mono text-[10px]">
+      {additions > 0 && <span className="text-success">+{additions}</span>}
+      {additions > 0 && deletions > 0 && " "}
+      {deletions > 0 && <span className="text-danger">−{deletions}</span>}
+    </span>
+  );
+}
+
+/**
+ * The progressive-disclosure detail for one worktree: commit/file counts and
+ * last commit at a glance, then its commits (each expandable to the files it
+ * touched) and a safe "undo" that reverts a commit. Loaded only when expanded,
+ * so the default Worktrees list stays cheap.
+ */
+function WorktreeDetails({
+  project,
+  worktree,
+  onChanged,
+}: {
+  project: Project;
+  worktree: Worktree;
+  onChanged: () => void;
+}) {
+  const [detail, setDetail] = useState<WorktreeDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Kept separate from `error` (which replaces the whole panel): a failed
+  // revert must not hide the commit list the user is working from.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [openCommit, setOpenCommit] = useState<string | null>(null);
+  const [files, setFiles] = useState<Record<string, CommitFile[]>>({});
+  const [filesError, setFilesError] = useState<Record<string, string>>({});
+  const [reverting, setReverting] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setDetail(await api.worktreeDetail(project.path, worktree.path, 50));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [project.path, worktree.path]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggleCommit = async (commitId: string) => {
+    if (openCommit === commitId) {
+      setOpenCommit(null);
+      return;
+    }
+    setOpenCommit(commitId);
+    if (files[commitId]) return;
+    try {
+      const list = await api.worktreeCommitFiles(worktree.path, commitId);
+      setFiles((prev) => ({ ...prev, [commitId]: list }));
+    } catch (e) {
+      setFilesError((prev) => ({ ...prev, [commitId]: String(e) }));
+    }
+  };
+
+  const revert = async (commitId: string, subject: string) => {
+    if (
+      !window.confirm(
+        `Undo commit "${subject}"?\n\nThis reverts it with a new commit that inverts its changes — history and other commits are preserved.`,
+      )
+    ) {
+      return;
+    }
+    setReverting(commitId);
+    setNote(null);
+    setActionError(null);
+    try {
+      setNote(await api.gitRevertCommit(worktree.path, commitId));
+      setOpenCommit(null);
+      await load();
+      onChanged();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setReverting(null);
+    }
+  };
+
+  if (loading) return <p className="px-3 py-2 text-[11px] text-ink-subtle">Loading details…</p>;
+  if (error) return <p className="px-3 py-2 text-[11px] text-danger">{error}</p>;
+  if (!detail) return null;
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg bg-well px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-ink-muted">
+        <span title={`Commits on ${detail.base}..HEAD that this worktree introduces`}>
+          {detail.commit_count} {plural(detail.commit_count, "commit")}
+        </span>
+        <span>
+          {detail.files_changed} {plural(detail.files_changed, "file")} changed
+        </span>
+        <ChangeCounts additions={detail.additions} deletions={detail.deletions} />
+        {detail.last_commit_at != null && (
+          <span title={detail.last_commit_subject ?? undefined}>
+            last commit {relTime(detail.last_commit_at)}
+          </span>
+        )}
+        {detail.dirty && <span className="text-warning">uncommitted changes</span>}
+      </div>
+
+      {detail.commits.length === 0 ? (
+        <p className="text-[11px] text-ink-subtle">
+          No commits ahead of <span className="mono">{detail.base}</span>.
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {detail.commits.map((commit) => {
+            const open = openCommit === commit.id;
+            return (
+              <li key={commit.id} className="rounded border border-line bg-panel">
+                <div className="flex items-center gap-2 px-2 py-1">
+                  <button
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    onClick={() => void toggleCommit(commit.id)}
+                    aria-expanded={open}
+                    title="Show files changed by this commit"
+                  >
+                    <Icon
+                      name={open ? "collapse" : "expand"}
+                      className="h-3 w-3 shrink-0 text-ink-subtle"
+                    />
+                    <span className="mono shrink-0 text-[10px] text-ink-subtle">
+                      {commit.short_id}
+                    </span>
+                    <span className="truncate text-[11.5px] text-ink">{commit.subject}</span>
+                  </button>
+                  <span className="shrink-0 text-[10px] text-ink-subtle">
+                    {commit.files_changed} {plural(commit.files_changed, "file")}
+                  </span>
+                  <ChangeCounts additions={commit.additions} deletions={commit.deletions} />
+                  <span className="shrink-0 text-[10px] text-ink-subtle">
+                    {relTime(commit.committed_at)}
+                  </span>
+                  <button
+                    className="btn btn-ghost !px-1.5 !py-0.5 !text-[10px]"
+                    disabled={reverting !== null}
+                    onClick={() => void revert(commit.id, commit.subject)}
+                    title={`Undo (revert) commit ${commit.short_id}`}
+                  >
+                    <Icon name="retry" className="h-3 w-3" />
+                    Undo
+                  </button>
+                </div>
+
+                {open && (
+                  <div className="border-t border-line px-2 py-1.5">
+                    {filesError[commit.id] ? (
+                      <p className="text-[10.5px] text-danger">{filesError[commit.id]}</p>
+                    ) : !files[commit.id] ? (
+                      <p className="text-[10.5px] text-ink-subtle">Loading files…</p>
+                    ) : files[commit.id].length === 0 ? (
+                      <p className="text-[10.5px] text-ink-subtle">No file changes.</p>
+                    ) : (
+                      <ul className="space-y-0.5">
+                        {files[commit.id].map((file) => (
+                          <li key={file.path} className="flex items-center gap-2 text-[10.5px]">
+                            <span className="mono truncate text-ink">{file.path}</span>
+                            <span className="shrink-0 text-ink-subtle">{file.status}</span>
+                            <span className="ml-auto shrink-0">
+                              <ChangeCounts
+                                additions={file.additions}
+                                deletions={file.deletions}
+                              />
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {actionError && <p className="text-[10.5px] text-danger">{actionError}</p>}
+      {note && <p className="text-[10.5px] text-success">{note}</p>}
+    </div>
+  );
+}
+
 export function GitWorktrees({
   project,
   branches,
@@ -352,6 +550,16 @@ export function GitWorktrees({
 }) {
   const { busy, note, fail, run } = useGitAction(onChanged);
   const target = defaultBranch ?? "the default branch";
+
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpanded = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(() => {
     onReload();
@@ -441,6 +649,18 @@ export function GitWorktrees({
                 <span className="mono truncate text-[12px] text-ink" title={w.path}>
                   {w.branch ?? "(detached)"}
                 </span>
+                <button
+                  className="btn btn-ghost !shrink-0 !px-1.5 !py-0.5 !text-[10px]"
+                  onClick={() => toggleExpanded(w.path)}
+                  aria-expanded={expanded.has(w.path)}
+                  title="Show commits and files for this worktree"
+                >
+                  <Icon
+                    name={expanded.has(w.path) ? "collapse" : "expand"}
+                    className="h-3 w-3"
+                  />
+                  Details
+                </button>
                 {w.is_main && (
                   <span className="shrink-0 rounded bg-well-strong px-1.5 py-0.5 text-[10px] text-ink-muted">
                     main worktree
@@ -554,6 +774,10 @@ export function GitWorktrees({
                     </button>
                   )}
                 </div>
+              )}
+
+              {expanded.has(w.path) && (
+                <WorktreeDetails project={project} worktree={w} onChanged={refresh} />
               )}
             </li>
           );

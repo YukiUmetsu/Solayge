@@ -1089,6 +1089,48 @@ pub struct DiffResult {
     pub files: Vec<FileDiff>,
 }
 
+/// One commit in a branch/worktree's history, summarized for the Git view.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitSummary {
+    pub id: String,
+    pub short_id: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub files_changed: u32,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+/// One file touched by a commit, with its change counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitFile {
+    pub path: String,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+/// Worktree landing detail: how far it is from the base branch, when it last
+/// changed, and its recent commits. Computed only on demand so the default Git
+/// view stays cheap.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeDetail {
+    pub path: String,
+    pub branch: Option<String>,
+    pub base: String,
+    pub head: Option<String>,
+    /// Commits on `base..HEAD` (the work this worktree introduces).
+    pub commit_count: i64,
+    pub files_changed: u32,
+    pub additions: i64,
+    pub deletions: i64,
+    pub last_commit_at: Option<i64>,
+    pub last_commit_subject: Option<String>,
+    pub dirty: bool,
+    pub commits: Vec<CommitSummary>,
+}
+
 // ---- planning DTOs ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

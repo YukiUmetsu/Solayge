@@ -20,6 +20,7 @@
 //! relay and no discovery a peer must be dialed by an explicit address.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::Manager;
@@ -39,6 +40,19 @@ const TRANSPORT_KEY_APP_ID: &str = "com.solayge.desktop/iroh";
 fn disabled_by_env() -> bool {
     matches!(std::env::var("SOLAYGE_IROH_HOST").ok().as_deref(), Some("0"))
 }
+
+/// Whether a phone has already been registered. Until then there is nothing to
+/// serve remotely, so the listener — and the OS credential-store reads it needs
+/// for the transport key and identity — can wait until the user actually pairs.
+fn has_registered_devices(app: &tauri::AppHandle) -> bool {
+    !app.state::<crate::devices::DeviceManager>()
+        .registry()
+        .list()
+        .is_empty()
+}
+
+/// Guards against starting the listener twice.
+static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Read the listener configuration from the environment, or `Err` with a
 /// user-facing reason.
@@ -84,14 +98,32 @@ fn transport_secret_key(app: &tauri::AppHandle) -> Result<SecretKey, String> {
     Ok(secret_key_from_seed(&seed))
 }
 
-/// Start the listener unless `SOLAYGE_IROH_HOST=0`.
+/// Start the listener at launch, but only when a phone has already paired.
+///
+/// A fresh install that never uses mobile must not touch the OS credential
+/// store: on macOS, reading the identity/transport key after a reinstall makes
+/// the system ask for the login password even though the feature is unused.
+/// [`ensure_started`] is called when pairing actually begins.
 pub fn maybe_spawn(app: tauri::AppHandle) {
+    if disabled_by_env() || !has_registered_devices(&app) {
+        return;
+    }
+    ensure_started(app);
+}
+
+/// Start the listener now unless it is disabled or already running. Idempotent,
+/// so the startup path and the Add-phone path can both call it.
+pub fn ensure_started(app: tauri::AppHandle) {
     if disabled_by_env() {
+        return;
+    }
+    if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     let mut config = match config_from_env() {
         Ok(config) => config,
         Err(error) => {
+            STARTED.store(false, Ordering::SeqCst);
             eprintln!("solayge: Iroh host not started: {error}");
             return;
         }
@@ -121,7 +153,11 @@ pub fn maybe_spawn(app: tauri::AppHandle) {
                     eprintln!("solayge: Iroh host listener stopped: {error}");
                 }
             }
-            Err(error) => eprintln!("solayge: failed to start Iroh host: {error}"),
+            Err(error) => {
+                // Let a later attempt retry instead of staying dead forever.
+                STARTED.store(false, Ordering::SeqCst);
+                eprintln!("solayge: failed to start Iroh host: {error}");
+            }
         }
     });
 }

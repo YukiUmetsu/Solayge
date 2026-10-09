@@ -224,6 +224,10 @@ export interface SessionDetail {
   started_at: number;
   updated_at: number;
   summary?: string | null;
+  /** The instruction the agent was given (capped). */
+  prompt?: string | null;
+  /** A capped tail of the task log, for on-device detail. */
+  log_tail?: string | null;
   files_changed: number;
 }
 

@@ -151,7 +151,9 @@ impl<R: tauri::Runtime> HostHandler<R> {
     fn health(&self) -> Result<Value, ProtocolError> {
         let manager = self.app.state::<DeviceManager>();
         typed(&ConnectionHealth {
-            desktop_id: manager.desktop_id_string(),
+            desktop_id: manager
+                .desktop_id_string()
+                .map_err(|e| ProtocolError::internal(e.to_string()))?,
             protocol_version: PROTOCOL_VERSION,
             app_version: Self::app_version().to_string(),
             uptime_secs: 0,
@@ -163,6 +165,7 @@ impl<R: tauri::Runtime> HostHandler<R> {
         let manager = self.app.state::<DeviceManager>();
         let response: PairBeginResponse = manager
             .pairing_server()
+            .map_err(|e| ProtocolError::internal(e.to_string()))?
             .handle_begin(begin, now())
             .map_err(identity_error)?;
         typed(&response)
@@ -173,6 +176,7 @@ impl<R: tauri::Runtime> HostHandler<R> {
         let manager = self.app.state::<DeviceManager>();
         let response: PairProveIdentityResponse = manager
             .pairing_server()
+            .map_err(|e| ProtocolError::internal(e.to_string()))?
             .handle_prove_identity(prove, now())
             .map_err(identity_error)?;
         typed(&response)
@@ -188,7 +192,9 @@ impl<R: tauri::Runtime> HostHandler<R> {
             return Err(ProtocolError::unsupported_version(auth.protocol_version));
         }
         let manager = self.app.state::<DeviceManager>();
-        let desktop_id = manager.desktop_id_string();
+        let desktop_id = manager
+            .desktop_id_string()
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
         if auth.desktop_id != desktop_id {
             return Err(ProtocolError::not_authorized(
                 "this request is addressed to a different desktop",
@@ -235,7 +241,9 @@ impl<R: tauri::Runtime> HostHandler<R> {
     fn host_metadata(&self) -> Result<Value, ProtocolError> {
         let manager = self.app.state::<DeviceManager>();
         typed(&HostMetadata {
-            desktop_id: manager.desktop_id_string(),
+            desktop_id: manager
+                .desktop_id_string()
+                .map_err(|e| ProtocolError::internal(e.to_string()))?,
             name: "Solayge Desktop".to_string(),
             platform: std::env::consts::OS.to_string(),
             app_version: Self::app_version().to_string(),
@@ -277,12 +285,9 @@ impl<R: tauri::Runtime> HostHandler<R> {
     fn sessions(&self) -> Result<Value, ProtocolError> {
         let state = self.app.state::<crate::state::AppState>();
         let inner = crate::state::lock(&state.inner);
-        let sessions = inner
-            .tasks
-            .iter()
-            .filter(|t| !matches!(t.status, TaskStatus::Draft))
-            .map(session_summary)
-            .collect();
+        // Drafts are included: a task the user has planned but not released is
+        // still something they want to see and review from the phone.
+        let sessions = inner.tasks.iter().map(session_summary).collect();
         typed(&SessionsResponse { sessions })
     }
 
@@ -293,13 +298,14 @@ impl<R: tauri::Runtime> HostHandler<R> {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| ProtocolError::missing_field("session_id"))?;
         let state = self.app.state::<crate::state::AppState>();
+        let log_path = state.log_path(&session_id);
         let inner = crate::state::lock(&state.inner);
         let task = inner
             .tasks
             .iter()
             .find(|t| t.id == session_id)
             .ok_or_else(|| ProtocolError::not_found(&session_id))?;
-        typed(&session_detail(task))
+        typed(&session_detail(task, read_log_tail(&log_path)))
     }
 
     fn empty_events(&self, request: &Envelope) -> Result<Value, ProtocolError> {
@@ -468,7 +474,7 @@ fn session_summary(task: &Task) -> SessionSummary {
     }
 }
 
-fn session_detail(task: &Task) -> SessionDetail {
+fn session_detail(task: &Task, log_tail: Option<String>) -> SessionDetail {
     SessionDetail {
         id: task.id.clone(),
         project_id: task.project_path.clone(),
@@ -483,8 +489,27 @@ fn session_detail(task: &Task) -> SessionDetail {
             .clone()
             .or_else(|| task.error.clone())
             .map(|s| redact_long(&s)),
+        prompt: Some(redact_long(&task.prompt)),
+        log_tail,
         files_changed: 0,
     }
+}
+
+/// The last part of a task log, capped, for the mobile detail view. `None` when
+/// the log does not exist yet. Reads at most `MAX` bytes so a huge log cannot
+/// bloat a frame or the phone.
+fn read_log_tail(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX: u64 = 8 * 1024;
+    let len = std::fs::metadata(path).ok()?.len();
+    let mut file = std::fs::File::open(path).ok()?;
+    if len > MAX {
+        file.seek(SeekFrom::Start(len - MAX)).ok()?;
+    }
+    let mut buf = Vec::new();
+    file.take(MAX).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    (!text.trim().is_empty()).then(|| redact_long(&text))
 }
 
 fn approval_of(task: &Task) -> Option<ApprovalSummary> {
@@ -610,6 +635,29 @@ mod tests {
         assert!(capped.len() <= 8 * 1024 + 4);
         assert!(capped.ends_with('…'));
     }
+
+    #[test]
+    fn session_detail_carries_the_prompt_and_log_tail_for_mobile() {
+        let detail = session_detail(&task(TaskStatus::Running, false), Some("tail".into()));
+        assert_eq!(detail.prompt.as_deref(), Some("prompt"));
+        assert_eq!(detail.log_tail.as_deref(), Some("tail"));
+    }
+
+    #[test]
+    fn log_tail_reads_the_end_and_handles_a_missing_file() {
+        let dir =
+            std::env::temp_dir().join(format!("solayge-logtail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read_log_tail(&dir.join("missing.log")).is_none());
+
+        let path = dir.join("t.log");
+        std::fs::write(&path, format!("{}\nEND", "x".repeat(20_000))).unwrap();
+        let tail = read_log_tail(&path).unwrap();
+        assert!(tail.ends_with("END"));
+        assert!(tail.len() <= 8 * 1024 + 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +696,7 @@ mod handshake_tests {
         let offer = app
             .state::<DeviceManager>()
             .pairing_server()
+            .unwrap()
             .start_with_hints(
                 now(),
                 ReachabilityHints {
@@ -681,6 +730,7 @@ mod handshake_tests {
         // Desktop user approves with the default View + Message grant.
         app.state::<DeviceManager>()
             .pairing_server()
+            .unwrap()
             .approve(&offer.pairing_id, None, now())
             .unwrap();
 
@@ -694,7 +744,7 @@ mod handshake_tests {
         // Auth leg 1: request a challenge.
         let mut auth = AuthRequest {
             device_id: phone.device_id().to_string(),
-            desktop_id: app.state::<DeviceManager>().desktop_id_string(),
+            desktop_id: app.state::<DeviceManager>().desktop_id_string().unwrap(),
             protocol_version: PROTOCOL_VERSION,
             host_nonce: None,
             proof: None,

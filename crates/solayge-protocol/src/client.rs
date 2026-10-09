@@ -380,6 +380,8 @@ impl MockHost {
             started_at: 10,
             updated_at: 100,
             summary: Some("Editing components; running tests next.".to_string()),
+            prompt: Some("Refactor the UI components and run the tests.".to_string()),
+            log_tail: Some("…running tests".to_string()),
             files_changed: 2,
         }];
         let host = HostMetadata {

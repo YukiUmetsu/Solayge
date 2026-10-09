@@ -58,6 +58,8 @@
     "started_at": 10,
     "updated_at": 100,
     "summary": "Editing components; running tests next.",
+    "prompt": "Refactor the UI components and run the tests.",
+    "log_tail": "…running tests",
     "files_changed": 2
   },
   "session_event": {

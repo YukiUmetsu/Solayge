@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BranchInfo,
   CacheStats,
+  CommitFile,
   DiffResult,
   EnvValue,
   EnvironmentStatus,
@@ -19,6 +20,7 @@ import type {
   Snapshot,
   TaskPatch,
   Worktree,
+  WorktreeDetail,
   AnalyticsFilters,
   AnalyticsOverview,
   AnalyticsTimeSeriesPoint,
@@ -41,6 +43,16 @@ export const api = {
   projectStatus: (path: string) => invoke<GitStatus>("project_status", { path }),
   projectWorktrees: (path: string) =>
     invoke<Worktree[]>("project_worktrees", { path }),
+  worktreeDetail: (path: string, worktree: string, limit?: number | null) =>
+    invoke<WorktreeDetail>("worktree_detail", {
+      path,
+      worktree,
+      limit: limit ?? null,
+    }),
+  worktreeCommitFiles: (path: string, commit: string) =>
+    invoke<CommitFile[]>("worktree_commit_files", { path, commit }),
+  gitRevertCommit: (path: string, commit: string) =>
+    invoke<string>("git_revert_commit", { path, commit }),
   projectBranches: (path: string) =>
     invoke<BranchInfo[]>("project_branches", { path }),
   gitMergeBranch: (path: string, branch: string, target?: string | null) =>

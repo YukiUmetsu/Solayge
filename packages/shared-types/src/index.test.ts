@@ -53,6 +53,8 @@ const EXPECTED_KEYS: Record<string, string[]> = {
     "started_at",
     "updated_at",
     "summary",
+    "prompt",
+    "log_tail",
     "files_changed",
   ],
   session_event: ["seq", "event_id", "kind", "timestamp", "payload"],

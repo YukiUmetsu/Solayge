@@ -100,6 +100,13 @@ pub struct SessionDetail {
     pub updated_at: i64,
     #[serde(default)]
     pub summary: Option<String>,
+    /// The instruction the agent was given (capped), for the mobile detail view.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// A capped tail of the task log, so the phone can show the same run detail
+    /// as the desktop without shipping the whole transcript.
+    #[serde(default)]
+    pub log_tail: Option<String>,
     pub files_changed: u32,
 }
 
