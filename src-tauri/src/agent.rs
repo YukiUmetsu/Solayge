@@ -24,10 +24,7 @@ pub const EDITORS: &[(&str, &str)] = &[
 ];
 
 fn editor_binary(id: &str) -> Option<&'static str> {
-    EDITORS
-        .iter()
-        .find(|(k, _)| *k == id)
-        .map(|(_, b)| *b)
+    EDITORS.iter().find(|(k, _)| *k == id).map(|(_, b)| *b)
 }
 
 /// Split a template into argv, dropping `[ … ]` groups whose placeholders are
@@ -543,7 +540,12 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
             let pathext =
                 std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
             let mut v = vec![String::new()];
-            v.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_string));
+            v.extend(
+                pathext
+                    .split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_string),
+            );
             v
         }
         #[cfg(not(windows))]
@@ -626,10 +628,7 @@ fn parse_models(raw: &str) -> Vec<String> {
     let clean = crate::opencode::strip_ansi(raw);
     let mut out: Vec<String> = Vec::new();
     for line in clean.lines() {
-        let t = line
-            .trim()
-            .trim_start_matches(['-', '*', '•', '>'])
-            .trim();
+        let t = line.trim().trim_start_matches(['-', '*', '•', '>']).trim();
         // Model ids never contain spaces; this filters out headings, progress
         // lines ("Loading models…"), and prose.
         if t.is_empty() || t.len() > 120 || t.contains(char::is_whitespace) {
@@ -656,9 +655,7 @@ pub async fn fetch_models(provider: Provider) -> Vec<String> {
         let Some((bin, args)) = cmd.split_first() else {
             continue;
         };
-        let run = tokio::process::Command::new(bin)
-            .args(args)
-            .output();
+        let run = tokio::process::Command::new(bin).args(args).output();
         let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(90), run).await
         else {
             continue;
@@ -724,7 +721,10 @@ fn choose_review_model(explicit: Option<String>, task_model: Option<&str>) -> Op
 /// The provider segment of a `provider/model` id (`opencode-go` in
 /// `opencode-go/deepseek-v4.1-flash`).
 fn model_provider(model: &str) -> &str {
-    model.split_once('/').map(|(provider, _)| provider).unwrap_or("")
+    model
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or("")
 }
 
 /// The model segment of a `provider/model` id (`deepseek-v4.1-flash` in
@@ -778,7 +778,12 @@ mod tests {
 
     #[test]
     fn keeps_model_flag_only_when_set() {
-        let with = expand("claude -p {prompt} [--model {model}]", "do it", Some("opus"), false);
+        let with = expand(
+            "claude -p {prompt} [--model {model}]",
+            "do it",
+            Some("opus"),
+            false,
+        );
         assert_eq!(with, vec!["claude", "-p", "do it", "--model", "opus"]);
         let without = expand("claude -p {prompt} [--model {model}]", "do it", None, false);
         assert_eq!(without, vec!["claude", "-p", "do it"]);
@@ -792,9 +797,19 @@ mod tests {
 
     #[test]
     fn auto_flag_is_optional() {
-        let on = expand("opencode run --standalone {auto} [--model {model}] {prompt}", "p", None, true);
+        let on = expand(
+            "opencode run --standalone {auto} [--model {model}] {prompt}",
+            "p",
+            None,
+            true,
+        );
         assert_eq!(on, vec!["opencode", "run", "--standalone", "--auto", "p"]);
-        let off = expand("opencode run --standalone {auto} [--model {model}] {prompt}", "p", None, false);
+        let off = expand(
+            "opencode run --standalone {auto} [--model {model}] {prompt}",
+            "p",
+            None,
+            false,
+        );
         assert_eq!(off, vec!["opencode", "run", "--standalone", "p"]);
     }
 
@@ -915,7 +930,10 @@ mod tests {
             text: "end".into(),
             enabled: true,
         };
-        assert_eq!(apply_system_prompt("do it", Some(&suffix), &ctx), "do it\n\nend");
+        assert_eq!(
+            apply_system_prompt("do it", Some(&suffix), &ctx),
+            "do it\n\nend"
+        );
         let off = SystemPrompt {
             position: SystemPromptPosition::Prefix,
             text: "x".into(),
@@ -979,7 +997,10 @@ mod tests {
     #[test]
     fn sanitizes_branch_names() {
         assert_eq!(sanitize_branch_name("Add Login Page!"), "add-login-page");
-        assert_eq!(sanitize_branch_name("  fix: null deref  "), "fix-null-deref");
+        assert_eq!(
+            sanitize_branch_name("  fix: null deref  "),
+            "fix-null-deref"
+        );
         assert_eq!(sanitize_branch_name("`feature/x`"), "feature-x");
         assert_eq!(sanitize_branch_name(""), "task");
         assert_eq!(sanitize_branch_name("***"), "task");

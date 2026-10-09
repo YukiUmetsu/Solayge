@@ -31,6 +31,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+# Per-device identity, QR pairing, and device revocation for the mobile host.
+solayge-identity = { path = "../crates/solayge-identity" }
+# Optional: the Iroh-encrypted transport and connection manager. Enabled with
+# the `mobile-network` feature; a normal desktop build does not pull it in.
+solayge-network = { path = "../crates/solayge-network", optional = true }
+
+[features]
+default = []
+# Enables the desktop Iroh listener that remote Solayge Mobile clients connect
+# to. The listener is additionally opt-in at runtime via `SOLAYGE_IROH_HOST=1`.
+mobile-network = ["dep:solayge-network"]
 
 # macOS desktop notifications go through the modern UserNotifications
 # framework. The older `NSUserNotificationCenter` (used by `notify-rust` /
@@ -72,3 +83,9 @@ incremental = false
 
 [profile.dev.package."*"]
 debug = false
+
+# The desktop app is its own workspace root. Without this table, Cargo would
+# discover the repository-level workspace (which hosts the mobile crate) and
+# reject this package as a non-member. Keeping it standalone preserves the
+# `src-tauri/target` output directory the build scripts depend on.
+[workspace]

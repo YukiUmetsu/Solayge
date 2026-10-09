@@ -1325,7 +1325,10 @@ mod tests {
             ..Default::default()
         };
         for kind in ALL_KINDS {
-            assert!(!n.allows(kind), "{kind:?} must be silenced by the master switch");
+            assert!(
+                !n.allows(kind),
+                "{kind:?} must be silenced by the master switch"
+            );
         }
     }
 
@@ -1391,7 +1394,10 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "enabled": false }))
                 .expect("a partial object is valid");
         assert!(!partial.enabled);
-        assert!(partial.on_task_complete, "unspecified toggles keep their default");
+        assert!(
+            partial.on_task_complete,
+            "unspecified toggles keep their default"
+        );
         assert_eq!(partial.complete_sound.as_deref(), Some("complete"));
     }
 

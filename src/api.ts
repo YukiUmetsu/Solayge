@@ -28,6 +28,9 @@ import type {
   AnalyticsCollectionStatus,
   ReliabilityResult,
   InteractionResult,
+  ConnectedDevice,
+  DesktopIdentity,
+  PairingOffer,
 } from "./types";
 
 export const api = {
@@ -161,6 +164,22 @@ export const api = {
   // ---- provider models ----
   listModels: (provider: Provider, force = false) =>
     invoke<string[]>("list_models", { provider, force }),
+
+  // ---- connected devices (mobile pairing) ----
+  desktopIdentity: () => invoke<DesktopIdentity>("desktop_identity"),
+  devicesList: () => invoke<ConnectedDevice[]>("devices_list"),
+  pairingStart: () => invoke<PairingOffer>("pairing_start"),
+  pairingStatus: (pairingId: string) =>
+    invoke<string | null>("pairing_status", { pairingId }),
+  pairingApprove: (pairingId: string, scopes?: string[] | null) =>
+    invoke<ConnectedDevice>("pairing_approve", {
+      pairingId,
+      scopes: scopes ?? null,
+    }),
+  pairingReject: (pairingId: string) =>
+    invoke<void>("pairing_reject", { pairingId }),
+  deviceRevoke: (deviceId: string) =>
+    invoke<void>("device_revoke", { deviceId }),
 
   // ---- preflight ----
   environmentCheck: () => invoke<EnvironmentStatus>("environment_check"),

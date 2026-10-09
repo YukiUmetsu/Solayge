@@ -149,7 +149,11 @@ pub fn record_prompt(
 }
 
 /// Most recently used prompts (optionally for one project), newest first.
-pub fn history(st: &AppState, project_path: Option<&str>, limit: Option<usize>) -> Vec<PromptEntry> {
+pub fn history(
+    st: &AppState,
+    project_path: Option<&str>,
+    limit: Option<usize>,
+) -> Vec<PromptEntry> {
     let inner = crate::state::lock(&st.inner);
     let mut out: Vec<PromptEntry> = inner
         .prompts

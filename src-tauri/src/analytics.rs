@@ -346,10 +346,7 @@ pub fn redact_text(input: &str) -> String {
 /// Collapse whitespace and clip, after redaction. Never returns raw paths.
 pub fn sanitize_summary(input: &str, max: usize) -> String {
     let redacted = redact_text(input);
-    let collapsed: String = redacted
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max {
         collapsed
     } else {
@@ -383,7 +380,11 @@ pub fn error_code_token(text: &str) -> Option<String> {
             continue;
         }
         // Compiler/runtime codes like TS2322, E0425, P1001, or 429 in a label.
-        if has_digit && upper.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+        if has_digit
+            && upper
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        {
             return Some(upper);
         }
     }
@@ -489,12 +490,25 @@ pub fn fingerprint_code(fingerprint: &str) -> String {
 
 /// Classify a question or permission into the interaction taxonomy. Reads text
 /// only to choose a category; the text itself is never stored.
-pub fn question_category(title: &str, message: Option<&str>, fields: &[String], kind: &str) -> &'static str {
+pub fn question_category(
+    title: &str,
+    message: Option<&str>,
+    fields: &[String],
+    kind: &str,
+) -> &'static str {
     if kind == "permission" {
         let all = format!("{} {}", title, message.unwrap_or_default()).to_ascii_lowercase();
-        if ["credential", "secret", "password", "api key", "token", "login", "auth"]
-            .iter()
-            .any(|n| all.contains(n))
+        if [
+            "credential",
+            "secret",
+            "password",
+            "api key",
+            "token",
+            "login",
+            "auth",
+        ]
+        .iter()
+        .any(|n| all.contains(n))
         {
             return "credentials";
         }
@@ -517,19 +531,37 @@ pub fn question_category(title: &str, message: Option<&str>, fields: &[String], 
     {
         return "credentials";
     }
-    if has("approve") || has("deploy") || has("release") || has("publish") || has("push") || has("merge") {
+    if has("approve")
+        || has("deploy")
+        || has("release")
+        || has("publish")
+        || has("push")
+        || has("merge")
+    {
         return "approval_deployment";
     }
     if has("install") || has("setup") || has("environment") || has("dependency") || has("version") {
         return "environment_setup";
     }
-    if has("convention") || has("instruction") || has("commands") || has("build command") || has("test command") {
+    if has("convention")
+        || has("instruction")
+        || has("commands")
+        || has("build command")
+        || has("test command")
+    {
         return "missing_repository_instructions";
     }
     if has("requirement") || has("spec") || has("what should") || has("scope") || has("feature") {
         return "missing_requirements";
     }
-    if has("implement") || has("approach") || has("library") || has("framework") || has("design") || has("database") || has("how should") {
+    if has("implement")
+        || has("approach")
+        || has("library")
+        || has("framework")
+        || has("design")
+        || has("database")
+        || has("how should")
+    {
         return "implementation_choice";
     }
     if has("success") || has("acceptance") || has("criteria") || has("done") || has("verify") {
@@ -820,8 +852,12 @@ pub fn usage_from_opencode_message(
     let input_tokens = num(tokens.and_then(|t| t.get("input")));
     let output_tokens = num(tokens.and_then(|t| t.get("output")));
     let reasoning_tokens = num(tokens.and_then(|t| t.get("reasoning")));
-    let cache_read_tokens = num(tokens.and_then(|t| t.get("cache")).and_then(|c| c.get("read")));
-    let cache_write_tokens = num(tokens.and_then(|t| t.get("cache")).and_then(|c| c.get("write")));
+    let cache_read_tokens = num(tokens
+        .and_then(|t| t.get("cache"))
+        .and_then(|c| c.get("read")));
+    let cache_write_tokens = num(tokens
+        .and_then(|t| t.get("cache"))
+        .and_then(|c| c.get("write")));
     let provider_total_tokens = num(tokens.and_then(|t| t.get("total")));
 
     let reported_cost_micros = message.get("cost").and_then(|c| {
@@ -1091,10 +1127,7 @@ pub fn errors_from_opencode_message(
             if state.and_then(|s| s.get("status")).and_then(Value::as_str) != Some("error") {
                 continue;
             }
-            let tool = part
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let tool = part.get("name").and_then(Value::as_str).map(str::to_string);
             let text = state
                 .and_then(|s| s.get("error").or_else(|| s.get("output")))
                 .and_then(json_error_text)
@@ -1121,10 +1154,7 @@ pub fn errors_from_opencode_message(
 /// A Solayge-owned failure: a terminal task that recorded an error. This gives
 /// reliable coverage for shell/git/merge tasks and any provider, without parsing
 /// terminal stdout.
-pub fn errors_from_task(
-    capture_examples: bool,
-    t: &crate::models::Task,
-) -> Option<ErrorRecord> {
+pub fn errors_from_task(capture_examples: bool, t: &crate::models::Task) -> Option<ErrorRecord> {
     if !is_terminal_status(status_str(t.status)) {
         return None;
     }
@@ -1200,10 +1230,7 @@ pub fn record_ask_surfaced(app: &AppHandle, task_id: &str, ask: &crate::models::
     let (project_path, run_id) = {
         let inner = crate::state::lock(&st.inner);
         match inner.tasks.iter().find(|t| t.id == task_id) {
-            Some(t) => (
-                t.project_path.clone(),
-                format!("{}:{}", t.id, t.attempts),
-            ),
+            Some(t) => (t.project_path.clone(), format!("{}:{}", t.id, t.attempts)),
             None => return,
         }
     };
@@ -1213,8 +1240,7 @@ pub fn record_ask_surfaced(app: &AppHandle, task_id: &str, ask: &crate::models::
     };
     let field_labels: Vec<String> = ask.fields.iter().map(|f| f.label.clone()).collect();
     let field_keys: Vec<String> = ask.fields.iter().map(|f| f.key.clone()).collect();
-    let category =
-        question_category(&ask.title, ask.message.as_deref(), &field_labels, kind);
+    let category = question_category(&ask.title, ask.message.as_deref(), &field_labels, kind);
     let fingerprint = interaction_fingerprint(kind, ask.action.as_deref(), &field_keys);
     let record = InteractionRecord {
         interaction_id: format!("{task_id}:{}", ask.id),
@@ -1262,7 +1288,11 @@ pub fn record_ask_resolved(app: &AppHandle, task_id: &str, ask_id: &str, outcome
     let id = format!("{task_id}:{ask_id}");
     let mut store = crate::state::lock(&st.analytics);
     let mut changed = false;
-    if let Some(record) = store.interactions.iter_mut().find(|i| i.interaction_id == id) {
+    if let Some(record) = store
+        .interactions
+        .iter_mut()
+        .find(|i| i.interaction_id == id)
+    {
         if record.resolved_at_ms.is_none() {
             record.resolved_at_ms = Some(now_ms());
             record.outcome = Some(outcome.to_string());
@@ -1324,7 +1354,10 @@ pub fn retain_recent(store: &mut AnalyticsStore, days: i64, now_ms: i64) -> bool
     store.usages.retain(|u| u.occurred_at_ms >= cutoff);
     store.errors.retain(|e| e.occurred_at_ms >= cutoff);
     store.interactions.retain(|i| {
-        i.resolved_at_ms.or(Some(i.asked_at_ms)).unwrap_or(i.asked_at_ms) >= cutoff
+        i.resolved_at_ms
+            .or(Some(i.asked_at_ms))
+            .unwrap_or(i.asked_at_ms)
+            >= cutoff
     });
     store.runs.len() != runs_before
         || store.usages.len() != usages_before
@@ -1395,9 +1428,7 @@ fn model_ok(provider: Option<&str>, model: Option<&str>, filters: &AnalyticsFilt
     let provider = provider.unwrap_or_default();
     let model = model.unwrap_or_default();
     filters.models.iter().any(|f| {
-        f == model
-            || f == &format!("{provider}/{model}")
-            || (!provider.is_empty() && f == provider)
+        f == model || f == &format!("{provider}/{model}") || (!provider.is_empty() && f == provider)
     })
 }
 
@@ -1620,7 +1651,10 @@ fn wait_stats(runs: &[&RunRecord]) -> (Option<i64>, u64) {
     if values.is_empty() {
         return (None, 0);
     }
-    (Some(values.iter().sum::<i64>() / values.len() as i64), sample)
+    (
+        Some(values.iter().sum::<i64>() / values.len() as i64),
+        sample,
+    )
 }
 
 pub fn overview(store: &AnalyticsStore, filters: &AnalyticsFilters) -> AnalyticsOverview {
@@ -1633,7 +1667,8 @@ pub fn overview(store: &AnalyticsStore, filters: &AnalyticsFilters) -> Analytics
     // Every task with activity in range, including ones still running.
     let mut task_ids: HashSet<&str> = HashSet::new();
     for r in &store.runs {
-        if run_in_filters(r, filters) && !allowed.as_ref().is_some_and(|a| !a.contains(&r.task_id)) {
+        if run_in_filters(r, filters) && !allowed.as_ref().is_some_and(|a| !a.contains(&r.task_id))
+        {
             task_ids.insert(r.task_id.as_str());
         }
     }
@@ -1656,10 +1691,8 @@ pub fn overview(store: &AnalyticsStore, filters: &AnalyticsFilters) -> Analytics
                 && !allowed.as_ref().is_some_and(|a| !a.contains(&r.task_id))
         })
         .collect();
-    let run_ids_with_usage: HashSet<&str> = usages
-        .iter()
-        .filter_map(|u| u.run_id.as_deref())
-        .collect();
+    let run_ids_with_usage: HashSet<&str> =
+        usages.iter().filter_map(|u| u.run_id.as_deref()).collect();
     let with_data = observable
         .iter()
         .filter(|r| run_ids_with_usage.contains(r.run_id.as_str()))
@@ -1668,10 +1701,8 @@ pub fn overview(store: &AnalyticsStore, filters: &AnalyticsFilters) -> Analytics
     // Reliability + autonomy roll-ups, so the Overview can show them without a
     // second round-trip.
     let errors = filtered_errors(store, filters, allowed.as_ref());
-    let run_ids_with_errors: HashSet<&str> = errors
-        .iter()
-        .filter_map(|e| e.run_id.as_deref())
-        .collect();
+    let run_ids_with_errors: HashSet<&str> =
+        errors.iter().filter_map(|e| e.run_id.as_deref()).collect();
     let mut attempts_by_task: HashMap<&str, u32> = HashMap::new();
     for r in store.runs.iter().filter(|r| {
         r.started_at_ms.is_some()
@@ -1729,7 +1760,11 @@ pub fn overview(store: &AnalyticsStore, filters: &AnalyticsFilters) -> Analytics
         reasoning_tokens: sums.reasoning,
         cache_read_tokens: sums.cache_read,
         cache_write_tokens: sums.cache_write,
-        reported_cost_micros: if sums.has_cost { sums.cost_micros } else { None },
+        reported_cost_micros: if sums.has_cost {
+            sums.cost_micros
+        } else {
+            None
+        },
         inference_count: usages.len() as u64,
         usage_coverage_runs: observable.len() as u64,
         usage_runs_with_data: with_data,
@@ -1793,12 +1828,12 @@ pub fn time_series(store: &AnalyticsStore, filters: &AnalyticsFilters) -> Vec<Ti
     let mut buckets: BTreeMap<i64, TimeSeriesPoint> = BTreeMap::new();
     for r in &winners {
         let at = r.ended_at_ms.unwrap_or(r.created_at_ms);
-        let entry = buckets.entry(local_day_start_ms(at)).or_insert_with(|| {
-            TimeSeriesPoint {
+        let entry = buckets
+            .entry(local_day_start_ms(at))
+            .or_insert_with(|| TimeSeriesPoint {
                 bucket_ms: local_day_start_ms(at),
                 ..Default::default()
-            }
-        });
+            });
         entry.tasks_terminal += 1;
         match r.status.as_str() {
             "succeeded" => entry.tasks_completed += 1,
@@ -1870,7 +1905,10 @@ pub fn projects(
     let mut durations: HashMap<String, Vec<i64>> = HashMap::new();
     for r in &finalized {
         if let Some(ms) = r.active_ms {
-            durations.entry(r.project_path.clone()).or_default().push(ms);
+            durations
+                .entry(r.project_path.clone())
+                .or_default()
+                .push(ms);
         }
     }
 
@@ -1878,9 +1916,7 @@ pub fn projects(
     let mut usage_acc: HashMap<String, TokenSums> = HashMap::new();
     for u in &usages {
         if let Some(path) = &u.project_path {
-            let sums = usage_acc
-                .entry(path.clone())
-                .or_default();
+            let sums = usage_acc.entry(path.clone()).or_default();
             sums.count += 1;
             add_opt(&mut sums.input, u.input_tokens);
             add_opt(&mut sums.output, u.output_tokens);
@@ -1941,7 +1977,11 @@ pub fn projects(
                 avg_active_ms: avg,
                 median_active_ms: median(&values),
                 total_tokens: sums.total,
-                reported_cost_micros: if sums.has_cost { sums.cost_micros } else { None },
+                reported_cost_micros: if sums.has_cost {
+                    sums.cost_micros
+                } else {
+                    None
+                },
                 inference_count: sums.count,
             }
         })
@@ -2135,7 +2175,9 @@ fn task_terminal_status(store: &AnalyticsStore) -> HashMap<&str, &str> {
             }
         }
     }
-    best.into_iter().map(|(k, r)| (k, r.status.as_str())).collect()
+    best.into_iter()
+        .map(|(k, r)| (k, r.status.as_str()))
+        .collect()
 }
 
 fn recovered_of(e: &ErrorRecord, outcomes: &HashMap<&str, &str>) -> Option<bool> {
@@ -2236,10 +2278,7 @@ pub struct ReliabilityResult {
 
 const MAX_GROUP_TASKS: usize = 20;
 
-pub fn reliability(
-    store: &AnalyticsStore,
-    filters: &AnalyticsFilters,
-) -> ReliabilityResult {
+pub fn reliability(store: &AnalyticsStore, filters: &AnalyticsFilters) -> ReliabilityResult {
     let allowed = model_allowed_tasks(store, filters);
     let outcomes = task_terminal_status(store);
     let winners = winning_runs(store, filters, allowed.as_ref());
@@ -2492,10 +2531,12 @@ pub fn reliability(
     let mut series: BTreeMap<i64, ErrorTimeSeriesPoint> = BTreeMap::new();
     for e in &errors {
         let bucket = local_day_start_ms(e.occurred_at_ms);
-        let entry = series.entry(bucket).or_insert_with(|| ErrorTimeSeriesPoint {
-            bucket_ms: bucket,
-            ..Default::default()
-        });
+        let entry = series
+            .entry(bucket)
+            .or_insert_with(|| ErrorTimeSeriesPoint {
+                bucket_ms: bucket,
+                ..Default::default()
+            });
         entry.errors += 1;
     }
     for r in &winners {
@@ -2504,10 +2545,12 @@ pub fn reliability(
         }
         let at = r.ended_at_ms.unwrap_or(r.created_at_ms);
         let bucket = local_day_start_ms(at);
-        let entry = series.entry(bucket).or_insert_with(|| ErrorTimeSeriesPoint {
-            bucket_ms: bucket,
-            ..Default::default()
-        });
+        let entry = series
+            .entry(bucket)
+            .or_insert_with(|| ErrorTimeSeriesPoint {
+                bucket_ms: bucket,
+                ..Default::default()
+            });
         entry.tasks_failed += 1;
     }
 
@@ -2609,10 +2652,7 @@ pub struct InteractionResult {
     pub recommendations: Vec<Recommendation>,
 }
 
-pub fn interactions(
-    store: &AnalyticsStore,
-    filters: &AnalyticsFilters,
-) -> InteractionResult {
+pub fn interactions(store: &AnalyticsStore, filters: &AnalyticsFilters) -> InteractionResult {
     let allowed = model_allowed_tasks(store, filters);
     let items = filtered_interactions(store, filters, allowed.as_ref());
 
@@ -2699,12 +2739,14 @@ pub fn interactions(
     }
     let mut acc: HashMap<String, GroupAcc> = HashMap::new();
     for i in &items {
-        let a = acc.entry(i.fingerprint.clone()).or_insert_with(|| GroupAcc {
-            kind: i.kind.clone(),
-            category: i.category.clone(),
-            last: i.asked_at_ms,
-            ..Default::default()
-        });
+        let a = acc
+            .entry(i.fingerprint.clone())
+            .or_insert_with(|| GroupAcc {
+                kind: i.kind.clone(),
+                category: i.category.clone(),
+                last: i.asked_at_ms,
+                ..Default::default()
+            });
         a.occurrences += 1;
         a.tasks.insert(i.task_id.clone());
         a.last = a.last.max(i.asked_at_ms);
@@ -2713,9 +2755,7 @@ pub fn interactions(
         }
         match i.resolved_at_ms {
             None => a.unresolved += 1,
-            Some(resolved) if i.blocking => {
-                a.waits.push((resolved - i.asked_at_ms).max(0))
-            }
+            Some(resolved) if i.blocking => a.waits.push((resolved - i.asked_at_ms).max(0)),
             Some(_) => {}
         }
         if a.task_ids.len() < MAX_GROUP_TASKS && !a.task_ids.contains(&i.task_id) {
@@ -2769,9 +2809,7 @@ pub fn interactions(
         a.tasks.insert(i.task_id.clone());
         match i.resolved_at_ms {
             None => a.unresolved += 1,
-            Some(resolved) if i.blocking => {
-                a.waits.push((resolved - i.asked_at_ms).max(0))
-            }
+            Some(resolved) if i.blocking => a.waits.push((resolved - i.asked_at_ms).max(0)),
             Some(_) => {}
         }
     }
@@ -2917,11 +2955,7 @@ pub fn task_detail(
     task_id: &str,
     task: Option<&crate::models::Task>,
 ) -> Option<TaskAnalyticsDetail> {
-    let mut runs: Vec<&RunRecord> = store
-        .runs
-        .iter()
-        .filter(|r| r.task_id == task_id)
-        .collect();
+    let mut runs: Vec<&RunRecord> = store.runs.iter().filter(|r| r.task_id == task_id).collect();
     if runs.is_empty() && task.is_none() {
         return None;
     }
@@ -3023,9 +3057,9 @@ pub fn task_detail(
         ended_at_ms: task
             .and_then(|t| t.finished_at.map(|s| s.saturating_mul(1000)))
             .or_else(|| runs.last().and_then(|r| r.ended_at_ms)),
-        attempts: task.map(|t| t.attempts).unwrap_or_else(|| {
-            runs.last().map(|r| r.attempt).unwrap_or(0)
-        }),
+        attempts: task
+            .map(|t| t.attempts)
+            .unwrap_or_else(|| runs.last().map(|r| r.attempt).unwrap_or(0)),
         review_status: task
             .and_then(|t| t.review.as_ref())
             .map(|r| format!("{:?}", r.status).to_lowercase()),
@@ -3034,7 +3068,11 @@ pub fn task_detail(
         errors: error_details,
         interactions: interaction_details,
         total_tokens: sums.total,
-        reported_cost_micros: if sums.has_cost { sums.cost_micros } else { None },
+        reported_cost_micros: if sums.has_cost {
+            sums.cost_micros
+        } else {
+            None
+        },
     })
 }
 
@@ -3337,7 +3375,10 @@ mod tests {
         let mut s = AnalyticsStore::default();
         let r1 = run("t", 1, "succeeded", 1000, Some(2000));
         assert!(upsert_runs(&mut s, vec![r1.clone()]));
-        assert!(!upsert_runs(&mut s, vec![r1.clone()]), "same record is a no-op");
+        assert!(
+            !upsert_runs(&mut s, vec![r1.clone()]),
+            "same record is a no-op"
+        );
         // A rerun reset the task but has not bumped attempts yet: the terminal
         // record must survive.
         let reset = run("t", 1, "ready", 0, None);
@@ -3412,10 +3453,7 @@ mod tests {
     fn project_filter_limits_runs_and_usage() {
         let mut r = run("a", 1, "succeeded", 1000, Some(2000));
         r.project_path = "/other".into();
-        let s = store(
-            vec![r, run("b", 1, "succeeded", 1000, Some(2000))],
-            vec![],
-        );
+        let s = store(vec![r, run("b", 1, "succeeded", 1000, Some(2000))], vec![]);
         let f = AnalyticsFilters {
             projects: vec!["/p".into()],
             ..Default::default()
@@ -3487,10 +3525,8 @@ mod tests {
     #[test]
     fn saved_store_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "solayge-analytics-perms-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("solayge-analytics-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         save_store(&dir, &AnalyticsStore::default()).unwrap();
@@ -3508,7 +3544,13 @@ mod tests {
         let mut s = store(
             vec![
                 run("old", 1, "succeeded", 1_000, Some(2_000)),
-                run("new", 1, "succeeded", 90 * 86_400_000, Some(90 * 86_400_000 + 1)),
+                run(
+                    "new",
+                    1,
+                    "succeeded",
+                    90 * 86_400_000,
+                    Some(90 * 86_400_000 + 1),
+                ),
             ],
             vec![usage_of("m", "t:1", 2_000, 5, 1_000)],
         );
@@ -3525,21 +3567,51 @@ mod tests {
 
     #[test]
     fn error_code_token_extracts_stable_signals() {
-        assert_eq!(error_code_token("TS2322: Type 'x' is not assignable"), Some("TS2322".into()));
-        assert_eq!(error_code_token("error[E0425]: cannot find value"), Some("E0425".into()));
-        assert_eq!(error_code_token("request failed with 429"), Some("429".into()));
-        assert_eq!(error_code_token("ENOENT: no such file"), Some("ENOENT".into()));
+        assert_eq!(
+            error_code_token("TS2322: Type 'x' is not assignable"),
+            Some("TS2322".into())
+        );
+        assert_eq!(
+            error_code_token("error[E0425]: cannot find value"),
+            Some("E0425".into())
+        );
+        assert_eq!(
+            error_code_token("request failed with 429"),
+            Some("429".into())
+        );
+        assert_eq!(
+            error_code_token("ENOENT: no such file"),
+            Some("ENOENT".into())
+        );
         assert_eq!(error_code_token("just some words here"), None);
     }
 
     #[test]
     fn error_category_matches_the_taxonomy() {
-        assert_eq!(error_category("rate limit exceeded (429)", None, "agent"), "provider");
-        assert_eq!(error_category("TS2322: type mismatch", None, "agent"), "build");
-        assert_eq!(error_category("assertion failed: left == right", None, "agent"), "test");
-        assert_eq!(error_category("ENOENT: no such file or directory", Some("read"), "agent"), "tool");
-        assert_eq!(error_category("permission denied", None, "agent"), "security_policy");
-        assert_eq!(error_category("merge conflict in src", None, "merge"), "integration");
+        assert_eq!(
+            error_category("rate limit exceeded (429)", None, "agent"),
+            "provider"
+        );
+        assert_eq!(
+            error_category("TS2322: type mismatch", None, "agent"),
+            "build"
+        );
+        assert_eq!(
+            error_category("assertion failed: left == right", None, "agent"),
+            "test"
+        );
+        assert_eq!(
+            error_category("ENOENT: no such file or directory", Some("read"), "agent"),
+            "tool"
+        );
+        assert_eq!(
+            error_category("permission denied", None, "agent"),
+            "security_policy"
+        );
+        assert_eq!(
+            error_category("merge conflict in src", None, "merge"),
+            "integration"
+        );
         assert_eq!(error_category("totally unclear", None, "agent"), "unknown");
     }
 
@@ -3585,18 +3657,30 @@ mod tests {
                  "state": {"status": "completed", "input": {"path": "a"}}}
             ]
         });
-        let errs = errors_from_opencode_message(true, Some("t"), Some("/p"), Some("t:1"), "ses_1", &msg);
+        let errs =
+            errors_from_opencode_message(true, Some("t"), Some("/p"), Some("t:1"), "ses_1", &msg);
         assert_eq!(errs.len(), 2, "one message error and one tool error");
-        let message_err = errs.iter().find(|e| e.error_id.ends_with(":message")).unwrap();
+        let message_err = errs
+            .iter()
+            .find(|e| e.error_id.ends_with(":message"))
+            .unwrap();
         assert_eq!(message_err.category, "provider");
-        let tool_err = errs.iter().find(|e| e.tool_name.as_deref() == Some("shell")).unwrap();
+        let tool_err = errs
+            .iter()
+            .find(|e| e.tool_name.as_deref() == Some("shell"))
+            .unwrap();
         assert_eq!(tool_err.category, "tool");
         assert_eq!(tool_err.stage, "tool");
         assert_eq!(tool_err.occurred_at_ms, 1_791_489_090_422);
         // The captured sample is redacted at ingestion.
-        assert!(tool_err.summary_redacted.as_deref().unwrap().contains("<path>"));
+        assert!(tool_err
+            .summary_redacted
+            .as_deref()
+            .unwrap()
+            .contains("<path>"));
         // Same message polls produce identical ids, so upserts never duplicate.
-        let again = errors_from_opencode_message(false, Some("t"), Some("/p"), Some("t:1"), "ses_1", &msg);
+        let again =
+            errors_from_opencode_message(false, Some("t"), Some("/p"), Some("t:1"), "ses_1", &msg);
         let ids: Vec<_> = errs.iter().map(|e| &e.error_id).collect();
         let ids2: Vec<_> = again.iter().map(|e| &e.error_id).collect();
         assert_eq!(ids, ids2);
@@ -3636,7 +3720,14 @@ mod tests {
     fn task_detail_includes_errors_and_interactions() {
         let s = AnalyticsStore {
             errors: vec![error_of("e1", "t", "t:1", "TS2322: type mismatch", 1_500)],
-            interactions: vec![interaction_of("t:q1", "t", "question", "other", 1_600, Some(2_600))],
+            interactions: vec![interaction_of(
+                "t:q1",
+                "t",
+                "question",
+                "other",
+                1_600,
+                Some(2_600),
+            )],
             ..store(vec![run("t", 1, "succeeded", 1_000, Some(2_000))], vec![])
         };
         let d = task_detail(&s, "t", None).expect("detail");
@@ -3716,7 +3807,14 @@ mod tests {
     fn interactions_measure_human_wait_and_autonomy() {
         let s = AnalyticsStore {
             interactions: vec![
-                interaction_of("a:q1", "a", "question", "implementation_choice", 1_000, Some(61_000)),
+                interaction_of(
+                    "a:q1",
+                    "a",
+                    "question",
+                    "implementation_choice",
+                    1_000,
+                    Some(61_000),
+                ),
                 interaction_of("b:p1", "b", "permission", "permissions", 2_000, None),
             ],
             ..store(
@@ -3739,7 +3837,10 @@ mod tests {
         assert_eq!(r.summary.autonomy_sample, 3);
         assert_eq!(r.summary.autonomy_autonomous, 1);
         assert!((r.summary.autonomy_rate.unwrap() - 1.0 / 3.0).abs() < 1e-9);
-        assert!(r.groups.iter().any(|g| g.fingerprint == "question:implementation_choice"));
+        assert!(r
+            .groups
+            .iter()
+            .any(|g| g.fingerprint == "question:implementation_choice"));
     }
 
     #[test]
@@ -3757,11 +3858,7 @@ mod tests {
             "credentials"
         );
         // Fingerprint uses field keys, not their (agent-supplied) labels.
-        let fp = interaction_fingerprint(
-            "question",
-            None,
-            &["b".into(), "a".into(), "a".into()],
-        );
+        let fp = interaction_fingerprint("question", None, &["b".into(), "a".into(), "a".into()]);
         assert_eq!(fp, "question:a+b");
         assert_eq!(
             interaction_fingerprint("permission", Some("bash"), &[]),

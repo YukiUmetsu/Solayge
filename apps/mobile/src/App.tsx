@@ -1,0 +1,243 @@
+import { useCallback, useMemo, useState } from "react";
+
+import { AddDesktopFlow } from "./AddDesktopFlow";
+import { ClientProvider, useClientContext } from "./client/ClientContext";
+import { MockRemoteClient } from "./client/mock";
+import type { PairedDesktop, RemoteClient, TransportMode } from "./client/remote";
+import { AppHeader } from "./components/AppHeader";
+import { HostSwitcher } from "./components/HostSwitcher";
+import { OfflineBanner } from "./components/OfflineBanner";
+import { isRootRoute, routeTab, type Route } from "./navigation";
+import { ApprovalDetail } from "./screens/ApprovalDetail";
+import { DesktopSelector } from "./screens/DesktopSelector";
+import { Inbox } from "./screens/Inbox";
+import { ProjectDetail } from "./screens/ProjectDetail";
+import { Projects } from "./screens/Projects";
+import { SessionDetail } from "./screens/SessionDetail";
+import { SessionsHome } from "./screens/SessionsHome";
+import { Settings } from "./screens/Settings";
+import { TABS, type TabId } from "./tabs";
+
+const DEFAULT_DESKTOP: PairedDesktop = { id: "desk_mock", name: "Mock Desktop", platform: "macos" };
+
+function defaultClientFactory(desktopId: string): RemoteClient {
+  return new MockRemoteClient({
+    desktopId,
+    hostName: "Mock Desktop",
+    platform: "macos",
+    autoAdvance: true,
+  });
+}
+
+export interface AppProps {
+  clientFactory?: (desktopId: string) => RemoteClient;
+  desktops?: PairedDesktop[];
+  initialTransportMode?: TransportMode;
+}
+
+export default function App({
+  clientFactory = defaultClientFactory,
+  desktops: desktopsProp,
+  initialTransportMode = "automatic",
+}: AppProps = {}) {
+  const desktops = desktopsProp ?? [DEFAULT_DESKTOP];
+  const [desktopId, setDesktopId] = useState(desktops[0]?.id ?? DEFAULT_DESKTOP.id);
+  const [route, setRoute] = useState<Route>({ name: "sessions" });
+  const [transportMode, setTransportMode] = useState<TransportMode>(initialTransportMode);
+  const [showAddDesktop, setShowAddDesktop] = useState(false);
+
+  const client = useMemo(() => clientFactory(desktopId), [clientFactory, desktopId]);
+
+  const addDesktop = useCallback(() => setShowAddDesktop(true), []);
+
+  return (
+    <ClientProvider
+      client={client}
+      desktopId={desktopId}
+      desktops={desktops}
+      transportMode={transportMode}
+      onTransportModeChange={setTransportMode}
+      onSelectDesktop={setDesktopId}
+      onAddDesktop={addDesktop}
+      refreshIntervalMs={30_000}
+    >
+      {showAddDesktop ? (
+        <div className="app">
+          <main className="app__content">
+            <AddDesktopFlow onClose={() => setShowAddDesktop(false)} />
+          </main>
+        </div>
+      ) : (
+        <AppShell route={route} setRoute={setRoute} onAddDesktop={addDesktop} onShowAddDesktop={addDesktop} />
+      )}
+    </ClientProvider>
+  );
+}
+
+function AppShell({
+  route,
+  setRoute,
+  onAddDesktop,
+  onShowAddDesktop,
+}: {
+  route: Route;
+  setRoute: (route: Route) => void;
+  onAddDesktop: () => void;
+  onShowAddDesktop: () => void;
+}) {
+  const { client, data, desktops, refresh } = useClientContext();
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [simulateOffline, setSimulateOffline] = useState(false);
+  const [, setHistory] = useState<Route[]>([]);
+
+  const navigate = useCallback(
+    (next: Route) => {
+      setHistory((stack) => [...stack, route]);
+      setRoute(next);
+    },
+    [route, setRoute],
+  );
+
+  const goToTab = useCallback(
+    (tab: TabId) => {
+      setHistory([]);
+      if (tab === "inbox") setRoute({ name: "inbox", filter: "decision" });
+      else if (tab === "projects") setRoute({ name: "projects" });
+      else setRoute({ name: "sessions" });
+    },
+    [setRoute],
+  );
+
+  const back = useCallback(() => {
+    setHistory((stack) => {
+      if (stack.length === 0) {
+        setRoute({ name: "sessions" });
+        return stack;
+      }
+      setRoute(stack[stack.length - 1]);
+      return stack.slice(0, -1);
+    });
+  }, [setRoute]);
+
+  const simulate = useCallback(
+    (offline: boolean) => {
+      if (client instanceof MockRemoteClient) client.setOffline(offline);
+      setSimulateOffline(offline);
+      void refresh();
+    },
+    [client, refresh],
+  );
+
+  const title = useMemo(() => {
+    switch (route.name) {
+      case "session":
+        return data.sessions.find((session) => session.id === route.sessionId)?.title ?? "Session";
+      case "approval":
+        return "Request";
+      case "project":
+        return data.projects.find((project) => project.id === route.projectId)?.name ?? "Project";
+      case "settings":
+        return "Settings";
+      default:
+        return undefined;
+    }
+  }, [route, data.sessions, data.projects]);
+
+  const activeTab = routeTab(route);
+
+  function renderRoute() {
+    switch (route.name) {
+      case "sessions":
+        return <SessionsHome onOpenSession={(id) => navigate({ name: "session", sessionId: id })} />;
+      case "session":
+        return (
+          <SessionDetail
+            sessionId={route.sessionId}
+            onOpenApproval={(id) => navigate({ name: "approval", approvalId: id })}
+          />
+        );
+      case "inbox":
+        return (
+          <Inbox
+            filter={route.filter}
+            onFilter={(filter) => setRoute({ name: "inbox", filter })}
+            onOpenApproval={(id) => navigate({ name: "approval", approvalId: id })}
+          />
+        );
+      case "approval":
+        return <ApprovalDetail approvalId={route.approvalId} />;
+      case "projects":
+        return <Projects onOpenProject={(id) => navigate({ name: "project", projectId: id })} />;
+      case "project":
+        return (
+          <ProjectDetail
+            projectId={route.projectId}
+            onOpenSession={(id) => navigate({ name: "session", sessionId: id })}
+          />
+        );
+      case "settings":
+        return (
+          <Settings
+            onAddDesktop={onShowAddDesktop}
+            simulateOffline={simulateOffline}
+            onSimulateOffline={client instanceof MockRemoteClient ? simulate : undefined}
+          />
+        );
+    }
+  }
+
+  if (desktops.length === 0) {
+    return (
+      <div className="app">
+        <main className="app__content">
+          <DesktopSelector onAddDesktop={onAddDesktop} />
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="app">
+        <AppHeader
+          title={title}
+          onBack={isRootRoute(route) ? undefined : back}
+          onOpenSettings={() => navigate({ name: "settings" })}
+          onOpenSwitcher={() => setSwitcherOpen(true)}
+        />
+        <main className="app__content">
+          <OfflineBanner />
+          <div className="screen__body app__screen">{renderRoute()}</div>
+        </main>
+        <nav className="tabbar" role="tablist" aria-label="Primary">
+          {TABS.map((tab) => {
+            const selected = tab.id === activeTab;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                className={selected ? "tabbar__item tabbar__item--active" : "tabbar__item"}
+                onClick={() => goToTab(tab.id)}
+              >
+                <span className="tabbar__icon" aria-hidden="true">
+                  {tab.icon}
+                </span>
+                <span className="tabbar__label">{tab.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+      <HostSwitcher
+        open={switcherOpen}
+        onClose={() => setSwitcherOpen(false)}
+        onAddDesktop={() => {
+          setSwitcherOpen(false);
+          onShowAddDesktop();
+        }}
+      />
+    </>
+  );
+}

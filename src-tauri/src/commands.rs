@@ -499,7 +499,9 @@ pub fn execute_project(app: AppHandle, project_path: String) -> Result<Snapshot,
                     };
                     t.error = None;
                 }
-                TaskStatus::Failed | TaskStatus::Canceled | TaskStatus::Blocked
+                TaskStatus::Failed
+                | TaskStatus::Canceled
+                | TaskStatus::Blocked
                 | TaskStatus::Interrupted => {
                     reset_for_rerun(t);
                 }
@@ -705,7 +707,11 @@ fn apply_task_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
         // A blank base ref means "unset" (start from HEAD), not an empty ref
         // that would later fail worktree creation.
         let v = v.trim();
-        t.base_ref = if v.is_empty() { None } else { Some(v.to_string()) };
+        t.base_ref = if v.is_empty() {
+            None
+        } else {
+            Some(v.to_string())
+        };
     }
     if let Some(v) = patch.delay_seconds {
         t.not_before = if v > 0 { Some(now() + v) } else { None };
@@ -2462,7 +2468,10 @@ mod tests {
 
         assert_eq!(t.kind, TaskKind::Shell);
         assert_eq!(t.command.as_deref(), Some("npm test"));
-        assert!(t.git_op.is_none(), "git config must not linger on a shell task");
+        assert!(
+            t.git_op.is_none(),
+            "git config must not linger on a shell task"
+        );
     }
 
     #[test]
@@ -2510,7 +2519,10 @@ mod tests {
 
             let err = apply_task_patch(&mut t, patch(None, Some("rewritten"))).unwrap_err();
 
-            assert!(err.contains("cannot") || err.contains("draft"), "{status:?}: {err}");
+            assert!(
+                err.contains("cannot") || err.contains("draft"),
+                "{status:?}: {err}"
+            );
             assert_eq!(t.prompt, "original", "{status:?} prompt must not change");
         }
     }
@@ -2641,7 +2653,11 @@ mod tests {
         .expect("archived");
 
         assert_eq!(project, "/p");
-        assert_eq!(tasks.len(), 1, "only the deleted task leaves the active list");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "only the deleted task leaves the active list"
+        );
         assert!(tasks[0].depends_on.is_empty(), "dependents are rewired");
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0].task.id, "a");
@@ -2798,10 +2814,7 @@ mod tests {
         requeue_review(&mut t, None).unwrap();
         assert_eq!(t.status, TaskStatus::Succeeded);
         assert!(t.error.is_none());
-        assert_eq!(
-            t.review.as_ref().unwrap().status,
-            ReviewStatus::Pending
-        );
+        assert_eq!(t.review.as_ref().unwrap().status, ReviewStatus::Pending);
     }
 
     #[test]
@@ -2863,7 +2876,9 @@ mod tests {
         let b64 = url
             .strip_prefix("data:audio/wav;base64,")
             .expect("data URL with the right MIME type");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         assert_eq!(decoded, b"RIFF....WAVE");
 
         std::fs::remove_dir_all(&dir).ok();

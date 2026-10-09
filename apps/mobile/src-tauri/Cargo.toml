@@ -1,0 +1,23 @@
+[package]
+name = "solayge-mobile"
+description = "Solayge Mobile — Tauri 2 companion client for Solayge-managed agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "solayge_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-barcode-scanner = "2"
+serde.workspace = true
+serde_json.workspace = true
+# The shared, transport-neutral protocol contract (envelope, actions, DTOs).
+solayge-protocol = { path = "../../../crates/solayge-protocol" }
+# Per-device identity, secure storage, and the QR pairing state machine.
+solayge-identity = { path = "../../../crates/solayge-identity" }

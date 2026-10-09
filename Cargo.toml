@@ -1,0 +1,31 @@
+# Solayge Rust workspace.
+#
+# The existing desktop app lives in `src-tauri/`. It is deliberately *not* a
+# member here: it declares its own `[workspace]` so its build target stays at
+# `src-tauri/target`, which `scripts/tauri.mjs` and `pnpm clean:bundle` rely on.
+# This workspace hosts the shared Rust crates (protocol, identity, network) and
+# the mobile app's Rust side, so `cargo test -p solayge-protocol` stays fast and
+# dependency-free.
+[workspace]
+resolver = "2"
+members = [
+    "crates/solayge-protocol",
+    "crates/solayge-identity",
+    "crates/solayge-network",
+    "apps/mobile/src-tauri",
+]
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util"] }
+# Iroh 1.3 is the maintained P2P/QUIC stack. The transport adapter configures
+# discovery and relays explicitly; it never writes its own crypto or NAT
+# traversal. `tls-ring` is the default crypto provider (no aws-lc C toolchain).
+iroh = "1.3.0"

@@ -28,6 +28,7 @@ import { ErrorNote } from "./Field";
 import { SaveButton, SavedPill, type SaveState } from "./SaveButton";
 import { Modal } from "./Modal";
 import { Icon, type IconName } from "./Icons";
+import { ConnectedDevices } from "./ConnectedDevices";
 
 const RETENTION_OPTIONS: { value: number; label: string }[] = [
   { value: 7, label: "7 days" },
@@ -39,12 +40,13 @@ const RETENTION_OPTIONS: { value: number; label: string }[] = [
 
 const THEME_OPTIONS: ThemePref[] = ["system", "light", "dark"];
 
-type Tab = "general" | "agent" | "notifications" | "advanced";
+type Tab = "general" | "agent" | "notifications" | "devices" | "advanced";
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "settings" },
   { id: "agent", label: "Agent", icon: "sparkles" },
   { id: "notifications", label: "Notifications", icon: "zap" },
+  { id: "devices", label: "Devices", icon: "eye" },
   { id: "advanced", label: "Advanced", icon: "layers" },
 ];
 
@@ -342,6 +344,8 @@ export function SettingsModal({
               onError={setError}
             />
           )}
+
+          {tab === "devices" && <ConnectedDevices />}
 
           {tab === "advanced" && (
             <AdvancedTab

@@ -371,7 +371,12 @@ pub fn worktree_root(repo: &Path) -> PathBuf {
 pub async fn branch_exists(dir: &Path, branch: &str) -> bool {
     if git_ok(
         dir,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .await
     {
@@ -474,15 +479,18 @@ pub async fn has_staged_changes(dir: &Path) -> bool {
 /// empty, not option-like (leading `-`), and free of whitespace/control chars.
 pub fn valid_ref(name: &str) -> bool {
     let t = name.trim();
-    !t.is_empty()
-        && !t.starts_with('-')
-        && !t.chars().any(|c| c.is_whitespace() || c.is_control())
+    !t.is_empty() && !t.starts_with('-') && !t.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// The repository's default branch: `origin/HEAD`, else `main`/`master`, else
 /// the current branch.
 pub async fn default_branch(repo: &Path) -> String {
-    if let Ok(s) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).await {
+    if let Ok(s) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
         if let Some(name) = s.trim().strip_prefix("origin/") {
             if !name.is_empty() {
                 return name.to_string();
@@ -492,7 +500,12 @@ pub async fn default_branch(repo: &Path) -> String {
     for cand in ["main", "master"] {
         if git_ok(
             repo,
-            &["show-ref", "--verify", "--quiet", &format!("refs/heads/{cand}")],
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{cand}"),
+            ],
         )
         .await
         {
@@ -516,7 +529,12 @@ pub async fn has_changes(dir: &Path) -> bool {
 pub async fn conflicted_files(dir: &Path) -> Vec<String> {
     git(dir, &["diff", "--name-only", "--diff-filter=U"])
         .await
-        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -541,10 +559,7 @@ pub async fn ahead_behind(dir: &Path, base: &str, branch: &str) -> (i64, i64) {
         Ok(out) => {
             let parts: Vec<&str> = out.split_whitespace().collect();
             if parts.len() == 2 {
-                (
-                    parts[0].parse().unwrap_or(0),
-                    parts[1].parse().unwrap_or(0),
-                )
+                (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0))
             } else {
                 (0, 0)
             }
@@ -570,12 +585,19 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
         .filter_map(|w| w.branch.map(|b| (b, w.path)))
         .collect();
 
-    let local_out = git(repo, &["for-each-ref", "refs/heads", "--format=%(refname:short)"])
-        .await
-        .unwrap_or_default();
+    let local_out = git(
+        repo,
+        &["for-each-ref", "refs/heads", "--format=%(refname:short)"],
+    )
+    .await
+    .unwrap_or_default();
     let remote_out = git(
         repo,
-        &["for-each-ref", "refs/remotes/origin", "--format=%(refname:short)"],
+        &[
+            "for-each-ref",
+            "refs/remotes/origin",
+            "--format=%(refname:short)",
+        ],
     )
     .await
     .unwrap_or_default();
@@ -624,11 +646,7 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
 
     // Remote-tracking branches with no local counterpart: they can still be
     // landed or deleted from here.
-    for r in remote_out
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    for r in remote_out.lines().map(str::trim).filter(|s| !s.is_empty()) {
         let Some(name) = r.strip_prefix("origin/") else {
             continue;
         };
@@ -747,7 +765,9 @@ pub async fn delete_remote_branch(repo: &Path, branch: &str) -> Result<String> {
         return Err(anyhow!("invalid branch name: {branch}"));
     }
     if branch == default_branch(repo).await {
-        return Err(anyhow!("refusing to delete the default branch origin/{branch}"));
+        return Err(anyhow!(
+            "refusing to delete the default branch origin/{branch}"
+        ));
     }
     git(repo, &["push", "origin", "--delete", branch]).await?;
     Ok(format!("Deleted origin/{branch}."))
@@ -875,7 +895,8 @@ mod tests {
 
     #[tokio::test]
     async fn branches_flag_uncommitted_work_in_their_worktree() {
-        let dir = std::env::temp_dir().join(format!("solayge-branchdirty-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("solayge-branchdirty-{}", uuid::Uuid::new_v4()));
         init_repo(&dir).await;
 
         // A branch checked out in its own worktree.
@@ -891,7 +912,10 @@ mod tests {
         std::fs::write(wt.join("wip.txt"), "half done").unwrap();
         let list = branches(&dir).await.unwrap();
         let feat = list.iter().find(|b| b.name == "feat").unwrap();
-        assert!(feat.dirty, "uncommitted work in the worktree must be flagged");
+        assert!(
+            feat.dirty,
+            "uncommitted work in the worktree must be flagged"
+        );
 
         // Once committed, it is clean again.
         run(&wt, &["add", "-A"]).await;

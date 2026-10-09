@@ -99,7 +99,10 @@ async fn spawn_server() -> Result<ServerProc, String> {
     let stdout = child.stdout.take().ok_or("no server stdout")?;
     let stderr = child.stderr.take().ok_or("no server stderr")?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    for stream in [Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box::new(stderr)] {
+    for stream in [
+        Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box::new(stderr),
+    ] {
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stream).lines();
@@ -131,8 +134,7 @@ async fn spawn_server() -> Result<ServerProc, String> {
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
     let base = base.ok_or("opencode server did not report a listening URL")?;
-    let password =
-        password.ok_or("opencode server did not report a password")?;
+    let password = password.ok_or("opencode server did not report a password")?;
     Ok(ServerProc {
         base,
         password,
@@ -245,7 +247,9 @@ pub async fn prompt_with_files(
 
 pub async fn interrupt(conn: &Connection, session: &str) -> Result<(), String> {
     let path = format!("/api/session/{session}/interrupt");
-    request(conn, reqwest::Method::POST, &path, Some(json!({}))).await.map(|_| ())
+    request(conn, reqwest::Method::POST, &path, Some(json!({})))
+        .await
+        .map(|_| ())
 }
 
 pub async fn messages(conn: &Connection, session: &str) -> Result<Vec<Value>, String> {
@@ -273,9 +277,14 @@ pub async fn reply_form(
     answer: Value,
 ) -> Result<(), String> {
     let path = format!("/api/session/{session}/form/{form}/reply");
-    request(conn, reqwest::Method::POST, &path, Some(json!({ "answer": answer })))
-        .await
-        .map(|_| ())
+    request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(json!({ "answer": answer })),
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn reply_permission(
@@ -410,7 +419,10 @@ pub fn part_lines(message: &Value) -> Vec<String> {
                     .and_then(|s| s.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let input = state.and_then(|s| s.get("input")).cloned().unwrap_or(Value::Null);
+                let input = state
+                    .and_then(|s| s.get("input"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let mut line = format!("[tool] {name}");
                 if let Some(target) = tool_target(name, &input).filter(|t| !t.trim().is_empty()) {
                     line.push_str(": ");
@@ -524,13 +536,19 @@ fn field_from_json(f: &Value) -> Option<AskField> {
     Some(AskField {
         key,
         label,
-        description: f.get("description").and_then(Value::as_str).map(str::to_string),
+        description: f
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         kind,
         required: f.get("required").and_then(Value::as_bool).unwrap_or(false),
         custom: f.get("custom").and_then(Value::as_bool).unwrap_or(false),
         options,
         default: f.get("default").cloned(),
-        placeholder: f.get("placeholder").and_then(Value::as_str).map(str::to_string),
+        placeholder: f
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         format: f.get("format").and_then(Value::as_str).map(str::to_string),
         min: json_f64(f, "minimum"),
         max: json_f64(f, "maximum"),
@@ -547,7 +565,11 @@ fn field_from_json(f: &Value) -> Option<AskField> {
 fn json_i64(v: &Value) -> Option<i64> {
     v.as_i64()
         .or_else(|| v.as_f64().map(|n| n as i64))
-        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()).map(|n| n as i64))
+        .or_else(|| {
+            v.as_str()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .map(|n| n as i64)
+        })
 }
 
 /// Read an absolute deadline (unix seconds) and/or a relative timeout (seconds)
@@ -575,10 +597,7 @@ fn read_deadline(v: &Value) -> (Option<i64>, Option<i64>) {
             "timeout",
         ])
     };
-    (
-        deadline.filter(|d| *d > 0),
-        timeout_secs.filter(|t| *t > 0),
-    )
+    (deadline.filter(|d| *d > 0), timeout_secs.filter(|t| *t > 0))
 }
 
 /// Map an opencode form (the `question` tool) to a [`TaskAsk`].
@@ -712,10 +731,8 @@ mod tests {
 
     #[test]
     fn attachments_are_sent_as_file_parts() {
-        let files = crate::agent::attachments(&[
-            "/tmp/a.txt".to_string(),
-            "/tmp/pic.png".to_string(),
-        ]);
+        let files =
+            crate::agent::attachments(&["/tmp/a.txt".to_string(), "/tmp/pic.png".to_string()]);
         let body = prompt_body("look", &files);
         assert_eq!(body["text"], "look");
         let arr = body["files"].as_array().expect("files");
@@ -834,7 +851,10 @@ mod tests {
         assert_eq!(ask.action.as_deref(), Some("bash"));
         assert!(ask.purpose.as_deref().unwrap().contains("shell command"));
         assert_eq!(
-            ask.metadata.as_ref().and_then(|m| m.get("cwd")).and_then(Value::as_str),
+            ask.metadata
+                .as_ref()
+                .and_then(|m| m.get("cwd"))
+                .and_then(Value::as_str),
             Some("/tmp")
         );
         assert!(ask.source.is_some());
@@ -941,16 +961,25 @@ mod tests {
         // The server returns newest-first; exports are oldest-first. Either way
         // the latest text must win, not the first one encountered.
         let newest_first = vec![newer.clone(), tool_only.clone(), older.clone()];
-        assert_eq!(final_text(&newest_first).as_deref(), Some("# Done\n\nAll good."));
+        assert_eq!(
+            final_text(&newest_first).as_deref(),
+            Some("# Done\n\nAll good.")
+        );
 
         let oldest_first = vec![older, tool_only, newer];
-        assert_eq!(final_text(&oldest_first).as_deref(), Some("# Done\n\nAll good."));
+        assert_eq!(
+            final_text(&oldest_first).as_deref(),
+            Some("# Done\n\nAll good.")
+        );
     }
 
     #[test]
     fn no_final_text_when_there_is_none() {
         assert_eq!(final_text(&[]), None);
-        assert_eq!(final_text(&[json!({"type":"assistant","content":[]})]), None);
+        assert_eq!(
+            final_text(&[json!({"type":"assistant","content":[]})]),
+            None
+        );
         assert_eq!(
             final_text(&[json!({"type":"user","content":[{"type":"text","text":"hi"}]})]),
             None

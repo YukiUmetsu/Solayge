@@ -13,7 +13,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread};
-use objc2_foundation::{NSObjectProtocol, NSString, NSError};
+use objc2_foundation::{NSError, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNUserNotificationCenter,
@@ -36,9 +36,9 @@ define_class!(
             _notification: &UNNotification,
             completion_handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            completion_handler.call((
-                UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List,
-            ));
+            completion_handler
+                .call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List,));
         }
     }
 );
@@ -69,7 +69,9 @@ pub fn init() {
         }
     });
     center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge,
         &handler,
     );
 }

@@ -26,7 +26,12 @@ fn skills_section(skills: &[ProjectSkill]) -> String {
     out
 }
 
-pub fn planner_prompt(goal: &str, project_path: &str, max_tasks: usize, skills: &[ProjectSkill]) -> String {
+pub fn planner_prompt(
+    goal: &str,
+    project_path: &str,
+    max_tasks: usize,
+    skills: &[ProjectSkill],
+) -> String {
     format!(
         r#"You are a planning assistant. You design work for coding agents that will run
 inside the git repository at: {project_path}

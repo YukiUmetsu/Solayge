@@ -1,0 +1,215 @@
+{
+  "envelope": {
+    "protocol_version": 1,
+    "message_id": "msg_01",
+    "kind": "command",
+    "action": "sessions.send_prompt",
+    "desktop_id": "desk_1",
+    "session_id": "ses_1",
+    "command_id": "cmd_1",
+    "payload": { "text": "run tests" }
+  },
+  "connection_health": {
+    "desktop_id": "desk_1",
+    "protocol_version": 1,
+    "app_version": "0.1.0",
+    "uptime_secs": 42
+  },
+  "connection_authenticate_payload": {
+    "device_id": "dev_1",
+    "desktop_id": "desk_1",
+    "protocol_version": 1
+  },
+  "connection_authenticate_result": {
+    "authenticated": true,
+    "desktop_id": "desk_1"
+  },
+  "host_metadata": {
+    "desktop_id": "desk_1",
+    "name": "MacBook Pro",
+    "platform": "macos",
+    "app_version": "0.1.0",
+    "protocol_version": 1
+  },
+  "project_summary": {
+    "id": "/repo/app",
+    "name": "app",
+    "active_sessions": 1,
+    "pending_approvals": 1,
+    "updated_at": 100
+  },
+  "session_summary": {
+    "id": "ses_1",
+    "project_id": "/repo/app",
+    "title": "Refactor UI",
+    "agent": "opencode",
+    "status": "running",
+    "pending_decisions": 1,
+    "started_at": 10,
+    "updated_at": 100
+  },
+  "session_detail": {
+    "id": "ses_1",
+    "project_id": "/repo/app",
+    "title": "Refactor UI",
+    "agent": "opencode",
+    "status": "running",
+    "pending_decisions": 1,
+    "started_at": 10,
+    "updated_at": 100,
+    "summary": "Editing components; running tests next.",
+    "files_changed": 2
+  },
+  "session_event": {
+    "seq": 1,
+    "event_id": "ev_1",
+    "kind": "message",
+    "timestamp": 20,
+    "payload": { "text": "Editing components" }
+  },
+  "events_subscribe_payload": {
+    "from_seq": 0,
+    "session_id": "ses_1"
+  },
+  "events_batch": {
+    "session_id": "ses_1",
+    "events": [
+      {
+        "seq": 1,
+        "event_id": "ev_1",
+        "kind": "message",
+        "timestamp": 20,
+        "payload": { "text": "Editing components" }
+      }
+    ],
+    "next_seq": 2,
+    "resync": false
+  },
+  "send_prompt_payload": { "text": "run tests" },
+  "command_status_query": { "command_id": "cmd_1" },
+  "command_receipt": {
+    "command_id": "cmd_1",
+    "status": "running",
+    "session_id": "ses_1"
+  },
+  "command_status": {
+    "command_id": "cmd_1",
+    "status": "succeeded",
+    "error": null,
+    "updated_at": 100
+  },
+  "wire_error": {
+    "code": "not_authorized",
+    "message": "authenticate first"
+  },
+  "approval_summary": {
+    "id": "apr_1",
+    "session_id": "ses_1",
+    "project_id": "/repo/app",
+    "kind": "permission",
+    "title": "Run command?",
+    "message": "The agent wants to run the test suite.",
+    "command": "cargo test --workspace",
+    "risk": "medium",
+    "read_only": false,
+    "requested_at": 90,
+    "expires_at": 3600
+  },
+  "approval_query": { "approval_id": "apr_1" },
+  "approval_response_payload": {
+    "approval_id": "apr_1",
+    "decision": "approve_once"
+  },
+  "project_query": { "project_id": "/repo/app" },
+  "changed_file_summary": {
+    "path": "src/App.tsx",
+    "status": "modified",
+    "additions": 10,
+    "deletions": 2
+  },
+  "files_changed_summary": {
+    "project_id": "/repo/app",
+    "session_id": "ses_1",
+    "total": 1,
+    "files": [
+      {
+        "path": "src/App.tsx",
+        "status": "modified",
+        "additions": 10,
+        "deletions": 2
+      }
+    ]
+  },
+  "insights_summary": {
+    "project_id": "/repo/app",
+    "completed_tasks": 4,
+    "failed_tasks": 1,
+    "running_tasks": 1,
+    "avg_duration_secs": 360
+  },
+  "error_insight": {
+    "kind": "provider_timeout",
+    "count": 1,
+    "last_seen": 80
+  },
+  "insights_errors": {
+    "project_id": "/repo/app",
+    "errors": [{ "kind": "provider_timeout", "count": 1, "last_seen": 80 }]
+  },
+  "question_insight": {
+    "normalized_intent": "choose implementation approach",
+    "count": 2,
+    "last_seen": 70
+  },
+  "insights_agent_questions": {
+    "project_id": "/repo/app",
+    "questions": [
+      {
+        "normalized_intent": "choose implementation approach",
+        "count": 2,
+        "last_seen": 70
+      }
+    ]
+  },
+  "device_summary": {
+    "device_id": "dev_1",
+    "name": "iPhone 15",
+    "platform": "ios",
+    "scopes": ["sessions.read", "sessions.message"],
+    "paired_at": 1,
+    "last_seen": 100
+  },
+  "devices_response": {
+    "devices": [
+      {
+        "device_id": "dev_1",
+        "name": "iPhone 15",
+        "platform": "ios",
+        "scopes": ["sessions.read", "sessions.message"],
+        "paired_at": 1,
+        "last_seen": 100
+      }
+    ]
+  },
+  "device_revoke_payload": { "device_id": "dev_1" },
+  "device_revoke_result": { "revoked": true },
+  "pair_begin_payload": {
+    "pairing_id": "pair_1",
+    "desktop_id": "desk_1",
+    "verification_code": "4821",
+    "expires_at": 60
+  },
+  "pair_identity_proof": {
+    "pairing_id": "pair_1",
+    "device_id": "dev_1",
+    "proof": "opaque-single-use-proof"
+  },
+  "pair_decision_payload": {
+    "pairing_id": "pair_1",
+    "device_id": "dev_1"
+  },
+  "pair_ack": {
+    "pairing_id": "pair_1",
+    "state": "approved"
+  }
+}

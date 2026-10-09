@@ -6,10 +6,14 @@ mod agent;
 mod analytics;
 mod cache;
 mod commands;
+mod devices;
 mod errorlog;
 mod git;
+#[cfg(feature = "mobile-network")]
+mod iroh_host;
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)] // Objective-C interop for UNUserNotificationCenter; everything else stays safe Rust.
+#[allow(unsafe_code)]
+// Objective-C interop for UNUserNotificationCenter; everything else stays safe Rust.
 mod macos_notify;
 mod models;
 mod opencode;
@@ -44,7 +48,11 @@ fn augment_path_from_login_shell() {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Interactive shells may print extra lines; take the last PATH-looking one.
-    let path = stdout.lines().map(str::trim).rfind(|l| l.contains('/')).unwrap_or("");
+    let path = stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.contains('/'))
+        .unwrap_or("");
     if !path.is_empty() {
         std::env::set_var("PATH", path);
     }
@@ -63,10 +71,13 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            app.manage(AppState::new(data_dir));
+            app.manage(AppState::new(data_dir.clone()));
+            app.manage(devices::DeviceManager::new(&data_dir)?);
             #[cfg(target_os = "macos")]
             macos_notify::init();
             scheduler::spawn_scheduler(app.handle().clone());
+            #[cfg(feature = "mobile-network")]
+            iroh_host::maybe_spawn();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -136,6 +147,13 @@ pub fn run() {
             commands::get_analytics_collection_status,
             commands::clear_analytics,
             commands::export_analytics,
+            devices::desktop_identity,
+            devices::devices_list,
+            devices::pairing_start,
+            devices::pairing_status,
+            devices::pairing_approve,
+            devices::pairing_reject,
+            devices::device_revoke,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

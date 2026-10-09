@@ -417,6 +417,38 @@ export interface PromptEntry {
   uses: number;
 }
 
+// ---- connected devices (mobile pairing) ----
+
+/** The desktop's own public identity, for the Add-phone dialog. */
+export interface DesktopIdentity {
+  desktop_id: string;
+  fingerprint: string;
+}
+
+/** A trusted phone as shown in Settings → Connected devices. */
+export interface ConnectedDevice {
+  device_id: string;
+  name: string;
+  platform: string;
+  /** Granted scopes, e.g. `["sessions.read", "sessions.message"]`. */
+  scopes: string[];
+  paired_at: number;
+  last_seen: number | null;
+  online: boolean;
+  fingerprint: string;
+}
+
+/** A freshly created pairing challenge: a QR payload plus a manual code. */
+export interface PairingOffer {
+  pairing_id: string;
+  manual_code: string;
+  expires_at: number;
+  /** The JSON string to render as a QR code. */
+  qr_string: string;
+  desktop_id: string;
+  desktop_fingerprint: string;
+}
+
 export interface CacheStats {
   prompt_count: number;
   oldest_prompt?: number | null;

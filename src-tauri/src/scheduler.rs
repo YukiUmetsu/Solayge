@@ -8,12 +8,12 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 
 use crate::agent;
 use crate::git;
-use crate::opencode_server;
 use crate::models::{
     BranchMode, CommandTemplates, ConflictMode, GitOp, Isolation, LogEvent, MergeSourceStatus,
     MergeSpec, MergeStrategy, NotifyEvent, NotifyKind, PermissionProfile, Provider, ReviewMode,
     ReviewStatus, SystemPrompt, Task, TaskKind, TaskStatus,
 };
+use crate::opencode_server;
 use crate::state::AppState;
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
@@ -161,9 +161,7 @@ fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
     let title = {
         let mut inner = crate::state::lock(&st.inner);
         inner.tasks.iter_mut().find(|t| t.id == id).and_then(|t| {
-            let finished_at = last_activity(app, id)
-                .or(t.started_at)
-                .unwrap_or_else(now);
+            let finished_at = last_activity(app, id).or(t.started_at).unwrap_or_else(now);
             mark_interrupted(t, reason, finished_at)
         })
     };
@@ -207,7 +205,11 @@ fn stall_sweep(
 ) -> StallSweep {
     let mut out = StallSweep::default();
     for t in tasks {
-        let last = heartbeat.get(&t.id).copied().or(t.started_at).unwrap_or(now);
+        let last = heartbeat
+            .get(&t.id)
+            .copied()
+            .or(t.started_at)
+            .unwrap_or(now);
         if now - last <= stall_secs {
             continue;
         }
@@ -480,7 +482,11 @@ async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
     emit_state(app);
 
     if let Some(reason) = &commit_error {
-        log_note(app, id, &format!("Could not commit worktree changes: {reason}"));
+        log_note(
+            app,
+            id,
+            &format!("Could not commit worktree changes: {reason}"),
+        );
     }
 
     if let Some((path, note)) = retry_note {
@@ -555,7 +561,11 @@ async fn commit_worktree_work(app: &AppHandle, id: &str) -> Result<(), String> {
     let env = project_context(app, &run.project).env;
     match commit_all_changes(Path::new(&wt), &commit_message(&run.title), &env).await {
         Ok(true) => {
-            log_note(app, &run.id, "Committed uncommitted work in the task's worktree.");
+            log_note(
+                app,
+                &run.id,
+                "Committed uncommitted work in the task's worktree.",
+            );
             Ok(())
         }
         Ok(false) => Ok(()),
@@ -883,9 +893,17 @@ fn command_templates(app: &AppHandle) -> CommandTemplates {
 /// it already has content, a separator is appended so the earlier attempt (often
 /// the only evidence of what failed) is kept.
 async fn reset_log(path: &Path) {
-    let existing = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+    let existing = tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     if existing > 0 {
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path).await {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+        {
             let sep = format!(
                 "\n[Solayge] ---- new attempt: {} ----\n",
                 local_clock(now(), None)
@@ -905,7 +923,12 @@ async fn review_note(app: &AppHandle, id: &str, message: &str) {
         let st = app.state::<AppState>();
         st.review_log_path(id)
     };
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path).await {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+    {
         let _ = f
             .write_all(format!("{stamp}[Solayge] {message}\n").as_bytes())
             .await;
@@ -1070,11 +1093,7 @@ fn prune_heartbeat(app: &AppHandle) {
 /// Spawn a child, stream its output to the task log, and register it so it can
 /// be cancelled. Finalization is left to `reap`.
 fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
-    let program = cmd
-        .as_std()
-        .get_program()
-        .to_string_lossy()
-        .to_string();
+    let program = cmd.as_std().get_program().to_string_lossy().to_string();
     let cwd = cmd
         .as_std()
         .get_current_dir()
@@ -1101,7 +1120,10 @@ fn spawn_simple(app: &AppHandle, id: &str, mut cmd: tokio::process::Command) {
         Err(e) => fail_task(
             app,
             id,
-            format!("failed to launch \"{program}\"{cwd}: {e}", cwd = cwd.map(|c| format!(" in {c}")).unwrap_or_default()),
+            format!(
+                "failed to launch \"{program}\"{cwd}: {e}",
+                cwd = cwd.map(|c| format!(" in {c}")).unwrap_or_default()
+            ),
         ),
     }
 }
@@ -1268,15 +1290,7 @@ async fn start_task(app: AppHandle, id: String) {
     if run.kind == TaskKind::Agent && run.provider == Provider::Opencode {
         match opencode_setup(&app, &run).await {
             Ok((conn, session)) => {
-                start_opencode_loop(
-                    app,
-                    run,
-                    conn,
-                    session,
-                    OpenCodeResume::default(),
-                    true,
-                )
-                .await;
+                start_opencode_loop(app, run, conn, session, OpenCodeResume::default(), true).await;
                 return;
             }
             Err(e) => {
@@ -1425,7 +1439,9 @@ impl OpenCodeResume {
     /// Snapshot the parts of a session transcript that must not be replayed.
     fn from_messages(messages: &[serde_json::Value]) -> Self {
         let type_of = |m: &serde_json::Value| {
-            m.get("type").and_then(serde_json::Value::as_str).map(str::to_string)
+            m.get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
         };
         let logged = messages
             .iter()
@@ -1527,8 +1543,9 @@ async fn start_opencode_loop(
         }
         if surfaced.is_none() {
             if let Ok(perms) = opencode_server::permissions(&conn, &session).await {
-                if let Some(ask) =
-                    perms.first().and_then(|p| opencode_server::permission_to_ask(&session, p))
+                if let Some(ask) = perms
+                    .first()
+                    .and_then(|p| opencode_server::permission_to_ask(&session, p))
                 {
                     match run.profile {
                         PermissionProfile::Autonomous => {
@@ -1649,7 +1666,13 @@ pub(crate) async fn resume_opencode_task(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| "this task has no live agent session".to_string())?;
         let review_settled = !review_runs_on_resume(t.review.as_ref().map(|r| r.status));
-        let previous = (t.status, t.started_at, t.finished_at, t.exit_code, t.error.clone());
+        let previous = (
+            t.status,
+            t.started_at,
+            t.finished_at,
+            t.exit_code,
+            t.error.clone(),
+        );
         t.status = TaskStatus::Running;
         t.started_at = Some(now());
         t.finished_at = None;
@@ -1833,13 +1856,13 @@ fn ask_log_lines(ask: &crate::models::TaskAsk) -> Vec<String> {
 /// A log line describing how long the agent will wait for an answer, when the
 /// provider supplied a timeout. `None` when it waits indefinitely.
 fn answer_window_line(ask: &crate::models::TaskAsk) -> Option<String> {
-    let secs = ask
-        .timeout_secs
-        .filter(|s| *s > 0)
-        .or_else(|| match (ask.created_at, ask.deadline) {
-            (Some(created), Some(deadline)) if deadline > created => Some(deadline - created),
-            _ => None,
-        })?;
+    let secs =
+        ask.timeout_secs
+            .filter(|s| *s > 0)
+            .or_else(|| match (ask.created_at, ask.deadline) {
+                (Some(created), Some(deadline)) if deadline > created => Some(deadline - created),
+                _ => None,
+            })?;
     Some(format!(
         "The agent will wait up to {} for your answer.",
         humanize_secs(secs)
@@ -1980,7 +2003,9 @@ async fn execute_git(
     env: &[(String, String)],
 ) -> Result<(), String> {
     let dir = Path::new(&run.project);
-    let op = run.git_op.ok_or_else(|| "git task has no operation".to_string())?;
+    let op = run
+        .git_op
+        .ok_or_else(|| "git task has no operation".to_string())?;
     let arg = run.command.clone().unwrap_or_default();
     let check = |code: i32, what: &str| -> Result<(), String> {
         if code == 0 {
@@ -2190,13 +2215,25 @@ async fn run_streamed(app: &AppHandle, id: &str, mut cmd: tokio::process::Comman
     }
 }
 
-async fn run_git(app: &AppHandle, run: &TaskRun, dir: &Path, args: &[&str], env: &[(String, String)]) -> i32 {
+async fn run_git(
+    app: &AppHandle,
+    run: &TaskRun,
+    dir: &Path,
+    args: &[&str],
+    env: &[(String, String)],
+) -> i32 {
     let mut cmd = git::git_cmd(dir, args);
     agent::apply_env(&mut cmd, env);
     run_streamed(app, &run.id, cmd).await.unwrap_or(-1)
 }
 
-async fn run_shell(app: &AppHandle, run: &TaskRun, dir: &Path, script: &str, env: &[(String, String)]) -> i32 {
+async fn run_shell(
+    app: &AppHandle,
+    run: &TaskRun,
+    dir: &Path,
+    script: &str,
+    env: &[(String, String)],
+) -> i32 {
     let mut cmd = git::shell_cmd(dir, script);
     agent::apply_env(&mut cmd, env);
     run_streamed(app, &run.id, cmd).await.unwrap_or(-1)
@@ -2352,7 +2389,10 @@ async fn resolve_conflicts(
     log_note(
         app,
         &run.id,
-        &format!("Conflicts merging {} - handing them to the agent.", sources.join(", ")),
+        &format!(
+            "Conflicts merging {} - handing them to the agent.",
+            sources.join(", ")
+        ),
     );
     let list = git::conflicted_files(dir).await;
     let prompt = format!(
@@ -2473,7 +2513,9 @@ async fn run_merge_steps(
     if !dirty.is_empty() {
         if spec.commit_sources {
             for s in &dirty {
-                let Some(wt) = s.worktree.as_deref() else { continue };
+                let Some(wt) = s.worktree.as_deref() else {
+                    continue;
+                };
                 ensure_running(app, &run.id)?;
                 log_note(
                     app,
@@ -2488,10 +2530,15 @@ async fn run_merge_steps(
                     app,
                     run,
                     Path::new(wt),
-                    &["commit", "-m", "chore: commit uncommitted work before combining"],
+                    &[
+                        "commit",
+                        "-m",
+                        "chore: commit uncommitted work before combining",
+                    ],
                     env,
                 )
-                .await != 0
+                .await
+                    != 0
                 {
                     return Err(format!("could not commit changes in {wt}").into());
                 }
@@ -2606,13 +2653,10 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
                 // An interactive success queues its review (via `queue_review`)
                 // before this runs, so treat "pending/running review" as entering
                 // review rather than a plain completion.
-                entered_review = t
-                    .review
-                    .as_ref()
-                    .is_some_and(|r| {
-                        r.mode != ReviewMode::Off
-                            && matches!(r.status, ReviewStatus::Pending | ReviewStatus::Running)
-                    });
+                entered_review = t.review.as_ref().is_some_and(|r| {
+                    r.mode != ReviewMode::Off
+                        && matches!(r.status, ReviewStatus::Pending | ReviewStatus::Running)
+                });
             } else {
                 t.status = TaskStatus::Failed;
                 t.error = error.or_else(|| Some("integration failed".into()));
@@ -3001,25 +3045,22 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
             } else {
                 (ReviewStatus::Failed, None)
             };
-            let summary = summary
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| {
-                    let tail = agent::tail(&text);
-                    if tail.trim().is_empty() {
-                        None
-                    } else {
-                        Some(tail)
-                    }
-                });
+            let summary = summary.filter(|s| !s.trim().is_empty()).or_else(|| {
+                let tail = agent::tail(&text);
+                if tail.trim().is_empty() {
+                    None
+                } else {
+                    Some(tail)
+                }
+            });
             let attempts = t.review.as_ref().map(|r| r.attempts).unwrap_or(0);
             let succeeded = t.status == TaskStatus::Succeeded;
             // A review with no terminal verdict is not finished. Retry it while
             // the budget lasts (the reviewer often finishes on a second run);
             // once spent, block the task so dependents do not run on work the
             // reviewer never actually checked.
-            let retry = succeeded
-                && commit_error.is_none()
-                && review_should_retry(status, attempts);
+            let retry =
+                succeeded && commit_error.is_none() && review_should_retry(status, attempts);
             let mut pause = false;
             if let Some(r) = t.review.as_mut() {
                 if retry {
@@ -3067,7 +3108,11 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
     st.save();
     emit_state(app);
     if let Some(reason) = &commit_error {
-        log_note(app, id, &format!("Could not commit reviewer changes: {reason}"));
+        log_note(
+            app,
+            id,
+            &format!("Could not commit reviewer changes: {reason}"),
+        );
     }
     if retried {
         // Leave the transcript (and a marker) for the next attempt, and skip the
@@ -3203,12 +3248,12 @@ mod tests {
         reviews_to_start, source_statuses, stall_sweep, supervised_tick, BranchChoice,
         OpenCodeResume, MAX_REVIEW_ATTEMPTS,
     };
-    use std::path::Path;
     use crate::models::{
-        AskKind, BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task,
-        TaskAsk, TaskKind, TaskReview, TaskStatus,
+        AskKind, BranchMode, Isolation, PermissionProfile, ReviewMode, ReviewStatus, Task, TaskAsk,
+        TaskKind, TaskReview, TaskStatus,
     };
     use crate::state::AppState;
+    use std::path::Path;
 
     fn task(
         id: &str,
@@ -3320,11 +3365,7 @@ mod tests {
     #[test]
     fn the_first_log_stamp_includes_the_date_but_not_the_year() {
         let out = local_clock(1_800_000_000, None);
-        assert_eq!(
-            out.len(),
-            "MM-DD HH:MM:SS".len(),
-            "unexpected stamp: {out}"
-        );
+        assert_eq!(out.len(), "MM-DD HH:MM:SS".len(), "unexpected stamp: {out}");
     }
 
     #[test]
@@ -3415,7 +3456,10 @@ mod tests {
     fn an_unfinished_review_is_retried_until_the_budget_is_spent() {
         // A reviewer that exits without a verdict is retried, not settled.
         assert!(review_should_retry(ReviewStatus::Failed, 1));
-        assert!(review_should_retry(ReviewStatus::Failed, MAX_REVIEW_ATTEMPTS - 1));
+        assert!(review_should_retry(
+            ReviewStatus::Failed,
+            MAX_REVIEW_ATTEMPTS - 1
+        ));
         // Once the budget is spent (or a real verdict exists) it settles.
         assert!(!review_should_retry(
             ReviewStatus::Failed,
@@ -3468,13 +3512,22 @@ mod tests {
 
         assert_eq!(reviews_to_start(&mut tasks, 8), vec!["queued".to_string()]);
         // The claimed review is flipped to running; nothing else moves.
-        assert_eq!(tasks[0].review.as_ref().unwrap().status, ReviewStatus::Running);
+        assert_eq!(
+            tasks[0].review.as_ref().unwrap().status,
+            ReviewStatus::Running
+        );
         assert_eq!(
             tasks[1].review.as_ref().unwrap().status,
             ReviewStatus::Running
         );
-        assert_eq!(tasks[2].review.as_ref().unwrap().status, ReviewStatus::Pending);
-        assert_eq!(tasks[3].review.as_ref().unwrap().status, ReviewStatus::Pending);
+        assert_eq!(
+            tasks[2].review.as_ref().unwrap().status,
+            ReviewStatus::Pending
+        );
+        assert_eq!(
+            tasks[3].review.as_ref().unwrap().status,
+            ReviewStatus::Pending
+        );
     }
 
     #[test]
@@ -3493,8 +3546,14 @@ mod tests {
         ];
 
         assert_eq!(reviews_to_start(&mut tasks, 8), vec!["rw".to_string()]);
-        assert_eq!(tasks[0].review.as_ref().unwrap().status, ReviewStatus::Passed);
-        assert_eq!(tasks[1].review.as_ref().unwrap().status, ReviewStatus::Running);
+        assert_eq!(
+            tasks[0].review.as_ref().unwrap().status,
+            ReviewStatus::Passed
+        );
+        assert_eq!(
+            tasks[1].review.as_ref().unwrap().status,
+            ReviewStatus::Running
+        );
     }
 
     #[test]
@@ -3665,7 +3724,9 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.contains("Waiting for you: Which environment?")));
-        assert!(lines.iter().any(|l| l.contains("Agent said: I need to pick")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Agent said: I need to pick")));
         assert!(lines
             .iter()
             .any(|l| l == "Question: Which environment? (required) — Staging or production"));
@@ -3781,10 +3842,7 @@ mod tests {
 
     #[test]
     fn dispatching_counts_attempts_so_a_rerun_is_recognized() {
-        let st = state_with(
-            vec![task("t0", "/p", &[], Isolation::Worktree, None)],
-            3,
-        );
+        let st = state_with(vec![task("t0", "/p", &[], Isolation::Worktree, None)], 3);
         dispatch(&st);
         assert_eq!(st.inner.lock().unwrap().tasks[0].attempts, 1);
 
@@ -3867,12 +3925,18 @@ mod tests {
         let st = state_with(vec![a, b], 3);
 
         let (started, _) = dispatch(&st);
-        assert!(started.is_empty(), "dependent started before review finished");
+        assert!(
+            started.is_empty(),
+            "dependent started before review finished"
+        );
         assert_eq!(count(&st, TaskStatus::Waiting), 1);
 
         // The dependent is released only once the review reaches a verdict.
-        st.inner.lock().unwrap().tasks[0].review.as_mut().unwrap().status =
-            ReviewStatus::Passed;
+        st.inner.lock().unwrap().tasks[0]
+            .review
+            .as_mut()
+            .unwrap()
+            .status = ReviewStatus::Passed;
         let (started, _) = dispatch(&st);
         assert_eq!(started, vec!["b".to_string()]);
     }
@@ -3968,9 +4032,19 @@ mod tests {
             review_done,
         ];
         let active = active_heartbeat_ids(&tasks);
-        assert!(active.contains("live"), "a running task keeps its heartbeat");
-        assert!(active.contains("rev"), "a running review keeps its heartbeat");
-        assert_eq!(active.len(), 2, "finished/blocked tasks are dropped: {active:?}");
+        assert!(
+            active.contains("live"),
+            "a running task keeps its heartbeat"
+        );
+        assert!(
+            active.contains("rev"),
+            "a running review keeps its heartbeat"
+        );
+        assert_eq!(
+            active.len(),
+            2,
+            "finished/blocked tasks are dropped: {active:?}"
+        );
     }
 
     // ---- new-branch reuse on retry ----
@@ -4033,7 +4107,10 @@ mod tests {
         // While the branch exists, a recorded name is reused as-is.
         let (name, exists) = resolve_named_branch(&dir, "feat", true).await.unwrap();
         assert_eq!(name, "feat");
-        assert!(exists, "an existing reused branch should be reported as existing");
+        assert!(
+            exists,
+            "an existing reused branch should be reported as existing"
+        );
 
         // Simulate the branch being deleted between attempts (e.g. "remove
         // worktree").
@@ -4056,7 +4133,10 @@ mod tests {
             "recreating the branch should succeed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(crate::git::current_branch(&dir).await.as_deref(), Some("feat"));
+        assert_eq!(
+            crate::git::current_branch(&dir).await.as_deref(),
+            Some("feat")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4094,7 +4174,11 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let wt = std::fs::canonicalize(&wt).unwrap();
         let wt_s = wt.to_string_lossy().to_string();
         std::fs::write(wt.join("dirty.txt"), "work in progress").unwrap();
@@ -4119,22 +4203,18 @@ mod tests {
         assert_eq!(by_branch[0].worktree.as_deref(), Some(wt_s.as_str()));
 
         // Once committed, the source is clean.
-        assert!(
-            crate::git::git_cmd(&wt, &["add", "-A"])
-                .output()
-                .await
-                .unwrap()
-                .status
-                .success()
-        );
-        assert!(
-            crate::git::git_cmd(&wt, &["commit", "-qm", "wip"])
-                .output()
-                .await
-                .unwrap()
-                .status
-                .success()
-        );
+        assert!(crate::git::git_cmd(&wt, &["add", "-A"])
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success());
+        assert!(crate::git::git_cmd(&wt, &["commit", "-qm", "wip"])
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success());
         let clean = source_statuses(&[], &dir_s, &["feat".to_string()]).await;
         assert!(!clean[0].dirty, "a committed source worktree is clean");
 
@@ -4155,14 +4235,18 @@ mod tests {
 
         // A clean tree makes no commit.
         assert!(
-            !commit_all_changes(&dir, "nothing to do", &[]).await.unwrap(),
+            !commit_all_changes(&dir, "nothing to do", &[])
+                .await
+                .unwrap(),
             "a clean worktree must not be committed"
         );
 
         // Uncommitted edits are staged and committed, leaving the tree clean.
         std::fs::write(dir.join("feature.txt"), "the work").unwrap();
         assert!(
-            commit_all_changes(&dir, "Add the feature", &[]).await.unwrap(),
+            commit_all_changes(&dir, "Add the feature", &[])
+                .await
+                .unwrap(),
             "a dirty worktree must be committed"
         );
         assert!(
@@ -4178,7 +4262,10 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Add the feature");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "Add the feature"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4186,7 +4273,10 @@ mod tests {
     #[test]
     fn commit_message_uses_the_first_nonempty_line() {
         assert_eq!(commit_message("Add dark mode"), "Add dark mode");
-        assert_eq!(commit_message("  \n Fix the parser \n more"), "Fix the parser");
+        assert_eq!(
+            commit_message("  \n Fix the parser \n more"),
+            "Fix the parser"
+        );
         assert_eq!(commit_message("   \n  "), "chore: task work");
     }
 
