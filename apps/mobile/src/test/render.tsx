@@ -2,6 +2,7 @@ import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 
 import { ClientProvider } from "../client/ClientContext";
+import { NotificationProvider } from "../client/NotificationCenter";
 import type { PairedDesktop, RemoteClient, TransportMode } from "../client/remote";
 
 /** A fixed clock so relative-time text is deterministic across tests. */
@@ -36,7 +37,7 @@ export function renderWithClient(ui: ReactElement, client: RemoteClient, options
       onAddDesktop={options.onAddDesktop}
       refreshIntervalMs={options.refreshIntervalMs ?? 0}
     >
-      {ui}
+      <NotificationProvider>{ui}</NotificationProvider>
     </ClientProvider>,
   );
 }

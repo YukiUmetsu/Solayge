@@ -15,11 +15,14 @@
 //! * checks the device's granted scope on every request and then reads real
 //!   projects, tasks, and pending questions from [`AppState`].
 //!
-//! Reads are implemented end to end. Mutating actions that the mobile UI can
-//! reach (`sessions.send_prompt`, `sessions.cancel`, `approvals.respond`) return
-//! a typed `unsupported_action`, rather than silently pretending to succeed.
+//! Reads are implemented end to end. The mobile UI's writes
+//! (`sessions.send_prompt`, `sessions.answer`, `sessions.cancel`,
+//! `approvals.respond`, `push.register`/`push.unregister`) are implemented for
+//! a device that holds the matching scope; every other mutating action returns a
+//! typed `unsupported_action` rather than silently pretending to succeed.
 
 use serde_json::Value;
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use solayge_identity::{
@@ -28,13 +31,16 @@ use solayge_identity::{
 };
 use solayge_network::{BoxFuture, ConnectionSession, FrameHandler};
 use solayge_protocol::{
-    Action, ApprovalKind, ApprovalRisk, ApprovalSummary, ApprovalsResponse, ConnectionHealth,
-    Envelope, HostMetadata, MessageKind, ProtocolError, SessionDetail, SessionSummary,
+    Action, AnswerPayload, ApprovalField, ApprovalFieldKind, ApprovalFieldOption, ApprovalKind,
+    ApprovalResponsePayload, ApprovalRisk, ApprovalSummary, ApprovalsResponse, CommandLedger,
+    CommandObservation, CommandReceipt, CommandStatus, ConnectionHealth, Envelope, HostMetadata,
+    MessageKind, ProtocolError, PushRegisterPayload, PushRegisterResult, PushUnregisterPayload,
+    SendPromptPayload, SessionDetail, SessionSummary,
     SessionsResponse, ProjectSummary, ProjectsResponse, PROTOCOL_VERSION,
 };
 
 use crate::devices::DeviceManager;
-use crate::models::{AskKind, Provider, Task, TaskKind, TaskStatus};
+use crate::models::{AskField, AskFieldKind, AskKind, Provider, Task, TaskKind, TaskStatus};
 use crate::state::now;
 
 /// The Iroh-backed host handler shared by every incoming connection.
@@ -44,6 +50,9 @@ use crate::state::now;
 pub struct HostHandler<R: tauri::Runtime> {
     app: AppHandle<R>,
     challenges: ChallengeStore,
+    /// Host-side idempotency for remote commands, so a retried frame never runs
+    /// an agent twice. Shared across connections for the process lifetime.
+    commands: Mutex<CommandLedger>,
 }
 
 impl<R: tauri::Runtime> HostHandler<R> {
@@ -51,6 +60,7 @@ impl<R: tauri::Runtime> HostHandler<R> {
         HostHandler {
             app,
             challenges: ChallengeStore::new(),
+            commands: Mutex::new(CommandLedger::default()),
         }
     }
 
@@ -81,7 +91,7 @@ impl<R: tauri::Runtime> HostHandler<R> {
         }
     }
 
-    fn dispatch(
+    async fn dispatch(
         &self,
         session: &ConnectionSession,
         request: &Envelope,
@@ -133,12 +143,37 @@ impl<R: tauri::Runtime> HostHandler<R> {
                 self.devices()
             }
 
-            // ---- mutations not yet exposed over the remote protocol ----
-            Action::SessionsSendPrompt
-            | Action::SessionsCancel
-            | Action::SessionsStart
+            // ---- push token registration (any authenticated paired device) ----
+            Action::PushRegister => {
+                let device_id = self.authorize(session, Scope::SessionsRead)?;
+                self.push_register(&device_id, request)
+            }
+            Action::PushUnregister => {
+                let device_id = self.authorize(session, Scope::SessionsRead)?;
+                self.push_unregister(&device_id, request)
+            }
+
+            // ---- writes ----
+            Action::SessionsSendPrompt => {
+                self.authorize(session, Scope::SessionsMessage)?;
+                self.send_prompt(request).await
+            }
+            Action::SessionsAnswer => {
+                self.authorize(session, Scope::SessionsMessage)?;
+                self.answer_question(request).await
+            }
+            Action::SessionsCancel => {
+                self.authorize(session, Scope::SessionsControl)?;
+                self.cancel_session(request).await
+            }
+            Action::ApprovalsRespond => {
+                self.authorize(session, Scope::ApprovalsRespond)?;
+                self.respond_approval(request).await
+            }
+
+            // ---- recognized but not implemented in this phase ----
+            Action::SessionsStart
             | Action::SessionsGetCommandStatus
-            | Action::ApprovalsRespond
             | Action::DevicesRevoke
             | Action::InsightsSummary
             | Action::InsightsErrors
@@ -146,6 +181,293 @@ impl<R: tauri::Runtime> HostHandler<R> {
             | Action::PairApprove
             | Action::PairReject => Err(ProtocolError::unsupported_action(request.action.as_str())),
         }
+    }
+
+    /// Register a mutating command id, returning the recorded status when the
+    /// exact command has already been seen (a harmless retry).
+    fn register_command(
+        &self,
+        command_id: &str,
+        action: Action,
+    ) -> Result<Option<CommandStatus>, ProtocolError> {
+        let mut ledger = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match ledger.register(command_id, action)? {
+            CommandObservation::New => Ok(None),
+            CommandObservation::Duplicate { status } => Ok(Some(status)),
+        }
+    }
+
+    /// Record a command's terminal status. A failed advance is not fatal: the
+    /// command still ran, and the ledger is only an idempotency aid.
+    fn finish_command(&self, command_id: &str, status: CommandStatus) {
+        let mut ledger = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = ledger.advance(command_id, status);
+    }
+
+    /// Drop a command id when the command failed before doing anything, so a
+    /// retry is retried rather than mistaken for a successful duplicate.
+    fn forget_command(&self, command_id: &str) {
+        let mut ledger = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ledger.forget(command_id);
+    }
+
+    async fn send_prompt(&self, request: &Envelope) -> Result<Value, ProtocolError> {
+        let payload: SendPromptPayload = request.payload_as()?;
+        let session_id = require_session_id(request)?;
+        let command_id = require_command_id(request)?;
+        if let Some(status) = self.register_command(&command_id, Action::SessionsSendPrompt)? {
+            return typed(&CommandReceipt {
+                command_id,
+                status,
+                session_id: Some(session_id),
+            });
+        }
+        // A remote message only reaches a task with a live agent session.
+        let live_session = {
+            let state = self.app.state::<crate::state::AppState>();
+            let inner = crate::state::lock(&state.inner);
+            let task = inner
+                .tasks
+                .iter()
+                .find(|t| t.id == session_id)
+                .ok_or_else(|| ProtocolError::not_found(&session_id))?;
+            if task.status != TaskStatus::Running {
+                None
+            } else {
+                task.session_id.clone().filter(|id| !id.is_empty())
+            }
+        };
+        let Some(live_session) = live_session else {
+            self.forget_command(&command_id);
+            return Err(ProtocolError::invalid_payload(
+                "this task is not running, so it cannot accept a message",
+            ));
+        };
+        let connection = match crate::opencode_server::ensure_server().await {
+            Ok(connection) => connection,
+            Err(message) => {
+                self.forget_command(&command_id);
+                return Err(command_error(message));
+            }
+        };
+        match crate::opencode_server::prompt(&connection, &live_session, &payload.text).await {
+            Ok(()) => {
+                self.finish_command(&command_id, CommandStatus::Accepted);
+                typed(&CommandReceipt {
+                    command_id,
+                    status: CommandStatus::Accepted,
+                    session_id: Some(session_id),
+                })
+            }
+            Err(message) => {
+                self.forget_command(&command_id);
+                Err(command_error(message))
+            }
+        }
+    }
+
+    async fn answer_question(&self, request: &Envelope) -> Result<Value, ProtocolError> {
+        let payload: AnswerPayload = request.payload_as()?;
+        let session_id = require_session_id(request)?;
+        let command_id = require_command_id(request)?;
+        if let Some(status) = self.register_command(&command_id, Action::SessionsAnswer)? {
+            return typed(&CommandReceipt {
+                command_id,
+                status,
+                session_id: Some(session_id),
+            });
+        }
+        let answer = Value::Object(payload.answers);
+        match self
+            .reply_to_ask(&payload.approval_id, &session_id, answer)
+            .await
+        {
+            Ok(()) => {
+                self.finish_command(&command_id, CommandStatus::Succeeded);
+                typed(&CommandReceipt {
+                    command_id,
+                    status: CommandStatus::Succeeded,
+                    session_id: Some(session_id),
+                })
+            }
+            Err(error) => {
+                self.forget_command(&command_id);
+                Err(error)
+            }
+        }
+    }
+
+    async fn cancel_session(&self, request: &Envelope) -> Result<Value, ProtocolError> {
+        let session_id = require_session_id(request)?;
+        let command_id = require_command_id(request)?;
+        if let Some(status) = self.register_command(&command_id, Action::SessionsCancel)? {
+            return typed(&CommandReceipt {
+                command_id,
+                status,
+                session_id: Some(session_id),
+            });
+        }
+        let state = self.app.state::<crate::state::AppState>();
+        let exists = {
+            let inner = crate::state::lock(&state.inner);
+            inner.tasks.iter().any(|task| task.id == session_id)
+        };
+        if !exists {
+            self.forget_command(&command_id);
+            return Err(ProtocolError::not_found(&session_id));
+        }
+        {
+            let mut inner = crate::state::lock(&state.inner);
+            if let Some(task) = inner.tasks.iter_mut().find(|task| task.id == session_id) {
+                crate::commands::cancel_task_state(task);
+            }
+        }
+        crate::commands::kill_task_children(&state, &session_id);
+        state.save();
+        self.finish_command(&command_id, CommandStatus::Canceled);
+        typed(&CommandReceipt {
+            command_id,
+            status: CommandStatus::Canceled,
+            session_id: Some(session_id),
+        })
+    }
+
+    async fn respond_approval(&self, request: &Envelope) -> Result<Value, ProtocolError> {
+        let payload: ApprovalResponsePayload = request.payload_as()?;
+        let command_id = require_command_id(request)?;
+        let session_id = request.session_id.clone().filter(|id| !id.is_empty());
+        if let Some(status) = self.register_command(&command_id, Action::ApprovalsRespond)? {
+            return typed(&CommandReceipt {
+                command_id,
+                status,
+                session_id,
+            });
+        }
+        let decision = match payload.decision {
+            solayge_protocol::ApprovalDecision::ApproveOnce => "once",
+            solayge_protocol::ApprovalDecision::Deny => "reject",
+        };
+        let answer = serde_json::json!({ "decision": decision });
+        let task_id = match self.task_for_approval(&payload.approval_id) {
+            Ok(task_id) => task_id,
+            Err(error) => {
+                self.forget_command(&command_id);
+                return Err(error);
+            }
+        };
+        match self
+            .reply_to_ask(&payload.approval_id, &task_id, answer)
+            .await
+        {
+            Ok(()) => {
+                self.finish_command(&command_id, CommandStatus::Succeeded);
+                typed(&CommandReceipt {
+                    command_id,
+                    status: CommandStatus::Succeeded,
+                    session_id: Some(task_id),
+                })
+            }
+            Err(error) => {
+                self.forget_command(&command_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Resolve the task backing an approval id.
+    fn task_for_approval(&self, approval_id: &str) -> Result<String, ProtocolError> {
+        let state = self.app.state::<crate::state::AppState>();
+        let inner = crate::state::lock(&state.inner);
+        inner
+            .tasks
+            .iter()
+            .find(|task| task.ask.as_ref().is_some_and(|ask| ask.id == approval_id))
+            .map(|task| task.id.clone())
+            .ok_or_else(|| ProtocolError::not_found(approval_id))
+    }
+
+    /// Reply to the pending ask for `approval_id`, refusing a mismatched
+    /// session. Mirrors the desktop command so a remote answer and a local one
+    /// take the same path through the provider.
+    async fn reply_to_ask(
+        &self,
+        approval_id: &str,
+        session_id: &str,
+        answer: Value,
+    ) -> Result<(), ProtocolError> {
+        let task_id = self.task_for_approval(approval_id)?;
+        if task_id != session_id {
+            return Err(ProtocolError::not_authorized(
+                "the approval does not belong to this session",
+            ));
+        }
+        let ask = {
+            let state = self.app.state::<crate::state::AppState>();
+            let inner = crate::state::lock(&state.inner);
+            let task = inner
+                .tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .ok_or_else(|| ProtocolError::not_found(&task_id))?;
+            if !task.can_answer_ask() {
+                return Err(ProtocolError::invalid_payload(
+                    "this task is no longer waiting for an answer",
+                ));
+            }
+            task.ask.clone().ok_or_else(|| ProtocolError::not_found(approval_id))?
+        };
+        let provider_session = ask
+            .session_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ProtocolError::invalid_payload("the question is not attached to a live session")
+            })?;
+        let connection = crate::opencode_server::ensure_server()
+            .await
+            .map_err(command_error)?;
+        match ask.kind {
+            AskKind::Question => {
+                crate::opencode_server::reply_form(&connection, &provider_session, &ask.id, answer)
+                    .await
+                    .map_err(command_error)?;
+            }
+            AskKind::Permission => {
+                let decision = answer
+                    .get("decision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reject");
+                crate::opencode_server::reply_permission(
+                    &connection,
+                    &provider_session,
+                    &ask.id,
+                    decision,
+                    None,
+                )
+                .await
+                .map_err(command_error)?;
+            }
+        }
+        {
+            let state = self.app.state::<crate::state::AppState>();
+            let mut inner = crate::state::lock(&state.inner);
+            if let Some(task) = inner.tasks.iter_mut().find(|t| t.id == task_id) {
+                if task.ask.as_ref().map(|a| a.id.as_str()) == Some(ask.id.as_str()) {
+                    task.ask = None;
+                }
+            }
+        }
+        self.app.state::<crate::state::AppState>().save();
+        Ok(())
     }
 
     fn health(&self) -> Result<Value, ProtocolError> {
@@ -381,6 +703,38 @@ impl<R: tauri::Runtime> HostHandler<R> {
             .collect();
         typed(&solayge_protocol::DevicesResponse { devices })
     }
+
+    /// Store the calling device's push token. The token is opaque here; it is
+    /// only forwarded to the push gateway.
+    fn push_register(
+        &self,
+        device_id: &str,
+        request: &Envelope,
+    ) -> Result<Value, ProtocolError> {
+        let payload: PushRegisterPayload = request.payload_as()?;
+        if payload.token.trim().is_empty() {
+            return Err(ProtocolError::missing_field("token"));
+        }
+        let manager = self.app.state::<DeviceManager>();
+        manager
+            .set_push_token(device_id, payload.token, payload.platform)
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+        typed(&PushRegisterResult { registered: true })
+    }
+
+    /// Forget the calling device's push token.
+    fn push_unregister(
+        &self,
+        device_id: &str,
+        request: &Envelope,
+    ) -> Result<Value, ProtocolError> {
+        let _: PushUnregisterPayload = request.payload_as()?;
+        let manager = self.app.state::<DeviceManager>();
+        manager
+            .clear_push_token(device_id)
+            .map_err(|e| ProtocolError::internal(e.to_string()))?;
+        typed(&PushRegisterResult { registered: false })
+    }
 }
 
 impl<R: tauri::Runtime> FrameHandler for HostHandler<R> {
@@ -396,7 +750,7 @@ impl<R: tauri::Runtime> FrameHandler for HostHandler<R> {
                     &ProtocolError::invalid_frame("the host accepts only command frames"),
                 );
             }
-            match self.dispatch(session, &request) {
+            match self.dispatch(session, &request).await {
                 Ok(payload) => Envelope::response_to(&request, payload),
                 Err(error) => Envelope::error_to(&request, &error),
             }
@@ -406,6 +760,73 @@ impl<R: tauri::Runtime> FrameHandler for HostHandler<R> {
 
 fn typed<T: serde::Serialize>(value: &T) -> Result<Value, ProtocolError> {
     serde_json::to_value(value).map_err(|e| ProtocolError::internal(e.to_string()))
+}
+
+/// The session id a mutating command must name.
+fn require_session_id(request: &Envelope) -> Result<String, ProtocolError> {
+    request
+        .session_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ProtocolError::missing_field("session_id"))
+}
+
+/// The idempotency key every mutating command must carry.
+fn require_command_id(request: &Envelope) -> Result<String, ProtocolError> {
+    request
+        .command_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ProtocolError::missing_field("command_id"))
+}
+
+/// Map a desktop command failure onto a typed protocol error. The desktop's
+/// messages are human-readable; classify the common cases so a client can react
+/// without parsing prose.
+fn command_error(message: String) -> ProtocolError {
+    let lower = message.to_lowercase();
+    if lower.contains("not found") {
+        ProtocolError::not_found(&message)
+    } else if lower.contains("no pending")
+        || lower.contains("no longer")
+        || lower.contains("already active")
+        || lower.contains("empty")
+        || lower.contains("invalid")
+    {
+        ProtocolError::invalid_payload(message)
+    } else {
+        ProtocolError::internal(message)
+    }
+}
+
+/// Project a host question field onto the wire DTO the mobile client renders.
+fn approval_field(field: &AskField) -> ApprovalField {
+    ApprovalField {
+        key: field.key.clone(),
+        label: field.label.clone(),
+        description: field.description.clone(),
+        kind: match field.kind {
+            AskFieldKind::String => ApprovalFieldKind::String,
+            AskFieldKind::Number => ApprovalFieldKind::Number,
+            AskFieldKind::Integer => ApprovalFieldKind::Integer,
+            AskFieldKind::Boolean => ApprovalFieldKind::Boolean,
+            AskFieldKind::Multiselect => ApprovalFieldKind::Multiselect,
+            AskFieldKind::External => ApprovalFieldKind::External,
+        },
+        required: field.required,
+        custom: field.custom,
+        options: field
+            .options
+            .iter()
+            .map(|option| ApprovalFieldOption {
+                value: option.value.clone(),
+                label: option.label.clone(),
+                description: option.description.clone(),
+            })
+            .collect(),
+        placeholder: field.placeholder.clone(),
+        url: field.url.clone(),
+    }
 }
 
 fn identity_error(error: solayge_identity::IdentityError) -> ProtocolError {
@@ -529,6 +950,7 @@ fn approval_of(task: &Task) -> Option<ApprovalSummary> {
         read_only: false,
         requested_at: ask.created_at.unwrap_or(task.created_at),
         expires_at: ask.deadline,
+        fields: ask.fields.iter().map(approval_field).collect(),
     })
 }
 
@@ -597,7 +1019,30 @@ mod tests {
                 metadata: None,
                 source: None,
                 purpose: None,
-                fields: vec![],
+                fields: vec![crate::models::AskField {
+                    key: "api".into(),
+                    label: "Which API should I call?".into(),
+                    description: Some("Pick the backend".into()),
+                    kind: AskFieldKind::String,
+                    required: true,
+                    custom: false,
+                    options: vec![crate::models::AskOption {
+                        value: "rest".into(),
+                        label: "REST".into(),
+                        description: None,
+                    }],
+                    default: None,
+                    placeholder: Some("e.g. REST".into()),
+                    format: None,
+                    min: None,
+                    max: None,
+                    min_length: None,
+                    max_length: None,
+                    pattern: None,
+                    min_items: None,
+                    max_items: None,
+                    url: None,
+                }],
                 options: vec![],
                 session_id: None,
                 created_at: Some(30),
@@ -625,6 +1070,11 @@ mod tests {
         assert_eq!(approval.id, "ask_1");
         assert_eq!(approval.kind, ApprovalKind::Question);
         assert_eq!(approval.command.as_deref(), Some("src/api.ts"));
+        // The question's structured content must reach the phone, not be dropped.
+        assert_eq!(approval.fields.len(), 1);
+        assert_eq!(approval.fields[0].key, "api");
+        assert_eq!(approval.fields[0].kind, ApprovalFieldKind::String);
+        assert_eq!(approval.fields[0].options[0].value, "rest");
         assert!(approval_of(&task(TaskStatus::Running, false)).is_none());
     }
 
@@ -678,8 +1128,8 @@ mod handshake_tests {
         ))
     }
 
-    #[test]
-    fn a_phone_pairs_then_authenticates_and_binds_to_its_connection() {
+    #[tokio::test]
+    async fn a_phone_pairs_then_authenticates_and_binds_to_its_connection() {
         let dir = temp_dir();
         let app = mock_app();
         app.manage(crate::state::AppState::new(dir.clone()));
@@ -712,7 +1162,7 @@ mod handshake_tests {
         let begin = client.begin_request_for_qr(&offer.qr).unwrap();
         let request = Envelope::command(Action::PairBegin, serde_json::to_value(&begin).unwrap());
         let response: PairBeginResponse =
-            serde_json::from_value(handler.dispatch(&session, &request).unwrap()).unwrap();
+            serde_json::from_value(handler.dispatch(&session, &request).await.unwrap()).unwrap();
 
         // Both sides derive the same code — the bug this guards against.
         let verified = client.accept_begin(&response).unwrap();
@@ -725,7 +1175,7 @@ mod handshake_tests {
         let prove = client.prove_identity_request(&response).unwrap();
         let request =
             Envelope::command(Action::PairProveIdentity, serde_json::to_value(&prove).unwrap());
-        handler.dispatch(&session, &request).unwrap();
+        handler.dispatch(&session, &request).await.unwrap();
 
         // Desktop user approves with the default View + Message grant.
         app.state::<DeviceManager>()
@@ -737,7 +1187,7 @@ mod handshake_tests {
         // Before authentication, a read is refused.
         let metadata = Envelope::command(Action::HostsGetMetadata, Value::Null);
         assert_eq!(
-            handler.dispatch(&session, &metadata).unwrap_err().code(),
+            handler.dispatch(&session, &metadata).await.unwrap_err().code(),
             solayge_protocol::ErrorCode::NotAuthorized
         );
 
@@ -753,7 +1203,7 @@ mod handshake_tests {
         let request =
             Envelope::command(Action::ConnectionAuthenticate, serde_json::to_value(&auth).unwrap());
         let challenge: AuthResponse =
-            serde_json::from_value(handler.dispatch(&session, &request).unwrap()).unwrap();
+            serde_json::from_value(handler.dispatch(&session, &request).await.unwrap()).unwrap();
         assert!(!challenge.authenticated);
         let nonce = challenge.host_nonce.expect("a challenge is issued");
 
@@ -763,7 +1213,7 @@ mod handshake_tests {
         let request =
             Envelope::command(Action::ConnectionAuthenticate, serde_json::to_value(&auth).unwrap());
         let ok: AuthResponse =
-            serde_json::from_value(handler.dispatch(&session, &request).unwrap()).unwrap();
+            serde_json::from_value(handler.dispatch(&session, &request).await.unwrap()).unwrap();
         assert!(ok.authenticated);
         assert_eq!(
             session.authenticated_device().as_deref(),
@@ -771,11 +1221,28 @@ mod handshake_tests {
         );
 
         // The authenticated connection can read; a different one cannot.
-        handler.dispatch(&session, &metadata).unwrap();
+        handler.dispatch(&session, &metadata).await.unwrap();
         let other = ConnectionSession::new("iroh:other");
         assert_eq!(
-            handler.dispatch(&other, &metadata).unwrap_err().code(),
+            handler.dispatch(&other, &metadata).await.unwrap_err().code(),
             solayge_protocol::ErrorCode::NotAuthorized
+        );
+
+        // The paired device can register a push token, and the host stores it.
+        let push = Envelope::command(
+            Action::PushRegister,
+            serde_json::json!({ "token": "fcm-1", "platform": "android" }),
+        )
+        .with_command_id("cmd_push_1");
+        let registered: PushRegisterResult =
+            serde_json::from_value(handler.dispatch(&session, &push).await.unwrap()).unwrap();
+        assert!(registered.registered);
+        assert_eq!(
+            app.state::<DeviceManager>()
+                .push_token(phone.device_id().as_str())
+                .unwrap()
+                .token,
+            "fcm-1"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

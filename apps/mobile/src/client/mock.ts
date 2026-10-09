@@ -17,6 +17,7 @@ import type {
   EventsBatch,
   FilesChangedSummary,
   HostMetadata,
+  JsonValue,
   ProjectSummary,
   SessionDetail,
   SessionEvent,
@@ -334,6 +335,61 @@ export class MockRemoteClient implements RemoteClient {
     return { ...receipt };
   }
 
+  async answerApproval(
+    sessionId: string,
+    approvalId: string,
+    answers: Record<string, JsonValue>,
+  ): Promise<CommandReceipt> {
+    this.requireOnline();
+    const commandId = `ans_cmd_${approvalId}`;
+    const existing = this.decisions.get(commandId);
+    if (existing) return { ...existing };
+
+    const index = this.approvals.findIndex((a) => a.id === approvalId);
+    if (index < 0) {
+      this.decisions.delete(commandId);
+      throw new RemoteError("not_found", `Unknown approval ${approvalId}`);
+    }
+    const [approval] = this.approvals.splice(index, 1);
+    if (approval.session_id !== sessionId) {
+      // Put it back: answering another session's question is refused.
+      this.approvals.splice(index, 0, approval);
+      this.decisions.delete(commandId);
+      throw new RemoteError("not_authorized", "The question belongs to another session");
+    }
+    const receipt: CommandReceipt = {
+      command_id: commandId,
+      status: "succeeded",
+      session_id: approval.session_id,
+    };
+    this.decisions.set(commandId, receipt);
+    this.resolved.add(approvalId);
+
+    // Answering is a message, so it appears in the transcript like any other.
+    this.pushEvent(approval.session_id, {
+      kind: "message",
+      payload: { role: "user", text: Object.values(answers).join(", ") },
+    });
+
+    const sessionIndex = this.sessions.findIndex((s) => s.id === approval.session_id);
+    if (sessionIndex >= 0) {
+      this.sessions[sessionIndex] = {
+        ...this.sessions[sessionIndex],
+        pending_decisions: Math.max(0, this.sessions[sessionIndex].pending_decisions - 1),
+        updated_at: this.now(),
+      };
+    }
+    return { ...receipt };
+  }
+
+  async registerPush(_token: string, _platform: string): Promise<void> {
+    // The in-memory mock has no push gateway; registration is a no-op.
+  }
+
+  async unregisterPush(_token: string): Promise<void> {
+    // The in-memory mock has no push gateway; unregistration is a no-op.
+  }
+
   /** Whether an approval has already received its one definitive decision. */
   isResolved(approvalId: string): boolean {
     return this.resolved.has(approvalId);
@@ -452,6 +508,7 @@ export class MockRemoteClient implements RemoteClient {
         read_only: false,
         requested_at: now - 120,
         expires_at: now + 3600,
+        fields: [],
       },
       {
         id: "apr_2",
@@ -466,6 +523,26 @@ export class MockRemoteClient implements RemoteClient {
         read_only: true,
         requested_at: now - 180,
         expires_at: null,
+        fields: [
+          {
+            key: "approach",
+            label: "Navigation approach",
+            description: "Pick one or type your own preference.",
+            kind: "string",
+            required: true,
+            custom: true,
+            options: [
+              { value: "existing", label: "Keep the existing stack", description: null },
+              {
+                value: "standards",
+                label: "Move to a standards-compliant one",
+                description: null,
+              },
+            ],
+            placeholder: "Type your preference…",
+            url: null,
+          },
+        ],
       },
       {
         id: "apr_3",
@@ -479,6 +556,7 @@ export class MockRemoteClient implements RemoteClient {
         read_only: false,
         requested_at: now - 60,
         expires_at: now + 1800,
+        fields: [],
       },
     ];
 

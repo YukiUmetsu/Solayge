@@ -235,6 +235,31 @@ pub trait RemoteClient: Send + Sync {
         into_typed(self.exchange(request)?)
     }
 
+    /// Answer an agent question with a provider-shaped field map. The command id
+    /// is derived deterministically, so a retry is a duplicate rather than a
+    /// second answer.
+    fn answer_question(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        answers: serde_json::Map<String, Value>,
+    ) -> Result<CommandReceipt, ProtocolError> {
+        let payload = typed(&AnswerPayload {
+            approval_id: approval_id.to_string(),
+            answers,
+        })?;
+        let command_id = command_id_for(
+            self.desktop_id().unwrap_or_default(),
+            session_id,
+            Action::SessionsAnswer,
+            &payload,
+        );
+        let request = Envelope::command(Action::SessionsAnswer, payload)
+            .with_session_id(session_id)
+            .with_command_id(command_id);
+        into_typed(self.exchange(request)?)
+    }
+
     fn files_changed_summary(
         &self,
         session_id: &str,
@@ -285,6 +310,42 @@ pub trait RemoteClient: Send + Sync {
             &payload,
         );
         let request = Envelope::command(Action::DevicesRevoke, payload).with_command_id(command_id);
+        into_typed(self.exchange(request)?)
+    }
+
+    /// Register this device's push token with the desktop host.
+    fn register_push(
+        &self,
+        token: &str,
+        platform: &str,
+    ) -> Result<PushRegisterResult, ProtocolError> {
+        let payload = typed(&PushRegisterPayload {
+            token: token.to_string(),
+            platform: platform.to_string(),
+        })?;
+        let command_id = command_id_for(
+            self.desktop_id().unwrap_or_default(),
+            "",
+            Action::PushRegister,
+            &payload,
+        );
+        let request = Envelope::command(Action::PushRegister, payload).with_command_id(command_id);
+        into_typed(self.exchange(request)?)
+    }
+
+    /// Remove a previously registered push token.
+    fn unregister_push(&self, token: &str) -> Result<PushRegisterResult, ProtocolError> {
+        let payload = typed(&PushUnregisterPayload {
+            token: token.to_string(),
+        })?;
+        let command_id = command_id_for(
+            self.desktop_id().unwrap_or_default(),
+            "",
+            Action::PushUnregister,
+            &payload,
+        );
+        let request =
+            Envelope::command(Action::PushUnregister, payload).with_command_id(command_id);
         into_typed(self.exchange(request)?)
     }
 
@@ -433,6 +494,7 @@ impl MockHost {
                 read_only: false,
                 requested_at: 90,
                 expires_at: Some(3_600),
+                fields: Vec::new(),
             }],
             devices: vec![DeviceSummary {
                 device_id: "dev_1".to_string(),
@@ -745,6 +807,37 @@ impl MockHost {
                     session_id: None,
                 })
             }
+            Action::SessionsAnswer => {
+                let payload: AnswerPayload = request.payload_as()?;
+                let command_id = require_command_id(request)?;
+                let status = match state.ledger.register(&command_id, action)? {
+                    CommandObservation::Duplicate { status } => status,
+                    CommandObservation::New => {
+                        // Answering is final: a stale replay finds nothing.
+                        let position = match state
+                            .approvals
+                            .iter()
+                            .position(|a| a.id == payload.approval_id)
+                        {
+                            Some(position) => position,
+                            None => {
+                                state.ledger.forget(&command_id);
+                                return Err(ProtocolError::not_found(&payload.approval_id));
+                            }
+                        };
+                        state.approvals.remove(position);
+                        state
+                            .ledger
+                            .advance(&command_id, CommandStatus::Succeeded)?;
+                        CommandStatus::Succeeded
+                    }
+                };
+                typed(&CommandReceipt {
+                    command_id,
+                    status,
+                    session_id: None,
+                })
+            }
             Action::FilesChangedSummary => {
                 let session_id = require_session_id(request)?;
                 let session = find_session(state, &session_id)?;
@@ -803,6 +896,20 @@ impl MockHost {
                     }
                 }
                 typed(&DeviceRevokeResult { revoked: true })
+            }
+            Action::PushRegister => {
+                let payload: PushRegisterPayload = request.payload_as()?;
+                require_command_id(request)?;
+                typed(&PushRegisterResult {
+                    registered: !payload.token.is_empty(),
+                })
+            }
+            Action::PushUnregister => {
+                let payload: PushUnregisterPayload = request.payload_as()?;
+                require_command_id(request)?;
+                typed(&PushRegisterResult {
+                    registered: !payload.token.is_empty(),
+                })
             }
         }
     }

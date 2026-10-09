@@ -29,6 +29,7 @@ import { SaveButton, SavedPill, type SaveState } from "./SaveButton";
 import { Modal } from "./Modal";
 import { Icon, type IconName } from "./Icons";
 import { ConnectedDevices } from "./ConnectedDevices";
+import { RemoteAccess } from "./RemoteAccess";
 
 const RETENTION_OPTIONS: { value: number; label: string }[] = [
   { value: 7, label: "7 days" },
@@ -345,7 +346,12 @@ export function SettingsModal({
             />
           )}
 
-          {tab === "devices" && <ConnectedDevices />}
+          {tab === "devices" && (
+            <div className="space-y-6">
+              <RemoteAccess />
+              <ConnectedDevices />
+            </div>
+          )}
 
           {tab === "advanced" && (
             <AdvancedTab

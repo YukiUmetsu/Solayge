@@ -100,6 +100,7 @@ export type ActionName =
   | "sessions.get_command_status"
   | "sessions.cancel"
   | "sessions.start"
+  | "sessions.answer"
   | "approvals.list"
   | "approvals.get"
   | "approvals.respond"
@@ -108,7 +109,9 @@ export type ActionName =
   | "insights.errors"
   | "insights.agent_questions"
   | "devices.list"
-  | "devices.revoke";
+  | "devices.revoke"
+  | "push.register"
+  | "push.unregister";
 
 export const ACTION_NAMES = [
   "pair.begin",
@@ -126,6 +129,7 @@ export const ACTION_NAMES = [
   "sessions.get_command_status",
   "sessions.cancel",
   "sessions.start",
+  "sessions.answer",
   "approvals.list",
   "approvals.get",
   "approvals.respond",
@@ -135,11 +139,44 @@ export const ACTION_NAMES = [
   "insights.agent_questions",
   "devices.list",
   "devices.revoke",
+  "push.register",
+  "push.unregister",
 ] as const satisfies readonly ActionName[];
 
 export type ApprovalKind = "question" | "permission";
 export type ApprovalRisk = "low" | "medium" | "high";
 export type ApprovalDecision = "approve_once" | "deny";
+
+/** The widget type for one agent-question field. */
+export type ApprovalFieldKind =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "multiselect"
+  | "external";
+
+/** One selectable answer for a question field. */
+export interface ApprovalFieldOption {
+  value: string;
+  label: string;
+  description?: string | null;
+}
+
+/** One field of an agent question. */
+export interface ApprovalField {
+  key: string;
+  label: string;
+  description?: string | null;
+  kind: ApprovalFieldKind;
+  required: boolean;
+  /** Whether the user may answer with something other than `options`. */
+  custom: boolean;
+  options: ApprovalFieldOption[];
+  placeholder?: string | null;
+  /** For an `external` field: where the user completes it. */
+  url?: string | null;
+}
 
 // ---- envelope ----
 
@@ -290,6 +327,8 @@ export interface ApprovalSummary {
   read_only: boolean;
   requested_at: number;
   expires_at?: number | null;
+  /** The structured content of an agent question. Empty for permissions. */
+  fields: ApprovalField[];
 }
 
 export interface ApprovalsResponse {
@@ -303,6 +342,12 @@ export interface ApprovalQuery {
 export interface ApprovalResponsePayload {
   approval_id: string;
   decision: ApprovalDecision;
+}
+
+/** Answers to an agent question, keyed by field. */
+export interface AnswerPayload {
+  approval_id: string;
+  answers: Record<string, JsonValue>;
 }
 
 /** Selects a project for a read-only insight query. */
@@ -379,6 +424,23 @@ export interface DeviceRevokePayload {
 
 export interface DeviceRevokeResult {
   revoked: boolean;
+}
+
+// ---- push ----
+
+/** Register this device's push token with the desktop host. */
+export interface PushRegisterPayload {
+  token: string;
+  /** `android` | `ios`. */
+  platform: string;
+}
+
+export interface PushRegisterResult {
+  registered: boolean;
+}
+
+export interface PushUnregisterPayload {
+  token: string;
 }
 
 // ---- pairing ----

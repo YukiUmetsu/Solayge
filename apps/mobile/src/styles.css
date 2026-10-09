@@ -56,7 +56,127 @@ body {
 .app__content {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Scroll fallback for screens that are not wrapped in the pull-to-refresh
+     container (the desktop selector and the add-desktop wizard). The `.ptr`
+     child fills this box exactly and scrolls internally, so this never fights
+     the pull gesture. */
   overflow-y: auto;
+}
+
+/* ---- pull to refresh ---- */
+
+.ptr {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+.ptr__indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.ptr__icon {
+  display: inline-flex;
+  line-height: 0;
+}
+
+.ptr__icon svg {
+  display: block;
+  overflow: visible;
+}
+
+.ptr__track {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 2.5;
+  opacity: 0.55;
+}
+
+.ptr__ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.12s linear;
+}
+
+.ptr__arrow,
+.ptr__check {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 0.2s ease;
+}
+
+.ptr__icon--ready .ptr__arrow {
+  transform: rotate(180deg) translateY(-1px);
+}
+
+.ptr__icon--refreshing .ptr__ring--spin {
+  stroke-dasharray: 26 44;
+  animation: ptr-arc 1.4s ease-in-out infinite;
+}
+
+.ptr__icon--refreshing svg {
+  animation: ptr-spin 0.9s linear infinite;
+}
+
+.ptr__check {
+  stroke: #15803d;
+  animation: ptr-pop 0.25s ease-out;
+}
+
+@keyframes ptr-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ptr-arc {
+  0%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dashoffset: -44;
+  }
+}
+
+@keyframes ptr-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.ptr__content {
+  will-change: transform;
 }
 
 .screen {
@@ -1704,6 +1824,54 @@ body {
   font-size: 14px;
 }
 
+.question-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.question-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.question-field__label {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.question-field__required {
+  color: var(--danger);
+}
+
+.question-field__help {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.question-field__input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.question-field .radio-row {
+  min-height: 40px;
+  padding: 4px 0;
+}
+
 .decision-actions {
   display: flex;
   gap: 8px;
@@ -1718,6 +1886,155 @@ body {
 
 .decision-actions__approve {
   flex: 1;
+}
+
+/* ---- notification opt-in prompt ---- */
+
+.notify-prompt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 16px 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--progress-soft);
+  color: var(--text);
+}
+
+.notify-prompt__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.notify-prompt__text span {
+  color: var(--muted);
+}
+
+.notify-prompt__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@media (min-width: 720px) {
+  .notify-prompt {
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+/* ---- in-app notification toasts ---- */
+
+.toast-viewport {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 max(12px, env(safe-area-inset-right, 0px)) 0
+    max(12px, env(safe-area-inset-left, 0px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  pointer-events: auto;
+  animation: toast-in 0.22s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast__icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.toast--question .toast__icon {
+  background: var(--warning-soft);
+  color: #b45309;
+}
+
+.toast--completed .toast__icon {
+  background: var(--success-soft);
+  color: #15803d;
+}
+
+.toast--failed .toast__icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toast__title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.toast__text {
+  font-size: 13px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast__close {
+  flex: none;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (min-width: 720px) {
+  .toast-viewport {
+    max-width: 480px;
+    margin: 0 auto;
+  }
 }
 
 /* ---- selector ---- */

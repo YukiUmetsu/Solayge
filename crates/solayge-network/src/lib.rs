@@ -50,6 +50,8 @@ pub mod error;
 pub mod frame;
 pub mod iroh_adapter;
 pub mod manager;
+pub mod tailscale;
+pub mod websocket;
 
 pub use diagnostics::{ConnectionDiagnostics, EndpointType, PathKind, TransportDiagnostics};
 pub use error::{ErrorClass, NetworkError};
@@ -63,3 +65,8 @@ pub use manager::{
     Backoff, BackoffPolicy, BoxFuture, ConnectionManager, ConnectionState, Delay, Jitter,
     SyncReport, TokioDelay, Transport, TransportFactory,
 };
+pub use tailscale::{
+    CommandOutput, CommandRunner, ServeStatus, ServeStopOutcome, SystemCommandRunner, TailscaleCli,
+    TailscaleError, TailscaleStatus,
+};
+pub use websocket::{WsClientConfig, WsConnection, WsHost, WsHostConfig, WsRemoteClient, WsTransportFactory};

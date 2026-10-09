@@ -16,6 +16,7 @@ import type {
   EventsBatch,
   FilesChangedSummary,
   HostMetadata,
+  JsonValue,
   ProjectSummary,
   SessionDetail,
   SessionSummary,
@@ -57,6 +58,12 @@ export interface RemoteClient {
    */
   connect?(): Promise<void>;
 
+  /**
+   * Apply the user's transport preference (`automatic` | `iroh` | `tailscale`)
+   * to the next connection attempt. Optional; in-memory clients ignore it.
+   */
+  setTransportMode?(mode: TransportMode): void;
+
   /** Whether a transport is currently established. */
   isConnected(): boolean;
 
@@ -77,6 +84,26 @@ export interface RemoteClient {
   listApprovals(): Promise<ApprovalSummary[]>;
   getApproval(approvalId: string): Promise<ApprovalSummary>;
   respondApproval(approvalId: string, decision: ApprovalDecision): Promise<CommandReceipt>;
+
+  /**
+   * Answer an agent question with provider-shaped field values. This is the
+   * message channel, never an authorization: the host routes it to the agent's
+   * form reply, not to a permission decision.
+   */
+  answerApproval(
+    sessionId: string,
+    approvalId: string,
+    answers: Record<string, JsonValue>,
+  ): Promise<CommandReceipt>;
+
+  /**
+   * Register this device's push token with the desktop so background alerts can
+   * be delivered over FCM. Idempotent: re-registering the same token is safe.
+   */
+  registerPush(token: string, platform: string): Promise<void>;
+
+  /** Forget a previously registered push token (e.g. when removing a desktop). */
+  unregisterPush(token: string): Promise<void>;
 
   filesChangedSummary(sessionId: string): Promise<FilesChangedSummary>;
 

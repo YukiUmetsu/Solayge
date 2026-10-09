@@ -14,6 +14,15 @@ mod host_runtime;
 mod host;
 #[cfg(feature = "mobile-network")]
 mod iroh_host;
+// Remote-access lifecycle (WebSocket listener + Tailscale Serve). The real
+// implementation needs the network transport; the stub keeps the command
+// surface compiling when `mobile-network` is disabled.
+#[cfg(feature = "mobile-network")]
+#[path = "remote.rs"]
+mod remote;
+#[cfg(not(feature = "mobile-network"))]
+#[path = "remote_stub.rs"]
+mod remote;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 // Objective-C interop for UNUserNotificationCenter; everything else stays safe Rust.
@@ -22,6 +31,7 @@ mod models;
 mod opencode;
 mod opencode_server;
 mod permissions;
+mod push;
 mod scheduler;
 mod secrets;
 mod state;
@@ -80,7 +90,11 @@ pub fn run() {
             macos_notify::init();
             scheduler::spawn_scheduler(app.handle().clone());
             #[cfg(feature = "mobile-network")]
-            iroh_host::maybe_spawn(app.handle().clone());
+            {
+                app.manage(remote::RemoteConnectionManager::new(&data_dir));
+                remote::restore_on_startup(app.handle().clone());
+                iroh_host::maybe_spawn(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -128,6 +142,8 @@ pub fn run() {
             commands::update_settings,
             commands::read_sound_file,
             commands::test_notification,
+            // TEMPORARY (remove before release): on-demand background push test.
+            commands::push_test_question,
             commands::notification_status,
             commands::open_notification_settings,
             commands::get_prompt_history,
@@ -162,13 +178,18 @@ pub fn run() {
             devices::pairing_approve,
             devices::pairing_reject,
             devices::device_revoke,
+            remote::remote_status,
+            remote::remote_apply,
+            remote::remote_retry,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 // Don't leave the opencode server running after the app quits,
-                // and flush any analytics still in memory.
+                // remove Solayge's Tailscale Serve entry, and flush any
+                // analytics still in memory.
+                remote::shutdown(app);
                 opencode_server::shutdown();
                 analytics::flush(app);
             }

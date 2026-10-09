@@ -23,6 +23,10 @@ and never runs coding agents itself.
     work; it is never the default host.
   - `ClientContext.tsx` — connection state, cached last-known data, transport
     preference, and the offline/read-only projection.
+  - `notifications.ts` / `NotificationCenter.tsx` — notification preferences,
+    event detection, in-app toasts, and FCM token registration.
+  - `push.ts` — reads the FCM token and notification taps the Android service
+    writes, through Tauri commands.
 - `src/pairing.ts` — the identity/pairing command bindings (including the real
   `pair_with_qr` / `pair_poll` handshake over the transport).
 - `src/AddDesktopFlow.tsx` — the step-by-step pairing wizard.
@@ -39,10 +43,24 @@ and never runs coding agents itself.
 The mobile app speaks the real Iroh transport against the desktop host: it pairs
 with a QR code (or a pasted pairing link), compares the six-digit verification
 code, waits for desktop approval, authenticates with a signed challenge, and
-then reads the desktop's projects, tasks, and pending questions. Remote prompt
-sends and approval responses are the next phase; those actions are reported as
-unsupported rather than silently accepted. See `docs/MOBILE_FEATURES.md`
-sections 7 and 9.
+then reads the desktop's projects, tasks, and pending questions, sends prompts,
+answers agent questions, responds to approvals, and cancels supported tasks. See
+`docs/MOBILE_FEATURES.md` sections 7 and 9.
+
+## Notifications
+
+The app supports two notification paths. **Local** notifications (Rust monitor +
+in-app toasts) fire while the app is running. **Background** notifications use
+Firebase Cloud Messaging so they arrive when Android has suspended or killed the
+app. FCM payloads contain only opaque identifiers; the real content is read over
+Iroh/Tailscale after the app reconnects. A minimal authenticated gateway
+(`crates/solayge-push-gateway`) holds the only copy of the Firebase
+service-account key. See `docs/PUSH_NOTIFICATIONS.md` for the architecture,
+security model, setup, and the manual Pixel 8a test plan.
+
+The Android build applies the `google-services` plugin only when
+`apps/mobile/src-tauri/gen/android/app/google-services.json` exists, so the app
+still builds without a Firebase project (just without background push).
 
 ## Commands
 

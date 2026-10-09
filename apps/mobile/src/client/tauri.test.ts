@@ -22,8 +22,24 @@ describe("TauriRemoteClient", () => {
 
     await client.connect();
 
-    expect(invokeMock).toHaveBeenCalledWith("connect_desktop", { desktopId: "did_desk" });
+    expect(invokeMock).toHaveBeenCalledWith("connect_desktop", {
+      desktopId: "did_desk",
+      mode: "automatic",
+    });
     expect(client.isConnected()).toBe(true);
+  });
+
+  it("passes the selected transport mode to the next connection", async () => {
+    invokeMock.mockResolvedValue({ connected: true, authenticated: true });
+    const client = new TauriRemoteClient("did_desk");
+
+    client.setTransportMode("tailscale");
+    await client.connect();
+
+    expect(invokeMock).toHaveBeenCalledWith("connect_desktop", {
+      desktopId: "did_desk",
+      mode: "tailscale",
+    });
   });
 
   it("maps a read onto its protocol action and unwraps the response", async () => {

@@ -54,6 +54,7 @@ describe("approval filtering", () => {
     read_only: partial.read_only ?? true,
     requested_at: partial.requested_at ?? 0,
     expires_at: partial.expires_at ?? null,
+    fields: partial.fields ?? [],
   });
 
   it("separates permission decisions from questions", () => {

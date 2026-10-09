@@ -196,6 +196,52 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+/// The widget type for one agent-question field, mirroring the host's
+/// `AskFieldKind`. A remote client renders it without knowing the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalFieldKind {
+    String,
+    Number,
+    Integer,
+    Boolean,
+    Multiselect,
+    /// Answered outside the form (for example, an OAuth URL the agent hands over).
+    External,
+}
+
+/// One selectable answer for a question field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalFieldOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One field of an agent question. For a permission request the list is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalField {
+    /// The provider's key for this field; the answer payload echoes it back.
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub kind: ApprovalFieldKind,
+    #[serde(default)]
+    pub required: bool,
+    /// Whether the user may answer with something other than `options`.
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default)]
+    pub options: Vec<ApprovalFieldOption>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    /// For an `external` field: where the user completes it.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalSummary {
     pub id: String,
@@ -212,6 +258,9 @@ pub struct ApprovalSummary {
     pub requested_at: i64,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// The structured content of an agent question. Empty for permissions.
+    #[serde(default)]
+    pub fields: Vec<ApprovalField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +277,14 @@ pub struct ApprovalQuery {
 pub struct ApprovalResponsePayload {
     pub approval_id: String,
     pub decision: ApprovalDecision,
+}
+
+/// Answers to an agent question, keyed by field. The values are exactly what the
+/// provider's form expects, so the host can forward them without reinterpretation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerPayload {
+    pub approval_id: String,
+    pub answers: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Selects a project for a read-only insight query.
@@ -320,6 +377,28 @@ pub struct DeviceRevokePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRevokeResult {
     pub revoked: bool,
+}
+
+// ---- push ----
+
+/// Register a device's push token with the desktop host. The token is opaque to
+/// the host; it is forwarded to the push gateway as an addressing hint only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRegisterPayload {
+    pub token: String,
+    /// `android` | `ios`.
+    pub platform: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRegisterResult {
+    pub registered: bool,
+}
+
+/// Remove a previously registered push token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushUnregisterPayload {
+    pub token: String,
 }
 
 // ---- pairing (bootstrap metadata only; no reusable secrets) ----

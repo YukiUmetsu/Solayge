@@ -210,6 +210,17 @@ export function ClientProvider({
     if (transportModeProp !== undefined) setTransportModeState(transportModeProp);
   }, [transportModeProp]);
 
+  // Push the user's transport preference to the client and reconnect when it
+  // actually changes, so Iroh-only / Tailscale-only take effect immediately.
+  const modeRef = useRef(transportMode);
+  useEffect(() => {
+    client.setTransportMode?.(transportMode);
+    if (modeRef.current !== transportMode) {
+      modeRef.current = transportMode;
+      void refresh();
+    }
+  }, [client, transportMode, refresh]);
+
   const setTransportMode = useCallback(
     (mode: TransportMode) => {
       setTransportModeState(mode);

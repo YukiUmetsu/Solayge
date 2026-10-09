@@ -12,6 +12,7 @@ members = [
     "crates/solayge-protocol",
     "crates/solayge-identity",
     "crates/solayge-network",
+    "crates/solayge-push-gateway",
     "apps/mobile/src-tauri",
 ]
 exclude = ["src-tauri"]
@@ -29,3 +30,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", 
 # discovery and relays explicitly; it never writes its own crypto or NAT
 # traversal. `tls-ring` is the default crypto provider (no aws-lc C toolchain).
 iroh = "1.3.0"
+# WebSocket transport for the Tailscale-served host listener and the mobile
+# fallback client. TLS uses rustls with the ring provider (already in the tree
+# via iroh), so no extra C toolchain is required. Web PKI roots are used to
+# verify the Tailscale HTTPS certificate; the Solayge peer identity is verified
+# at the application layer.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

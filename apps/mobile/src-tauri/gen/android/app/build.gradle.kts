@@ -75,9 +75,20 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
+    // Background push delivery. The BOM keeps the Firebase artifacts aligned.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+}
+
+// The google-services plugin needs google-services.json, which contains the
+// project's public Firebase config. It is intentionally not committed; add it
+// from your Firebase project and the plugin is applied automatically. Without
+// it the app still builds and runs, just without FCM.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 apply(from = file("tauri.build.gradle.kts"))

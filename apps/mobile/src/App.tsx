@@ -2,13 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AddDesktopFlow } from "./AddDesktopFlow";
 import { ClientProvider, useClientContext } from "./client/ClientContext";
+import { NotificationProvider } from "./client/NotificationCenter";
 import { createLocalStorageCache } from "./client/cache";
 import { MockRemoteClient } from "./client/mock";
 import type { PairedDesktop, RemoteClient, TransportMode } from "./client/remote";
 import { TauriRemoteClient } from "./client/tauri";
 import { AppHeader } from "./components/AppHeader";
 import { HostSwitcher } from "./components/HostSwitcher";
+import { NotificationPrompt } from "./components/NotificationPrompt";
 import { OfflineBanner } from "./components/OfflineBanner";
+import { PullToRefresh } from "./components/PullToRefresh";
 import { isRootRoute, routeTab, type Route } from "./navigation";
 import { pairingApi, type PairedDesktopRecord } from "./pairing";
 import { ApprovalDetail } from "./screens/ApprovalDetail";
@@ -111,18 +114,20 @@ export default function App({
       refreshIntervalMs={30_000}
       cache={cache}
     >
-      {showAddDesktop ? (
-        <div className="app">
-          <main className="app__content">
-            <AddDesktopFlow
-              onClose={() => setShowAddDesktop(false)}
-              onPaired={handlePaired}
-            />
-          </main>
-        </div>
-      ) : (
-        <AppShell route={route} setRoute={setRoute} onAddDesktop={addDesktop} onShowAddDesktop={addDesktop} />
-      )}
+      <NotificationProvider>
+        {showAddDesktop ? (
+          <div className="app">
+            <main className="app__content">
+              <AddDesktopFlow
+                onClose={() => setShowAddDesktop(false)}
+                onPaired={handlePaired}
+              />
+            </main>
+          </div>
+        ) : (
+          <AppShell route={route} setRoute={setRoute} onAddDesktop={addDesktop} onShowAddDesktop={addDesktop} />
+        )}
+      </NotificationProvider>
     </ClientProvider>
   );
 }
@@ -138,7 +143,8 @@ function AppShell({
   onAddDesktop: () => void;
   onShowAddDesktop: () => void;
 }) {
-  const { client, data, desktops, refresh } = useClientContext();
+  const { client, data, desktops, desktopId, selectDesktop, refresh, status } =
+    useClientContext();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [simulateOffline, setSimulateOffline] = useState(false);
   const [, setHistory] = useState<Route[]>([]);
@@ -150,6 +156,22 @@ function AppShell({
     },
     [route, setRoute],
   );
+
+  // A push notification tap opens the session or approval it names, switching
+  // desktop first when the alert came from a different one.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const tap = (event as CustomEvent).detail as
+        | { desktop_id?: string; session_id?: string; approval_id?: string }
+        | undefined;
+      if (!tap) return;
+      if (tap.desktop_id && tap.desktop_id !== desktopId) selectDesktop(tap.desktop_id);
+      if (tap.approval_id) navigate({ name: "approval", approvalId: tap.approval_id });
+      else if (tap.session_id) navigate({ name: "session", sessionId: tap.session_id });
+    };
+    window.addEventListener("solayge:open", handler);
+    return () => window.removeEventListener("solayge:open", handler);
+  }, [navigate, desktopId, selectDesktop]);
 
   const goToTab = useCallback(
     (tab: TabId) => {
@@ -180,6 +202,14 @@ function AppShell({
     },
     [client, refresh],
   );
+
+  // A pull-to-refresh reloads the global snapshot and tells the active screen
+  // to reload its own detail (a session's events, a project's changed files),
+  // which the global refresh does not cover.
+  const refreshAll = useCallback(async () => {
+    await refresh();
+    window.dispatchEvent(new CustomEvent("solayge:refresh"));
+  }, [refresh]);
 
   const title = useMemo(() => {
     switch (route.name) {
@@ -259,8 +289,11 @@ function AppShell({
           onOpenSwitcher={() => setSwitcherOpen(true)}
         />
         <main className="app__content">
-          <OfflineBanner />
-          <div className="screen__body app__screen">{renderRoute()}</div>
+          <PullToRefresh onRefresh={refreshAll} disabled={status === "revoked"}>
+            <NotificationPrompt />
+            <OfflineBanner />
+            <div className="screen__body app__screen">{renderRoute()}</div>
+          </PullToRefresh>
         </main>
         <nav className="tabbar" role="tablist" aria-label="Primary">
           {TABS.map((tab) => {

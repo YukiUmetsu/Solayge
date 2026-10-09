@@ -55,6 +55,44 @@ pub fn emit_state(app: &AppHandle) {
 /// configured sound and shows an in-app toast. A `show` failure is recorded in
 /// the error log instead of being swallowed.
 pub(crate) fn notify(app: &AppHandle, kind: NotifyKind, title: &str, body: &str) {
+    notify_for(app, kind, title, body, None);
+}
+
+/// Like [`notify`], but also carries the session the alert is about so the
+/// background push can deep-link the phone straight to it.
+pub(crate) fn notify_for(
+    app: &AppHandle,
+    kind: NotifyKind,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+) {
+    notify_with_push(app, kind, title, body, session_id, crate::push::push_kind(kind));
+}
+
+/// Notify about an agent ask, choosing the push kind from whether it is a
+/// question or a permission. `NotifyKind::NeedsAttention` covers both, so the
+/// kind has to be supplied explicitly for the phone's notification to be
+/// labelled correctly.
+pub(crate) fn notify_ask(
+    app: &AppHandle,
+    ask_kind: crate::models::AskKind,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+) {
+    let push_kind = Some(crate::push::ask_push_kind(ask_kind));
+    notify_with_push(app, NotifyKind::NeedsAttention, title, body, session_id, push_kind);
+}
+
+fn notify_with_push(
+    app: &AppHandle,
+    kind: NotifyKind,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+    push_kind: Option<&'static str>,
+) {
     let allowed = {
         let st = app.state::<AppState>();
         let inner = crate::state::lock(&st.inner);
@@ -78,6 +116,11 @@ pub(crate) fn notify(app: &AppHandle, kind: NotifyKind, title: &str, body: &str)
             body: body.to_string(),
         },
     );
+    // Best-effort background delivery: a push failure never blocks the tick, and
+    // the phone reconciles on its next reconnect regardless.
+    if let Some(push_kind) = push_kind {
+        crate::push::dispatch_kind(app, push_kind, session_id);
+    }
 }
 
 /// Deliver the OS notification.
@@ -181,11 +224,12 @@ fn finish_interrupted(app: &AppHandle, id: &str, reason: &str) {
     log_note(app, id, &format!("Interrupted: {reason}"));
     st.save();
     emit_state(app);
-    notify(
+    notify_for(
         app,
         NotifyKind::NeedsAttention,
         "Solayge needs you",
         &format!("{title} was interrupted"),
+        Some(id),
     );
 }
 
@@ -502,25 +546,28 @@ async fn finalize(app: &AppHandle, id: &str, code: Option<i32>) {
 
     if let Some((title, ok)) = outcome {
         if entered_review {
-            notify(
+            notify_for(
                 app,
                 NotifyKind::TaskReview,
                 "Solayge review",
                 &format!("{title} — in review"),
+                Some(id),
             );
         } else if ok {
-            notify(
+            notify_for(
                 app,
                 NotifyKind::TaskComplete,
                 "Solayge",
                 &format!("{title} — finished"),
+                Some(id),
             );
         } else {
-            notify(
+            notify_for(
                 app,
                 NotifyKind::TaskFailed,
                 "Solayge",
                 &format!("{title} — failed"),
+                Some(id),
             );
         }
     }
@@ -792,11 +839,12 @@ fn fail_task(app: &AppHandle, id: &str, msg: String) {
     st.save();
     emit_state(app);
     if let Some(title) = title {
-        notify(
+        notify_for(
             app,
             NotifyKind::TaskFailed,
             "Solayge",
             &format!("{title} — failed"),
+            Some(id),
         );
     }
 }
@@ -1903,6 +1951,7 @@ fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
         }
     }
     let title = ask.title.clone();
+    let ask_kind = ask.kind;
     // The log lines are derived before the ask is moved onto the task.
     let lines = ask_log_lines(&ask);
     // Keep a copy for the interaction record; analytics must not run while the
@@ -1941,7 +1990,7 @@ fn set_task_ask(app: &AppHandle, id: &str, mut ask: crate::models::TaskAsk) {
         Some(d) => format!("{task_title}: {title} — {d}"),
         None => format!("{task_title}: {title}"),
     };
-    notify(app, NotifyKind::NeedsAttention, "Solayge needs you", &body);
+    notify_ask(app, ask_kind, "Solayge needs you", &body, Some(id));
 }
 
 fn clear_task_ask(app: &AppHandle, id: &str) {
@@ -2669,11 +2718,12 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
     emit_state(app);
     if let Some(title) = title {
         if entered_review {
-            notify(
+            notify_for(
                 app,
                 NotifyKind::TaskReview,
                 "Solayge review",
                 &format!("{title} — in review"),
+                Some(id),
             );
         } else {
             let body = format!("{title} — {}", if ok { "finished" } else { "failed" });
@@ -2682,7 +2732,7 @@ fn finish_managed(app: &AppHandle, id: &str, ok: bool, error: Option<String>) {
             } else {
                 NotifyKind::TaskFailed
             };
-            notify(app, kind, "Solayge", &body);
+            notify_for(app, kind, "Solayge", &body, Some(id));
         }
     }
 }
@@ -2708,11 +2758,12 @@ fn finish_blocked(app: &AppHandle, id: &str, reason: String) {
     st.save();
     emit_state(app);
     if let Some(title) = title {
-        notify(
+        notify_for(
             app,
             NotifyKind::NeedsAttention,
             "Solayge needs you",
             &format!("{title} is waiting for you"),
+            Some(id),
         );
     }
 }
@@ -2967,11 +3018,12 @@ fn finish_review_failed(app: &AppHandle, id: &str, msg: String) {
     // Stay quiet while a retry is pending; only tell the user once it stops.
     if let Some(title) = title {
         if !retried {
-            notify(
+            notify_for(
                 app,
                 NotifyKind::TaskFailed,
                 "Solayge",
                 &format!("{title} — review could not run"),
+                Some(id),
             );
         }
     }
@@ -3139,7 +3191,7 @@ async fn finish_review(app: &AppHandle, id: &str, code: Option<i32>) {
                 _ => format!("{title} — review done"),
             }
         };
-        notify(app, NotifyKind::TaskReview, "Solayge review", &body);
+        notify_for(app, NotifyKind::TaskReview, "Solayge review", &body, Some(id));
     }
 }
 
@@ -3219,11 +3271,12 @@ where
                     }
                 }
                 emit_state(&app);
-                notify(
+                notify_for(
                     &app,
                     NotifyKind::NeedsAttention,
                     "Permission requested",
                     &line,
+                    Some(id.as_str()),
                 );
             }
             let _ = app.emit(

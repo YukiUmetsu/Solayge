@@ -99,6 +99,9 @@ importers:
       '@tauri-apps/plugin-barcode-scanner':
         specifier: ^2.5.1
         version: 2.5.1
+      '@tauri-apps/plugin-notification':
+        specifier: ^2.5.0
+        version: 2.5.0
       react:
         specifier: ^19.1.0
         version: 19.3.0

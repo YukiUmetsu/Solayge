@@ -115,6 +115,7 @@ describe("applyRetention", () => {
           read_only: false,
           requested_at: 0,
           expires_at: null,
+          fields: [],
         },
       ],
     };

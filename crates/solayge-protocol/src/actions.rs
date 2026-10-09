@@ -30,6 +30,7 @@ pub enum Action {
     SessionsGetCommandStatus,
     SessionsCancel,
     SessionsStart,
+    SessionsAnswer,
     // --- approvals ---
     ApprovalsList,
     ApprovalsGet,
@@ -43,12 +44,15 @@ pub enum Action {
     // --- devices ---
     DevicesList,
     DevicesRevoke,
+    // --- push ---
+    PushRegister,
+    PushUnregister,
 }
 
 impl Action {
     /// Every action in this protocol version. Keep in sync with the `match` in
     /// [`Action::as_str`]; a test asserts the two agree.
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 27] = [
         Action::PairBegin,
         Action::PairProveIdentity,
         Action::PairApprove,
@@ -67,12 +71,15 @@ impl Action {
         Action::ApprovalsList,
         Action::ApprovalsGet,
         Action::ApprovalsRespond,
+        Action::SessionsAnswer,
         Action::FilesChangedSummary,
         Action::InsightsSummary,
         Action::InsightsErrors,
         Action::InsightsAgentQuestions,
         Action::DevicesList,
         Action::DevicesRevoke,
+        Action::PushRegister,
+        Action::PushUnregister,
     ];
 
     /// The dotted wire string.
@@ -93,6 +100,7 @@ impl Action {
             Action::SessionsGetCommandStatus => "sessions.get_command_status",
             Action::SessionsCancel => "sessions.cancel",
             Action::SessionsStart => "sessions.start",
+            Action::SessionsAnswer => "sessions.answer",
             Action::ApprovalsList => "approvals.list",
             Action::ApprovalsGet => "approvals.get",
             Action::ApprovalsRespond => "approvals.respond",
@@ -102,6 +110,8 @@ impl Action {
             Action::InsightsAgentQuestions => "insights.agent_questions",
             Action::DevicesList => "devices.list",
             Action::DevicesRevoke => "devices.revoke",
+            Action::PushRegister => "push.register",
+            Action::PushUnregister => "push.unregister",
         }
     }
 
@@ -120,8 +130,11 @@ impl Action {
                 | Action::SessionsSendPrompt
                 | Action::SessionsCancel
                 | Action::SessionsStart
+                | Action::SessionsAnswer
                 | Action::ApprovalsRespond
                 | Action::DevicesRevoke
+                | Action::PushRegister
+                | Action::PushUnregister
         )
     }
 
@@ -134,6 +147,7 @@ impl Action {
                 | Action::SessionsSendPrompt
                 | Action::SessionsCancel
                 | Action::SessionsStart
+                | Action::SessionsAnswer
                 | Action::FilesChangedSummary
         )
     }
@@ -192,7 +206,7 @@ mod tests {
 
     #[test]
     fn every_action_round_trips_through_its_wire_string() {
-        assert_eq!(Action::ALL.len(), 24);
+        assert_eq!(Action::ALL.len(), 27);
         for action in Action::ALL {
             assert_eq!(Action::parse(action.as_str()), Some(action));
         }

@@ -9,12 +9,13 @@
 //! Everything here is non-cryptographic glue over `solayge-identity`; no key
 //! material is invented or duplicated.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use solayge_identity::{
@@ -26,6 +27,17 @@ use solayge_identity::{
 const APP_ID: &str = "com.solayge.desktop";
 /// Where the approved-device registry is persisted.
 const REGISTRY_FILE: &str = "connected-devices.json";
+/// Where each device's push token is persisted, keyed by device id.
+const PUSH_TOKENS_FILE: &str = "push-tokens.json";
+
+/// One device's push registration. The token is an opaque FCM address; it is
+/// only ever forwarded to the push gateway, never shown or logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushToken {
+    pub token: String,
+    pub platform: String,
+    pub updated_at: i64,
+}
 
 /// The desktop-side device manager, managed by Tauri.
 ///
@@ -42,6 +54,8 @@ pub struct DeviceManager {
     /// Serializes first-use identity creation so two callers cannot each mint a
     /// different identity (and clobber the other's persisted key).
     init: Mutex<()>,
+    /// Push tokens by device id, for background FCM delivery.
+    push_tokens: Mutex<HashMap<String, PushToken>>,
 }
 
 impl DeviceManager {
@@ -51,11 +65,13 @@ impl DeviceManager {
         let data_dir = data_dir.to_path_buf();
         std::fs::create_dir_all(&data_dir).context("creating the app data directory")?;
         let registry = Arc::new(DeviceRegistry::from_snapshot(read_registry(&data_dir)));
+        let push_tokens = read_push_tokens(&data_dir);
         Ok(DeviceManager {
             data_dir,
             registry,
             server: OnceLock::new(),
             init: Mutex::new(()),
+            push_tokens: Mutex::new(push_tokens),
         })
     }
 
@@ -110,6 +126,61 @@ impl DeviceManager {
 
     fn persist(&self) -> Result<()> {
         write_registry(&self.data_dir, &self.registry.snapshot())
+    }
+
+    fn persist_push_tokens(&self) -> Result<()> {
+        let snapshot = self
+            .push_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        write_push_tokens(&self.data_dir, &snapshot)
+    }
+
+    /// Record a device's push token. Only called for an authenticated device.
+    pub fn set_push_token(&self, device_id: &str, token: String, platform: String) -> Result<()> {
+        {
+            let mut guard = self.push_tokens.lock().unwrap_or_else(|p| p.into_inner());
+            guard.insert(
+                device_id.to_string(),
+                PushToken {
+                    token,
+                    platform,
+                    updated_at: now(),
+                },
+            );
+        }
+        self.persist_push_tokens()
+    }
+
+    /// Forget a device's push token, e.g. on explicit unregister or revocation.
+    pub fn clear_push_token(&self, device_id: &str) -> Result<()> {
+        {
+            let mut guard = self.push_tokens.lock().unwrap_or_else(|p| p.into_inner());
+            guard.remove(device_id);
+        }
+        self.persist_push_tokens()
+    }
+
+    /// The token registered for one device, if any.
+    #[allow(dead_code)] // read by tests and future push diagnostics
+    pub fn push_token(&self, device_id: &str) -> Option<PushToken> {
+        self.push_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device_id)
+            .cloned()
+    }
+
+    /// Every push token whose device is still authorized. A revoked device is
+    /// excluded even if its token lingers.
+    pub fn push_targets(&self) -> Vec<(String, PushToken)> {
+        let guard = self.push_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .iter()
+            .filter(|(device_id, _)| self.registry.is_authorized(device_id))
+            .map(|(device_id, token)| (device_id.clone(), token.clone()))
+            .collect()
     }
 
     fn desktop_public(&self) -> Result<PublicIdentity> {
@@ -225,6 +296,24 @@ fn registry_path(data_dir: &Path) -> PathBuf {
     data_dir.join(REGISTRY_FILE)
 }
 
+fn push_tokens_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PUSH_TOKENS_FILE)
+}
+
+fn read_push_tokens(data_dir: &Path) -> HashMap<String, PushToken> {
+    std::fs::read_to_string(push_tokens_path(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_push_tokens(data_dir: &Path, tokens: &HashMap<String, PushToken>) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let bytes = serde_json::to_vec_pretty(tokens)?;
+    write_private(&push_tokens_path(data_dir), &bytes)?;
+    Ok(())
+}
+
 fn read_registry(data_dir: &Path) -> solayge_identity::registry::RegistrySnapshot {
     std::fs::read_to_string(registry_path(data_dir))
         .ok()
@@ -318,6 +407,9 @@ pub async fn pairing_start(
     // approve-on-desktop and both sides' identity proofs.
     let hints = solayge_identity::ReachabilityHints {
         iroh_endpoint_id: crate::host_runtime::endpoint_id(),
+        // Advertised only when the Tailscale backup is configured and running,
+        // so a phone never tries an endpoint that does not exist.
+        tailscale_host: crate::host_runtime::tailscale_authority(),
         ..Default::default()
     };
     let reachable = hints.iroh_endpoint_id.is_some();
@@ -395,6 +487,10 @@ pub fn pairing_reject(manager: State<'_, DeviceManager>, pairing_id: String) -> 
 pub fn device_revoke(manager: State<'_, DeviceManager>, device_id: String) -> Result<(), String> {
     manager.registry.revoke(&device_id);
     manager.persist().map_err(|e| e.to_string())?;
+    // A revoked device must not keep receiving background pushes.
+    manager
+        .clear_push_token(&device_id)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -478,6 +574,27 @@ mod tests {
         let again = DeviceManager::with_store(&dir, &store()).unwrap();
         assert!(!again.registry().is_authorized(&id));
         assert!(again.registry().is_revoked(&id));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_tokens_persist_and_unknown_devices_are_not_targets() {
+        let dir = temp_dir();
+        let store = || solayge_identity::FileStore::new(&dir, "test-identity");
+        let manager = DeviceManager::with_store(&dir, &store()).unwrap();
+        manager
+            .set_push_token("dev_x", "token-1".into(), "android".into())
+            .unwrap();
+        assert_eq!(manager.push_token("dev_x").unwrap().token, "token-1");
+        // A device that is not authorized is never a push target.
+        assert!(manager.push_targets().is_empty());
+        drop(manager);
+
+        let restarted = DeviceManager::with_store(&dir, &store()).unwrap();
+        assert_eq!(restarted.push_token("dev_x").unwrap().token, "token-1");
+        restarted.clear_push_token("dev_x").unwrap();
+        assert!(restarted.push_token("dev_x").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

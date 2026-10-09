@@ -979,7 +979,7 @@ fn restore_task_state(
 
 /// Ask any live child process for this task to terminate. Cancel and delete both
 /// use it so a stopped task never keeps running in the background.
-fn kill_task_children(st: &AppState, task_id: &str) {
+pub(crate) fn kill_task_children(st: &AppState, task_id: &str) {
     for map in [&st.running, &st.reviewing, &st.merging] {
         let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = guard.get_mut(task_id) {
@@ -1090,7 +1090,7 @@ pub fn start_task_now(app: AppHandle, task_id: String) -> Result<Snapshot, Strin
 /// Mark a non-terminal task cancelled, forgetting any pending ask: the run is
 /// being torn down, so the question it was waiting on can no longer be answered.
 /// Returns whether the task changed. Pure, so the rule can be unit-tested.
-fn cancel_task_state(t: &mut Task) -> bool {
+pub(crate) fn cancel_task_state(t: &mut Task) -> bool {
     if t.status.is_terminal() {
         return false;
     }
@@ -1155,11 +1155,12 @@ pub fn retry_review(
     };
     st.save();
     emit_state(&app);
-    crate::scheduler::notify(
+    crate::scheduler::notify_for(
         &app,
         NotifyKind::TaskReview,
         "Solayge review",
         &format!("{title} — in review"),
+        Some(task_id.as_str()),
     );
     Ok(crate::state::snapshot(&app))
 }
@@ -1612,6 +1613,22 @@ pub fn test_notification(app: AppHandle) -> Result<(), String> {
         "This is a test notification.",
     );
     Ok(())
+}
+
+/// TEMPORARY (remove before release): fire a synthetic `question` background
+/// push at every paired phone so the FCM delivery + deep-link path can be
+/// tested on demand. `session_id` is optional; when given, tapping the
+/// notification opens that session.
+#[tauri::command]
+pub async fn push_test_question(
+    app: AppHandle,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::push::dispatch_test_question(&app, session_id)
+    })
+    .await
+    .map_err(|error| format!("test push task failed: {error}"))?
 }
 
 /// Whether the OS currently allows Solayge to show desktop notifications.

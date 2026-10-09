@@ -24,7 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 # Local HTTP client for the opencode v2 server API (interactive questions and
 # permission prompts). Plain HTTP to 127.0.0.1, so no TLS backend is needed.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 # Local wall-clock timestamps in task logs (already in the dependency tree).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Encrypted-at-rest storage for per-project environment variables.

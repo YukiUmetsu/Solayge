@@ -612,11 +612,11 @@ impl super::manager::TransportFactory for IrohTransportFactory {
     }
 }
 
-fn typed<T: Serialize>(value: &T) -> Result<serde_json::Value, NetworkError> {
+pub(crate) fn typed<T: Serialize>(value: &T) -> Result<serde_json::Value, NetworkError> {
     serde_json::to_value(value).map_err(|e| NetworkError::internal(e.to_string()))
 }
 
-fn parse_response<T: DeserializeOwned>(response: Envelope) -> Result<T, NetworkError> {
+pub(crate) fn parse_response<T: DeserializeOwned>(response: Envelope) -> Result<T, NetworkError> {
     if response.kind == MessageKind::Error {
         let wire: WireError = response.payload_as().map_err(NetworkError::Protocol)?;
         if wire.code == ErrorCode::NotAuthorized.as_str() {

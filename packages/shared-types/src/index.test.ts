@@ -77,9 +77,22 @@ const EXPECTED_KEYS: Record<string, string[]> = {
     "read_only",
     "requested_at",
     "expires_at",
+    "fields",
+  ],
+  approval_field: [
+    "key",
+    "label",
+    "description",
+    "kind",
+    "required",
+    "custom",
+    "options",
+    "placeholder",
+    "url",
   ],
   approval_query: ["approval_id"],
   approval_response_payload: ["approval_id", "decision"],
+  answer_payload: ["approval_id", "answers"],
   project_query: ["project_id"],
   changed_file_summary: ["path", "status", "additions", "deletions"],
   files_changed_summary: ["project_id", "session_id", "total", "files"],
@@ -98,6 +111,9 @@ const EXPECTED_KEYS: Record<string, string[]> = {
   devices_response: ["devices"],
   device_revoke_payload: ["device_id"],
   device_revoke_result: ["revoked"],
+  push_register_payload: ["token", "platform"],
+  push_register_result: ["registered"],
+  push_unregister_payload: ["token"],
   pair_begin_payload: ["pairing_id", "desktop_id", "verification_code", "expires_at"],
   pair_identity_proof: ["pairing_id", "device_id", "proof"],
   pair_decision_payload: ["pairing_id", "device_id"],
@@ -125,7 +141,7 @@ describe("shared protocol fixture", () => {
   });
 
   it("keeps the full action namespace covered", () => {
-    expect(ACTION_NAMES).toHaveLength(24);
+    expect(ACTION_NAMES).toHaveLength(27);
     expect(new Set(ACTION_NAMES).size).toBe(ACTION_NAMES.length);
   });
 

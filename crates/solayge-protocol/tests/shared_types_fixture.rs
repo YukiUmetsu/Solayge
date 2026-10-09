@@ -27,8 +27,10 @@ struct Sample {
     command_status: CommandStatusPayload,
     wire_error: WireError,
     approval_summary: ApprovalSummary,
+    approval_field: ApprovalField,
     approval_query: ApprovalQuery,
     approval_response_payload: ApprovalResponsePayload,
+    answer_payload: AnswerPayload,
     project_query: ProjectQuery,
     changed_file_summary: ChangedFileSummary,
     files_changed_summary: FilesChangedSummary,
@@ -41,6 +43,9 @@ struct Sample {
     devices_response: DevicesResponse,
     device_revoke_payload: DeviceRevokePayload,
     device_revoke_result: DeviceRevokeResult,
+    push_register_payload: PushRegisterPayload,
+    push_register_result: PushRegisterResult,
+    push_unregister_payload: PushUnregisterPayload,
     pair_begin_payload: PairBeginPayload,
     pair_identity_proof: PairIdentityProof,
     pair_decision_payload: PairDecisionPayload,
@@ -60,6 +65,17 @@ fn the_shared_fixture_matches_the_rust_dtos_exactly() {
     assert_eq!(sample.command_receipt.status, CommandStatus::Running);
     assert_eq!(sample.command_status.status, CommandStatus::Succeeded);
     assert_eq!(sample.approval_summary.kind, ApprovalKind::Permission);
+    assert!(sample.approval_summary.fields.is_empty());
+    assert_eq!(sample.approval_field.kind, ApprovalFieldKind::String);
+    assert_eq!(sample.approval_field.options.len(), 2);
+    assert_eq!(
+        sample
+            .answer_payload
+            .answers
+            .get("color")
+            .and_then(|v| v.as_str()),
+        Some("blue")
+    );
     assert_eq!(
         sample.approval_response_payload.decision,
         ApprovalDecision::ApproveOnce

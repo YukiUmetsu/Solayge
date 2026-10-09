@@ -34,6 +34,8 @@ import type {
   DesktopIdentity,
   PairingOffer,
   PairingStatus,
+  RemoteAccessPreferences,
+  RemoteStatus,
 } from "./types";
 
 export const api = {
@@ -153,6 +155,9 @@ export const api = {
   clearErrorLog: () => invoke<void>("clear_error_log"),
   readSound: (path: string) => invoke<string>("read_sound_file", { path }),
   testNotification: () => invoke<void>("test_notification"),
+  // TEMPORARY (dev-only): fire a synthetic background `question` push.
+  pushTestQuestion: (sessionId?: string | null) =>
+    invoke<string>("push_test_question", { sessionId: sessionId ?? null }),
   notificationStatus: () => invoke<string>("notification_status"),
   openNotificationSettings: () => invoke<void>("open_notification_settings"),
 
@@ -195,6 +200,12 @@ export const api = {
     invoke<void>("pairing_reject", { pairingId }),
   deviceRevoke: (deviceId: string) =>
     invoke<void>("device_revoke", { deviceId }),
+
+  // ---- remote access (WebSocket listener + Tailscale Serve) ----
+  remoteStatus: () => invoke<RemoteStatus>("remote_status"),
+  remoteApply: (prefs: RemoteAccessPreferences) =>
+    invoke<RemoteStatus>("remote_apply", { prefs }),
+  remoteRetry: () => invoke<RemoteStatus>("remote_retry"),
 
   // ---- preflight ----
   environmentCheck: () => invoke<EnvironmentStatus>("environment_check"),

@@ -34,9 +34,13 @@ describe("Session detail (loopback client)", () => {
     );
     await screen.findByRole("heading", { name: "Refactor UI" });
 
-    // Collapsed by default.
-    expect(screen.queryByText(/Refactor the header and network panels/)).toBeNull();
+    // Collapsed by default. jsdom does not hide the content of a closed
+    // `<details>`, so assert the element's own state rather than the absence
+    // of its text (which would still be in the DOM).
+    const details = screen.getByText("Task details").closest("details");
+    expect(details).not.toHaveAttribute("open");
     await user.click(await screen.findByText("Task details"));
+    expect(details).toHaveAttribute("open");
     expect(screen.getByText(/Refactor the header and network panels/)).toBeInTheDocument();
     expect(screen.getByText(/pnpm test/)).toBeInTheDocument();
 

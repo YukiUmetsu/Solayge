@@ -92,6 +92,13 @@ export function SessionDetail({
     void load();
   }, [load]);
 
+  // A pull-to-refresh at the shell level asks the open detail to reload too.
+  useEffect(() => {
+    const handler = () => void load();
+    window.addEventListener("solayge:refresh", handler);
+    return () => window.removeEventListener("solayge:refresh", handler);
+  }, [load]);
+
   useEffect(
     () => () => {
       if (pollRef.current) clearTimeout(pollRef.current);

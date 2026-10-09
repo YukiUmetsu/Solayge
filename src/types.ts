@@ -460,6 +460,48 @@ export interface PairingStatus {
   device_platform?: string;
 }
 
+// ---- remote access (WebSocket listener + Tailscale Serve) ----
+
+/** Persisted remote-access preferences. */
+export interface RemoteAccessPreferences {
+  enabled: boolean;
+  tailscale_backup: boolean;
+  https_port: number;
+  local_port: number;
+}
+
+/** The installed Tailscale CLI's status, as the desktop sees it. */
+export interface TailscaleStatus {
+  installed: boolean;
+  exe?: string;
+  backend_state: string;
+  authenticated: boolean;
+  online: boolean;
+  dns_name?: string;
+  tailnet?: string;
+  version?: string;
+  message?: string;
+}
+
+/** The desktop's remote-access status for Settings. */
+export interface RemoteStatus {
+  enabled: boolean;
+  /** `disabled` | `listening` | `active` | `degraded` | `error`. */
+  state: string;
+  listener_running: boolean;
+  listener_port: number | null;
+  connected_clients: number;
+  tailscale_backup: boolean;
+  tailscale: TailscaleStatus;
+  serve_enabled: boolean;
+  serve_owned: boolean;
+  serve_url?: string;
+  serve_port?: number;
+  https_port: number;
+  local_port: number;
+  last_error?: string;
+}
+
 export interface CacheStats {
   prompt_count: number;
   oldest_prompt?: number | null;

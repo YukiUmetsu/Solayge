@@ -58,25 +58,30 @@ describe("Approval detail", () => {
     expect(await screen.findByText("Approved once")).toBeInTheDocument();
   });
 
-  it("treats a question as a message, never as authorization", async () => {
+  it("shows a question's structured content and answers it as a message, never as authorization", async () => {
     const user = userEvent.setup();
     const c = client();
     const respond = vi.spyOn(c, "respondApproval");
-    const send = vi.spyOn(c, "sendPrompt");
+    const answer = vi.spyOn(c, "answerApproval");
     renderWithClient(<ApprovalDetail approvalId="apr_2" />, c);
 
     expect(
       await screen.findByRole("heading", { name: "Which navigation library should I use?" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/not a permission request/i)).toBeInTheDocument();
+    // The question's own content must be visible, not only its title.
+    expect(screen.getByText("Navigation approach")).toBeInTheDocument();
+    expect(screen.getByText("Pick one or type your own preference.")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Keep the existing stack/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /standards-compliant/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
 
-    await user.type(screen.getByRole("textbox", { name: "Your answer" }), "Keep the existing stack.");
+    await user.click(screen.getByRole("radio", { name: /Keep the existing stack/ }));
     await user.click(screen.getByRole("button", { name: "Send answer" }));
 
-    expect(await screen.findByText("Received by desktop")).toBeInTheDocument();
-    expect(send).toHaveBeenCalledWith("ses_3", "Keep the existing stack.", expect.any(String));
+    expect(await screen.findByText("Answer sent")).toBeInTheDocument();
+    expect(answer).toHaveBeenCalledWith("ses_3", "apr_2", { approach: "existing" });
     expect(respond).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ApprovalDecision, ApprovalSummary, CommandStatusName } from "@solayge/shared-types";
+import type {
+  ApprovalDecision,
+  ApprovalSummary,
+  CommandStatusName,
+  JsonValue,
+} from "@solayge/shared-types";
 
 import { useClientContext } from "../client/ClientContext";
 import {
@@ -11,11 +16,11 @@ import {
   riskLabel,
 } from "../client/approval";
 import { formatDateTime, formatExpiry } from "../client/format";
-import { commandIdFor } from "../client/mock";
 import { RemoteError } from "../client/remote";
 import { isDefiniteRejection, sendStatusView } from "../client/status";
 import { EmptyState } from "../components/EmptyState";
 import { Modal } from "../components/Modal";
+import { QuestionFields, type FieldAnswers } from "../components/QuestionFields";
 import { StatusPill } from "../components/StatusPill";
 
 interface AnswerSendState {
@@ -35,12 +40,13 @@ export function ApprovalDetail({ approvalId }: { approvalId: string }) {
   const nowSec = now();
 
   const [fetched, setFetched] = useState<ApprovalSummary | null>(null);
-  const [resolved, setResolved] = useState<ApprovalDecision | "gone" | null>(null);
+  const [resolved, setResolved] = useState<ApprovalDecision | "gone" | "answered" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState<ApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [answer, setAnswer] = useState("");
+  const [fieldAnswers, setFieldAnswers] = useState<FieldAnswers>({});
   const [answerState, setAnswerState] = useState<AnswerSendState | null>(null);
 
   const approval = useMemo(
@@ -96,19 +102,58 @@ export function ApprovalDetail({ approvalId }: { approvalId: string }) {
     }
   }
 
+  function fieldHasValue(value: JsonValue | undefined): boolean {
+    if (value == null) return false;
+    if (typeof value === "string") return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    return true;
+  }
+
+  /** The answer payload, or null when a required field is still blank. */
+  function buildAnswers(): Record<string, JsonValue> | null {
+    if (!approval) return null;
+    if (approval.fields.length === 0) {
+      return answer.trim().length > 0 ? { answer: answer.trim() } : null;
+    }
+    const answers: Record<string, JsonValue> = {};
+    for (const field of approval.fields) {
+      const value = fieldAnswers[field.key];
+      if (fieldHasValue(value)) answers[field.key] = value as JsonValue;
+      else if (field.required && field.kind !== "external") return null;
+    }
+    return Object.keys(answers).length > 0 ? answers : null;
+  }
+
+  const canSendAnswer = !isReadOnly && buildAnswers() != null;
+
+  function updateField(key: string, value: JsonValue | null) {
+    setFieldAnswers((previous) => {
+      const next = { ...previous };
+      if (value == null) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  }
+
   async function sendAnswer() {
-    if (!approval || !answer.trim() || isReadOnly) return;
+    const answers = buildAnswers();
+    if (!approval || !answers || isReadOnly) return;
     setAnswerState({ status: "created", errorCode: null, errorMessage: null });
     try {
-      const receipt = await client.sendPrompt(
-        approval.session_id,
-        answer.trim(),
-        commandIdFor(client.desktopId, approval.session_id, answer.trim()),
-      );
+      // A question is answered through the message channel, never as an
+      // authorization; the host routes it to the agent's form reply.
+      const receipt = await client.answerApproval(approval.session_id, approval.id, answers);
       setAnswerState({ status: receipt.status, errorCode: null, errorMessage: null });
       setAnswer("");
+      setFieldAnswers({});
+      setResolved("answered");
+      await refresh();
     } catch (caught) {
       const code = caught instanceof RemoteError ? caught.code : "internal";
+      if (code === "not_found") {
+        setResolved("gone");
+        return;
+      }
       setAnswerState({
         status: isDefiniteRejection(code) ? "failed" : "unknown",
         errorCode: code,
@@ -118,13 +163,19 @@ export function ApprovalDetail({ approvalId }: { approvalId: string }) {
   }
 
   if (resolved) {
-    const question = approval?.kind === "question";
+    const question = resolved === "answered" || approval?.kind === "question";
     return (
       <article className="detail">
         <EmptyState
           icon={resolved === "deny" ? "⊘" : "✓"}
           title={
-            resolved === "deny" ? "Denied" : resolved === "gone" ? "Request resolved" : "Approved once"
+            resolved === "deny"
+              ? "Denied"
+              : resolved === "gone"
+                ? "Request resolved"
+                : resolved === "answered"
+                  ? "Answer sent"
+                  : "Approved once"
           }
           body={
             question
@@ -250,18 +301,29 @@ export function ApprovalDetail({ approvalId }: { approvalId: string }) {
             This is a question, not a permission request. Answering sends a normal message and does not
             authorize any action.
           </p>
-          <label className="sr-only" htmlFor="answer-input">
-            Your answer
-          </label>
-          <textarea
-            id="answer-input"
-            className="composer__input"
-            rows={3}
-            placeholder="Type your answer…"
-            value={answer}
-            disabled={isReadOnly}
-            onChange={(event) => setAnswer(event.target.value)}
-          />
+          {approval.fields.length > 0 ? (
+            <QuestionFields
+              fields={approval.fields}
+              answers={fieldAnswers}
+              onChange={updateField}
+              disabled={isReadOnly}
+            />
+          ) : (
+            <>
+              <label className="sr-only" htmlFor="answer-input">
+                Your answer
+              </label>
+              <textarea
+                id="answer-input"
+                className="composer__input"
+                rows={3}
+                placeholder="Type your answer…"
+                value={answer}
+                disabled={isReadOnly}
+                onChange={(event) => setAnswer(event.target.value)}
+              />
+            </>
+          )}
           {answerState ? (
             <p className="composer__status" role="status">
               <span className={`pill pill--${sendStatusView(answerState.status).tone} pill--sm`}>
@@ -279,7 +341,7 @@ export function ApprovalDetail({ approvalId }: { approvalId: string }) {
             className="btn btn-primary"
             type="button"
             onClick={() => void sendAnswer()}
-            disabled={isReadOnly || answer.trim().length === 0}
+            disabled={!canSendAnswer}
           >
             Send answer
           </button>

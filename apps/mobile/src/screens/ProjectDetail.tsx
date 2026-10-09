@@ -21,6 +21,14 @@ export function ProjectDetail({
   const [files, setFiles] = useState<ChangedFileSummary[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
+
+  // A pull-to-refresh at the shell level re-reads this project's changed files.
+  useEffect(() => {
+    const handler = () => setReloadTick((tick) => tick + 1);
+    window.addEventListener("solayge:refresh", handler);
+    return () => window.removeEventListener("solayge:refresh", handler);
+  }, []);
 
   const project = data.projects.find((entry) => entry.id === projectId) ?? null;
   const sessions = useMemo(
@@ -71,7 +79,7 @@ export function ProjectDetail({
     return () => {
       cancelled = true;
     };
-  }, [client, isReadOnly, sessions]);
+  }, [client, isReadOnly, sessions, reloadTick]);
 
   if (!project) {
     return (

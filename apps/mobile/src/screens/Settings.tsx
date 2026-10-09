@@ -10,6 +10,8 @@ import {
   type RetentionConfig,
 } from "../client/cache";
 import { connectionStatusView } from "../client/status";
+import { useNotifications } from "../client/NotificationCenter";
+import { pushToken } from "../client/push";
 import { Modal } from "../components/Modal";
 import { StatusPill } from "../components/StatusPill";
 import { pairingApi, type PairedDesktopRecord } from "../pairing";
@@ -44,12 +46,15 @@ export function Settings({
 }) {
   const { client, desktopId, desktop, desktops, transportMode, setTransportMode, status, data } =
     useClientContext();
+  const { settings, permission, supported, updateSettings, requestPermission, sendTest } =
+    useNotifications();
   const [diagnostics, setDiagnostics] = useState<ClientDiagnostics | null>(null);
   const [copied, setCopied] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [records, setRecords] = useState<PairedDesktopRecord[]>([]);
   const [retention, setRetention] = useState<RetentionConfig>(() => loadRetention());
   const [cacheCleared, setCacheCleared] = useState(false);
+  const [testSent, setTestSent] = useState(false);
 
   function updateRetention(projectId: string, days: number) {
     setRetention(setProjectRetention(projectId, days));
@@ -69,6 +74,15 @@ export function Settings({
 
   async function forget(desktopId: string) {
     try {
+      // Best effort: stop this phone's background alerts for that desktop.
+      const token = await pushToken();
+      if (token) {
+        try {
+          await client.unregisterPush(token.token);
+        } catch {
+          // The desktop may be unreachable; forgetting locally still proceeds.
+        }
+      }
       await pairingApi.forgetDesktop(desktopId);
       // The paired list lives in the app shell; a reload re-reads it and
       // drops the now-unpaired desktop cleanly.
@@ -200,6 +214,117 @@ export function Settings({
             </div>
           </dl>
         </details>
+      </section>
+
+      <section className="detail__section" aria-label="Notifications">
+        <h2 className="detail__section-title">Notifications</h2>
+        <p className="detail__sub">
+          Alerts for agent questions, task completions, and failures. A background connection keeps
+          watching the desktop so it can alert you while the app is not in front of you.
+        </p>
+        {!supported ? (
+          <p className="detail__sub">Notifications are not available in this build.</p>
+        ) : (
+          <>
+            <label className="radio-row">
+              <input
+                type="checkbox"
+                checked={settings.enabled}
+                onChange={(event) => {
+                  if (!event.target.checked) {
+                    updateSettings({ enabled: false });
+                    return;
+                  }
+                  void (async () => {
+                    const result = await requestPermission();
+                    if (result === "granted") updateSettings({ enabled: true });
+                    else if (result === "unsupported") updateSettings({ enabled: true });
+                    // A denial leaves notifications off; the help text points to
+                    // the system settings.
+                  })();
+                }}
+              />
+              <span>
+                <span className="radio-row__label">Enable notifications</span>
+                <span className="radio-row__help">
+                  {permission === "denied"
+                    ? "Blocked. Allow Solayge notifications in your phone's settings."
+                    : "Ask this phone to alert you when something needs you."}
+                </span>
+              </span>
+            </label>
+
+            {settings.enabled ? (
+              <>
+                <fieldset className="fieldset">
+                  <legend className="radio-row__label">Notify me about</legend>
+                  <label className="radio-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.onQuestions}
+                      onChange={(event) => updateSettings({ onQuestions: event.target.checked })}
+                    />
+                    <span className="radio-row__label">Questions and permission requests</span>
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.onCompleted}
+                      onChange={(event) => updateSettings({ onCompleted: event.target.checked })}
+                    />
+                    <span className="radio-row__label">Task completions</span>
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.onFailed}
+                      onChange={(event) => updateSettings({ onFailed: event.target.checked })}
+                    />
+                    <span className="radio-row__label">Task failures</span>
+                  </label>
+                </fieldset>
+
+                <label className="radio-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.sound}
+                    onChange={(event) => updateSettings({ sound: event.target.checked })}
+                  />
+                  <span>
+                    <span className="radio-row__label">Sound</span>
+                    <span className="radio-row__help">
+                      Play a chime and the system notification sound.
+                    </span>
+                  </span>
+                </label>
+
+                <label className="cache-row">
+                  <span className="cache-row__name">Volume</span>
+                  <input
+                    className="cache-row__input"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.1}
+                    value={settings.volume}
+                    onChange={(event) => updateSettings({ volume: Number(event.target.value) })}
+                    aria-label="Notification volume"
+                  />
+                </label>
+
+                <button
+                  className="btn btn--small"
+                  type="button"
+                  onClick={() => {
+                    void (async () => setTestSent(await sendTest()))();
+                  }}
+                >
+                  {testSent ? "Test sent" : "Send test notification"}
+                </button>
+              </>
+            ) : null}
+          </>
+        )}
       </section>
 
       <section className="detail__section" aria-label="Desktops">

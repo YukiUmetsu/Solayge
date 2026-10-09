@@ -115,12 +115,39 @@
     "risk": "medium",
     "read_only": false,
     "requested_at": 90,
-    "expires_at": 3600
+    "expires_at": 3600,
+    "fields": []
+  },
+  "approval_field": {
+    "key": "color",
+    "label": "What is your favorite color?",
+    "description": "Pick one or type your own.",
+    "kind": "string",
+    "required": true,
+    "custom": true,
+    "options": [
+      {
+        "value": "red",
+        "label": "Red",
+        "description": "warm"
+      },
+      {
+        "value": "blue",
+        "label": "Blue",
+        "description": null
+      }
+    ],
+    "placeholder": "e.g. teal",
+    "url": null
   },
   "approval_query": { "approval_id": "apr_1" },
   "approval_response_payload": {
     "approval_id": "apr_1",
     "decision": "approve_once"
+  },
+  "answer_payload": {
+    "approval_id": "apr_2",
+    "answers": { "color": "blue" }
   },
   "project_query": { "project_id": "/repo/app" },
   "changed_file_summary": {
@@ -195,6 +222,9 @@
   },
   "device_revoke_payload": { "device_id": "dev_1" },
   "device_revoke_result": { "revoked": true },
+  "push_register_payload": { "token": "fcm-token-abc", "platform": "android" },
+  "push_register_result": { "registered": true },
+  "push_unregister_payload": { "token": "fcm-token-abc" },
   "pair_begin_payload": {
     "pairing_id": "pair_1",
     "desktop_id": "desk_1",

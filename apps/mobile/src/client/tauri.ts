@@ -16,6 +16,7 @@ import type {
   EventsBatch,
   FilesChangedSummary,
   HostMetadata,
+  JsonValue,
   ProjectSummary,
   SessionDetail,
   SessionSummary,
@@ -25,6 +26,7 @@ import {
   RemoteError,
   type ClientDiagnostics,
   type RemoteClient,
+  type TransportMode,
 } from "./remote";
 
 interface ActionError {
@@ -52,16 +54,25 @@ export class TauriRemoteClient implements RemoteClient {
   readonly desktopId: string;
   private connected = false;
   private lastError: string | null = null;
+  private mode: TransportMode = "automatic";
 
   constructor(desktopId: string) {
     this.desktopId = desktopId;
+  }
+
+  setTransportMode(mode: TransportMode): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    // Changing the transport preference forces the next connect to redial so
+    // the choice takes effect immediately.
+    this.connected = false;
   }
 
   async connect(): Promise<void> {
     // No desktop selected (first launch) — nothing to dial.
     if (!this.desktopId) return;
     try {
-      await invoke("connect_desktop", { desktopId: this.desktopId });
+      await invoke("connect_desktop", { desktopId: this.desktopId, mode: this.mode });
       this.connected = true;
       this.lastError = null;
     } catch (caught) {
@@ -176,6 +187,37 @@ export class TauriRemoteClient implements RemoteClient {
     );
   }
 
+  answerApproval(
+    sessionId: string,
+    approvalId: string,
+    answers: Record<string, JsonValue>,
+  ): Promise<CommandReceipt> {
+    return this.call<CommandReceipt>(
+      "sessions.answer",
+      { approval_id: approvalId, answers },
+      sessionId,
+      newCommandId(),
+    );
+  }
+
+  async registerPush(token: string, platform: string): Promise<void> {
+    await this.call<{ registered: boolean }>(
+      "push.register",
+      { token, platform },
+      undefined,
+      newCommandId(),
+    );
+  }
+
+  async unregisterPush(token: string): Promise<void> {
+    await this.call<{ registered: boolean }>(
+      "push.unregister",
+      { token },
+      undefined,
+      newCommandId(),
+    );
+  }
+
   filesChangedSummary(sessionId: string): Promise<FilesChangedSummary> {
     return this.call<FilesChangedSummary>("files.changed_summary", null, sessionId);
   }
@@ -185,9 +227,10 @@ export class TauriRemoteClient implements RemoteClient {
       connected: boolean;
       authenticated: boolean;
       desktop_id?: string;
+      transport?: string;
     }>("connection_status");
     return {
-      transport: "iroh",
+      transport: status.transport ?? "iroh",
       endpoint: status.desktop_id ?? this.desktopId,
       path: "unknown",
       rttMs: null,
