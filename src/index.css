@@ -364,6 +364,43 @@ html[data-os="macos"] .titlebar-pad {
   animation: pulse-ring 1.8s infinite;
 }
 
+/* Whole-card attention cue. `.card` and `.card:hover` set the background/border,
+   so the attention classes override both (and keep their tint on hover). */
+@keyframes attention-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 18px 1px var(--attention-glow);
+  }
+}
+.card-attention-ask {
+  --attention-glow: color-mix(in oklab, var(--color-warning) 55%, transparent);
+  border-color: var(--color-warning-line) !important;
+  background: color-mix(in oklab, var(--color-warning) 10%, var(--color-card));
+  animation: attention-glow 1.9s ease-in-out infinite;
+}
+.card-attention-ask:hover {
+  background: color-mix(in oklab, var(--color-warning) 16%, var(--color-card-hover));
+}
+.card-attention-blocked {
+  --attention-glow: color-mix(in oklab, var(--color-violet) 55%, transparent);
+  border-color: var(--color-violet-line) !important;
+  background: color-mix(in oklab, var(--color-violet) 10%, var(--color-card));
+  animation: attention-glow 2.2s ease-in-out infinite;
+}
+.card-attention-blocked:hover {
+  background: color-mix(in oklab, var(--color-violet) 16%, var(--color-card-hover));
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-attention-ask,
+  .card-attention-blocked {
+    animation: none;
+    box-shadow: 0 0 0 1px var(--attention-glow);
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Rendered markdown (the task Result tab)
  * ------------------------------------------------------------------ */

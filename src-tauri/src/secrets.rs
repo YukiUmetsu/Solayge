@@ -247,7 +247,9 @@ fn encrypt(data_dir: &Path, plain: &str) -> Result<String> {
 }
 
 fn decrypt(data_dir: &Path, encoded: &str) -> Result<String> {
-    let blob = B64.decode(encoded).map_err(|e| anyhow!("bad ciphertext: {e}"))?;
+    let blob = B64
+        .decode(encoded)
+        .map_err(|e| anyhow!("bad ciphertext: {e}"))?;
     if blob.len() < 13 {
         return Err(anyhow!("ciphertext too short"));
     }

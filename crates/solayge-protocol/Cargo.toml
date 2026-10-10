@@ -1,0 +1,10 @@
+[package]
+name = "solayge-protocol"
+description = "Transport-neutral, versioned application protocol for Solayge remote clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

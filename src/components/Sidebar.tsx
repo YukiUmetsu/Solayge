@@ -16,6 +16,9 @@ export function Sidebar({
   onSettings,
   onReorder,
   onCollapse,
+  analyticsActive,
+  onAnalytics,
+  onProjectAnalytics,
 }: {
   snapshot: Snapshot;
   selected: string | null;
@@ -27,6 +30,9 @@ export function Sidebar({
   onSettings: () => void;
   onReorder: (paths: string[]) => void;
   onCollapse: () => void;
+  analyticsActive: boolean;
+  onAnalytics: () => void;
+  onProjectAnalytics: (path: string) => void;
 }) {
   const total = snapshot.tasks.length;
   const running = snapshot.tasks.filter((t) => t.status === "running").length;
@@ -147,6 +153,17 @@ export function Sidebar({
               <ProjectStatus tasks={ptasks} now={now} />
               <div className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100">
                 <button
+                  className="rounded p-1 text-ink-subtle transition hover:bg-hover hover:text-ink"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onProjectAnalytics(p.path);
+                  }}
+                  title="View analytics"
+                  aria-label="View analytics"
+                >
+                  <Icon name="chart" className="h-3.5 w-3.5" />
+                </button>
+                <button
                   className="rounded p-1 text-ink-subtle transition hover:bg-hover hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent"
                   disabled={i === 0}
                   onClick={(e) => {
@@ -185,6 +202,25 @@ export function Sidebar({
             </div>
           );
         })}
+      </div>
+
+      <div className="border-t border-line px-2 py-2">
+        <button
+          onClick={onAnalytics}
+          title="Analytics across projects"
+          aria-current={analyticsActive ? "page" : undefined}
+          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition ${
+            analyticsActive
+              ? "bg-accent-soft text-ink ring-1 ring-accent-line"
+              : "text-ink-muted hover:bg-hover"
+          }`}
+        >
+          <Icon
+            name="chart"
+            className={`h-4 w-4 shrink-0 ${analyticsActive ? "text-accent-text" : "text-ink-subtle"}`}
+          />
+          <span className="text-[13px] font-medium">Analytics</span>
+        </button>
       </div>
 
       <div className="space-y-3 border-t border-line px-4 py-4">

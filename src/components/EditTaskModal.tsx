@@ -15,9 +15,9 @@ function remainingMinutes(notBefore?: number | null): number {
 }
 
 /**
- * Edit a draft task. A draft has not been released yet, so every parameter the
- * New Task form can set is editable here; the backend rejects edits to any
- * other status.
+ * Edit a task that has not started yet: a draft, or one queued while it waits
+ * for dependencies or a slot. Every parameter the New Task form can set is
+ * editable here; the backend rejects edits to any other status.
  */
 export function EditTaskModal({
   task,
@@ -40,6 +40,7 @@ export function EditTaskModal({
     kind: task.kind ?? "agent",
     title: task.title,
     prompt: task.prompt,
+    attachments: task.attachments ?? [],
     command: task.command ?? "",
     separation: taskSeparation(task),
     newBranch: task.new_branch ?? "",
@@ -75,6 +76,10 @@ export function EditTaskModal({
       const patch: TaskPatch = {
         title: form.title.trim(),
         prompt: shell ? form.command.trim() : form.prompt,
+        // Attachments only apply to agent prompts; switching to a command or a
+        // git/merge task clears any that were attached before.
+        attachments:
+          !special && form.kind === "agent" ? form.attachments : [],
         isolation,
         branch_mode,
         // Only a "new branch" task uses a branch name; clear it otherwise.
@@ -100,8 +105,8 @@ export function EditTaskModal({
 
   return (
     <Modal
-      title="Edit draft task"
-      subtitle="Change any parameter before the task is released."
+      title="Edit task"
+      subtitle="Change any parameter before the task starts."
       onClose={onClose}
       footer={
         <>

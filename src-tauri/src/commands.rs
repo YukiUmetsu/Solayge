@@ -6,7 +6,7 @@ use tauri::{AppHandle, Manager};
 use crate::models::*;
 use crate::scheduler::{emit_state, now};
 use crate::state::AppState;
-use crate::{agent, cache, git, opencode, secrets};
+use crate::{agent, analytics, cache, git, opencode, secrets};
 
 #[tauri::command]
 pub fn get_snapshot(app: AppHandle) -> Snapshot {
@@ -107,6 +107,8 @@ fn reset_for_rerun(t: &mut Task) {
         r.summary = None;
         r.started_at = None;
         r.finished_at = None;
+        r.attempts = 0;
+        r.prompt = None;
     }
     t.status = if t.depends_on.is_empty() {
         TaskStatus::Ready
@@ -200,6 +202,38 @@ pub async fn project_status(path: String) -> Result<GitStatus, String> {
 #[tauri::command]
 pub async fn project_worktrees(path: String) -> Result<Vec<Worktree>, String> {
     git::worktrees(Path::new(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Landing detail for one worktree: commit/file counts, last commit, and its
+/// recent commits. Computed only when the user expands a worktree.
+#[tauri::command]
+pub async fn worktree_detail(
+    path: String,
+    worktree: String,
+    limit: Option<usize>,
+) -> Result<WorktreeDetail, String> {
+    git::worktree_detail(Path::new(&path), Path::new(&worktree), limit.unwrap_or(50))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The files one commit touched, with add/delete counts.
+#[tauri::command]
+pub async fn worktree_commit_files(
+    path: String,
+    commit: String,
+) -> Result<Vec<CommitFile>, String> {
+    git::commit_files(Path::new(&path), &commit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Undo a commit by reverting it (a new commit that inverts its changes).
+#[tauri::command]
+pub async fn git_revert_commit(path: String, commit: String) -> Result<String, String> {
+    git::revert_commit(Path::new(&path), &commit)
         .await
         .map_err(|e| e.to_string())
 }
@@ -497,7 +531,9 @@ pub fn execute_project(app: AppHandle, project_path: String) -> Result<Snapshot,
                     };
                     t.error = None;
                 }
-                TaskStatus::Failed | TaskStatus::Canceled | TaskStatus::Blocked
+                TaskStatus::Failed
+                | TaskStatus::Canceled
+                | TaskStatus::Blocked
                 | TaskStatus::Interrupted => {
                     reset_for_rerun(t);
                 }
@@ -572,6 +608,7 @@ pub fn create_tasks(
             project_path: project_path.clone(),
             title: nt.title.clone(),
             prompt: nt.prompt.clone(),
+            attachments: agent::attachment_paths(&nt.attachments),
             isolation: nt
                 .isolation
                 .unwrap_or(default_isolation.unwrap_or_default()),
@@ -593,6 +630,7 @@ pub fn create_tasks(
             created_at: base + i as i64,
             started_at: None,
             finished_at: None,
+            attempts: 0,
             provider: Some(resolved.provider),
             model: resolved.model.clone(),
             fallback_provider: resolved.fallback_provider,
@@ -609,6 +647,8 @@ pub fn create_tasks(
                     summary: None,
                     started_at: None,
                     finished_at: None,
+                    attempts: 0,
+                    prompt: None,
                 })
             },
             kind: nt.kind.unwrap_or_default(),
@@ -663,19 +703,31 @@ pub fn create_tasks(
     Ok(crate::state::snapshot(&app))
 }
 
-/// Apply an edit to a task. Only a `draft` task may be edited: once it has been
-/// released (ready/waiting) it is queued to run, and once running its prompt is
-/// the instruction the agent was already given, so rewriting it would be a lie.
-/// Returns an error otherwise, which the UI surfaces to the user.
-fn apply_draft_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
-    if t.status != TaskStatus::Draft {
-        return Err("only draft tasks can be edited".into());
+/// Whether a task may still be edited. A `draft` has not been released; a
+/// `waiting` or `ready` task is queued but has not started, so rewriting its
+/// prompt is safe. Once `running` its prompt is the instruction the agent was
+/// already given, so rewriting it would be a lie.
+fn is_editable_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Draft | TaskStatus::Waiting | TaskStatus::Ready
+    )
+}
+
+/// Apply an edit to a not-yet-started task (`draft`, `waiting`, or `ready`).
+/// Returns an error for any other status, which the UI surfaces to the user.
+fn apply_task_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
+    if !is_editable_status(t.status) {
+        return Err("only draft, waiting, or ready tasks can be edited".into());
     }
     if let Some(v) = patch.title {
         t.title = v;
     }
     if let Some(v) = patch.prompt {
         t.prompt = v;
+    }
+    if let Some(v) = patch.attachments {
+        t.attachments = agent::attachment_paths(&v);
     }
     if let Some(v) = patch.isolation {
         t.isolation = v;
@@ -687,7 +739,11 @@ fn apply_draft_patch(t: &mut Task, patch: TaskPatch) -> Result<(), String> {
         // A blank base ref means "unset" (start from HEAD), not an empty ref
         // that would later fail worktree creation.
         let v = v.trim();
-        t.base_ref = if v.is_empty() { None } else { Some(v.to_string()) };
+        t.base_ref = if v.is_empty() {
+            None
+        } else {
+            Some(v.to_string())
+        };
     }
     if let Some(v) = patch.delay_seconds {
         t.not_before = if v > 0 { Some(now() + v) } else { None };
@@ -737,9 +793,17 @@ pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<
         let Some(pos) = inner.tasks.iter().position(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        if inner.tasks[pos].status != TaskStatus::Draft {
-            return Err("only draft tasks can be edited".into());
+        if !is_editable_status(inner.tasks[pos].status) {
+            return Err("only draft, waiting, or ready tasks can be edited".into());
         }
+        // A dependency or delay edit can change whether a queued task is ready.
+        // Demote a `ready` task back to `waiting` when either changed;
+        // `scheduler::dispatch` re-promotes it once its dependencies (and delay)
+        // are satisfied. Without this a `ready` task could be dispatched with a
+        // freshly-added unmet dependency.
+        let was_ready = inner.tasks[pos].status == TaskStatus::Ready;
+        let old_deps = inner.tasks[pos].depends_on.clone();
+        let old_hold = inner.tasks[pos].not_before;
         // A dependency edit must stay a valid DAG with real targets, or the
         // task (and anything downstream) would wait forever.
         if let Some(deps) = patch.depends_on.as_ref() {
@@ -767,7 +831,11 @@ pub fn update_task(app: AppHandle, task_id: String, patch: TaskPatch) -> Result<
                 return Err("that change would create a dependency cycle".into());
             }
         }
-        apply_draft_patch(&mut inner.tasks[pos], patch)?;
+        apply_task_patch(&mut inner.tasks[pos], patch)?;
+        let t = &mut inner.tasks[pos];
+        if was_ready && (t.depends_on != old_deps || t.not_before != old_hold) {
+            t.status = TaskStatus::Waiting;
+        }
     }
     st.save();
     emit_state(&app);
@@ -911,7 +979,7 @@ fn restore_task_state(
 
 /// Ask any live child process for this task to terminate. Cancel and delete both
 /// use it so a stopped task never keeps running in the background.
-fn kill_task_children(st: &AppState, task_id: &str) {
+pub(crate) fn kill_task_children(st: &AppState, task_id: &str) {
     for map in [&st.running, &st.reviewing, &st.merging] {
         let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = guard.get_mut(task_id) {
@@ -1022,7 +1090,7 @@ pub fn start_task_now(app: AppHandle, task_id: String) -> Result<Snapshot, Strin
 /// Mark a non-terminal task cancelled, forgetting any pending ask: the run is
 /// being torn down, so the question it was waiting on can no longer be answered.
 /// Returns whether the task changed. Pure, so the rule can be unit-tested.
-fn cancel_task_state(t: &mut Task) -> bool {
+pub(crate) fn cancel_task_state(t: &mut Task) -> bool {
     if t.status.is_terminal() {
         return false;
     }
@@ -1033,46 +1101,66 @@ fn cancel_task_state(t: &mut Task) -> bool {
     true
 }
 
-/// Re-queue a succeeded task's auto-review so the scheduler runs it again,
-/// without re-running the (already finished) task. Errors when there is nothing
-/// to re-run. Pure, so the rule can be unit-tested.
-fn requeue_review(t: &mut Task) -> Result<(), String> {
+/// Re-queue a task's auto-review so the scheduler runs it again, without
+/// re-running the (already finished) task. A task blocked because its review
+/// could not finish is restored to succeeded so the review can run again; the
+/// attempt budget is reset. `prompt` overrides the review instructions for this
+/// run only (`None` falls back to the project/account prompt). Errors when
+/// there is nothing to re-run. Pure, so the rule can be unit-tested.
+fn requeue_review(t: &mut Task, prompt: Option<String>) -> Result<(), String> {
+    let (mode, review_failed) = match t.review.as_ref() {
+        Some(r) => (r.mode, r.status == ReviewStatus::Failed),
+        None => return Err("this task has no review".into()),
+    };
+    if mode == ReviewMode::Off {
+        return Err("this task has no review".into());
+    }
+    // A review that ran out of attempts blocks the task; re-running it resumes
+    // the success (the task's work did succeed).
+    if t.status == TaskStatus::Blocked && review_failed {
+        t.status = TaskStatus::Succeeded;
+        t.error = None;
+    }
     if t.status != TaskStatus::Succeeded {
         return Err("only a succeeded task's review can be re-run".into());
     }
-    let Some(r) = t.review.as_mut() else {
-        return Err("this task has no review".into());
-    };
-    if r.mode == ReviewMode::Off {
-        return Err("this task has no review".into());
+    if let Some(r) = t.review.as_mut() {
+        r.status = ReviewStatus::Pending;
+        r.summary = None;
+        r.started_at = None;
+        r.finished_at = None;
+        r.attempts = 0;
+        r.prompt = prompt;
     }
-    r.status = ReviewStatus::Pending;
-    r.summary = None;
-    r.started_at = None;
-    r.finished_at = None;
     Ok(())
 }
 
 /// Re-run a finished task's review (e.g. after it failed for an environmental
-/// reason) without re-running the task itself.
+/// reason) without re-running the task itself. `prompt`, when given, replaces
+/// the review instructions for this run only.
 #[tauri::command]
-pub fn retry_review(app: AppHandle, task_id: String) -> Result<Snapshot, String> {
+pub fn retry_review(
+    app: AppHandle,
+    task_id: String,
+    prompt: Option<String>,
+) -> Result<Snapshot, String> {
     let st = app.state::<AppState>();
     let title = {
         let mut inner = crate::state::lock(&st.inner);
         let Some(t) = inner.tasks.iter_mut().find(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        requeue_review(t)?;
+        requeue_review(t, prompt)?;
         t.title.clone()
     };
     st.save();
     emit_state(&app);
-    crate::scheduler::notify(
+    crate::scheduler::notify_for(
         &app,
         NotifyKind::TaskReview,
         "Solayge review",
         &format!("{title} — in review"),
+        Some(task_id.as_str()),
     );
     Ok(crate::state::snapshot(&app))
 }
@@ -1138,9 +1226,10 @@ pub async fn answer_task(
         .ok_or_else(|| "the question is not attached to a live session".to_string())?;
 
     let conn = crate::opencode_server::ensure_server().await?;
-    match ask.kind {
+    let outcome = match ask.kind {
         AskKind::Question => {
             crate::opencode_server::reply_form(&conn, &session, &ask.id, answer).await?;
+            "answered"
         }
         AskKind::Permission => {
             let decision = answer
@@ -1149,8 +1238,13 @@ pub async fn answer_task(
                 .unwrap_or("reject");
             crate::opencode_server::reply_permission(&conn, &session, &ask.id, decision, None)
                 .await?;
+            if decision == "reject" {
+                "rejected"
+            } else {
+                "answered"
+            }
         }
-    }
+    };
 
     {
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1160,14 +1254,33 @@ pub async fn answer_task(
             }
         }
     }
+    crate::analytics::record_ask_resolved(&app, &task_id, &ask.id, outcome);
     st.save();
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
 }
 
-/// Send a free-form message to a running interactive (opencode) task, the way you
-/// would type at the agent's prompt. The agent keeps running; its reply streams
-/// into the task log like any other output.
+/// Whether a finished task may accept another agent message. A continuation is
+/// only safe when the opencode session outlived the run, the review has settled
+/// (a re-review is not wanted), and no other task depends on this one — resuming
+/// would change what a dependent already treated as final.
+fn can_resume_task(t: &Task, tasks: &[Task]) -> bool {
+    matches!(t.status, TaskStatus::Succeeded | TaskStatus::Failed)
+        && t.session_id.as_deref().is_some_and(|s| !s.is_empty())
+        && !matches!(
+            t.review.as_ref().map(|r| r.status),
+            Some(ReviewStatus::Pending | ReviewStatus::Running)
+        )
+        && !tasks
+            .iter()
+            .any(|d| d.id != t.id && d.depends_on.iter().any(|dep| dep == &t.id))
+}
+
+/// Send a free-form message to an interactive (opencode) task, the way you would
+/// type at the agent's prompt. While the task runs the agent keeps working and
+/// its reply streams into the log. On a finished task this continues the same
+/// session: the task flips back to `running` and finalizes again when the new
+/// turn ends (without re-running a settled review).
 #[tauri::command]
 pub async fn send_task_message(
     app: AppHandle,
@@ -1179,19 +1292,37 @@ pub async fn send_task_message(
         return Err("the message is empty".into());
     }
     let st = app.state::<AppState>();
-    let session = {
+    let (session, resume) = {
         let inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(t) = inner.tasks.iter().find(|t| t.id == task_id) else {
             return Err("task not found".into());
         };
-        if t.status != TaskStatus::Running {
-            return Err("this task is no longer running".into());
+        if t.status == TaskStatus::Running {
+            let session = t
+                .session_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "this task has no live agent session".to_string())?;
+            (session, false)
+        } else {
+            if !can_resume_task(t, &inner.tasks) {
+                return Err(
+                    "this task cannot be continued (it is unfinished, in review, or a \
+                     dependency of another task)"
+                        .into(),
+                );
+            }
+            let session = t
+                .session_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "this task has no live agent session".to_string())?;
+            (session, true)
         }
-        t.session_id
-            .clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this task has no live agent session".to_string())?
     };
+    if resume {
+        return crate::scheduler::resume_opencode_task(app, task_id, text).await;
+    }
     let conn = crate::opencode_server::ensure_server().await?;
     crate::opencode_server::prompt(&conn, &session, &text).await?;
     // Echo it into the transcript, so it is clear what the agent was told.
@@ -1455,16 +1586,24 @@ pub fn update_settings(app: AppHandle, settings: Settings) -> Result<Snapshot, S
         let mut inner = st.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = settings;
         next.cache_retention_days = next.cache_retention_days.clamp(0, 3650);
+        next.analytics_retention_days = next.analytics_retention_days.clamp(0, 3650);
         inner.settings = next;
     }
     st.save();
     cache::prune(&st);
+    // Apply a shortened analytics retention immediately.
+    analytics::prune(&app);
     emit_state(&app);
     Ok(crate::state::snapshot(&app))
 }
 
 /// Send a test notification through the same path real ones use, so the user can
 /// confirm their OS notification settings allow Solayge to show anything.
+///
+/// On macOS a denied/failed delivery is reported through the Notifications tab's
+/// status banner (re-read right after this call) instead of being hidden in the
+/// error log. Delivery is always attempted so enabling notifications in System
+/// Settings takes effect without restarting the app.
 #[tauri::command]
 pub fn test_notification(app: AppHandle) -> Result<(), String> {
     crate::scheduler::notify(
@@ -1474,6 +1613,57 @@ pub fn test_notification(app: AppHandle) -> Result<(), String> {
         "This is a test notification.",
     );
     Ok(())
+}
+
+/// Fire a synthetic `question` background push at every paired phone so the
+/// FCM delivery + deep-link path can be verified on demand. `session_id` is
+/// optional; when given, tapping the notification opens that session.
+#[tauri::command]
+pub async fn push_test_question(
+    app: AppHandle,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::push::dispatch_test_question(&app, session_id)
+    })
+    .await
+    .map_err(|error| format!("test push task failed: {error}"))?
+}
+
+/// Verify the configured gateway answers `/healthz`.
+#[tauri::command]
+pub async fn push_gateway_health(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::push::check_gateway(&app))
+        .await
+        .map_err(|error| format!("health check task failed: {error}"))?
+}
+
+/// Whether the OS currently allows Solayge to show desktop notifications.
+/// `authorized`, `denied`, `undetermined`, or `supported` on platforms where the
+/// question does not apply.
+#[tauri::command]
+pub fn notification_status() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_notify::status_word().to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "supported".to_string()
+    }
+}
+
+/// Open the OS notification settings for Solayge when the platform can.
+#[tauri::command]
+pub fn open_notification_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_notify::open_settings()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Open your system settings and allow notifications for Solayge.".to_string())
+    }
 }
 
 /// The MIME type for a supported audio file extension (lowercased), or `None`.
@@ -1845,12 +2035,209 @@ pub async fn list_models(
     Ok(models)
 }
 
+// ---- analytics ----
+//
+// Thin command wrappers over `crate::analytics`. All queries are read-only with
+// respect to task state; nothing here can run, cancel, or delete a task.
+
+fn analytics_project_names(app: &AppHandle) -> HashMap<String, String> {
+    let st = app.state::<AppState>();
+    let inner = crate::state::lock(&st.inner);
+    inner
+        .projects
+        .iter()
+        .map(|p| (p.path.clone(), p.name.clone()))
+        .collect()
+}
+
+#[tauri::command]
+pub fn get_analytics_overview(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::AnalyticsOverview {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::overview(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_timeseries(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::TimeSeriesPoint> {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::time_series(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_projects(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::ProjectMetric> {
+    let names = analytics_project_names(&app);
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::projects(&store, &filters, &names)
+}
+
+#[tauri::command]
+pub fn get_analytics_models(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> Vec<analytics::ModelMetric> {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::models(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_task_detail(
+    app: AppHandle,
+    task_id: String,
+) -> Option<analytics::TaskAnalyticsDetail> {
+    let st = app.state::<AppState>();
+    // Copy the task out first, then lock analytics — never hold the state lock
+    // and the analytics lock in the opposite order to the collector.
+    let task = {
+        let inner = crate::state::lock(&st.inner);
+        inner
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .or_else(|| {
+                inner
+                    .deleted_tasks
+                    .iter()
+                    .map(|d| &d.task)
+                    .find(|t| t.id == task_id)
+            })
+            .cloned()
+    };
+    let store = crate::state::lock(&st.analytics);
+    analytics::task_detail(&store, &task_id, task.as_ref())
+}
+
+#[tauri::command]
+pub fn get_analytics_collection_status(app: AppHandle) -> analytics::CollectionStatus {
+    let st = app.state::<AppState>();
+    let (enabled, retention_days, capture_error_examples) = {
+        let inner = crate::state::lock(&st.inner);
+        (
+            inner.settings.analytics_enabled,
+            inner.settings.analytics_retention_days,
+            inner.settings.analytics_capture_error_examples,
+        )
+    };
+    let store = crate::state::lock(&st.analytics);
+    analytics::collection_status(&store, enabled, retention_days, capture_error_examples)
+}
+
+#[tauri::command]
+pub fn get_analytics_reliability(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::ReliabilityResult {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::reliability(&store, &filters)
+}
+
+#[tauri::command]
+pub fn get_analytics_interactions(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+) -> analytics::InteractionResult {
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    analytics::interactions(&store, &filters)
+}
+
+#[tauri::command]
+pub fn clear_analytics(app: AppHandle) -> analytics::CollectionStatus {
+    analytics::clear(&app);
+    get_analytics_collection_status(app)
+}
+
+/// Export the current filters' project metrics to `path` (user-chosen, absolute).
+/// CSV guards against spreadsheet formula injection; JSON is inert.
+#[tauri::command]
+pub fn export_analytics(
+    app: AppHandle,
+    filters: analytics::AnalyticsFilters,
+    format: String,
+    path: String,
+) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("no export path given".into());
+    }
+    let target = PathBuf::from(path);
+    if !target.is_absolute() {
+        return Err("export path must be absolute".into());
+    }
+    if let Some(parent) = target.parent() {
+        if !parent.is_dir() {
+            return Err("export folder does not exist".into());
+        }
+    }
+    let names = analytics_project_names(&app);
+    let st = app.state::<AppState>();
+    let store = crate::state::lock(&st.analytics);
+    let generated_at_ms = analytics::now_ms();
+    let bytes = match format.as_str() {
+        "csv" => analytics::export_csv(&store, &filters, &names, generated_at_ms).into_bytes(),
+        "json" => {
+            let payload = serde_json::json!({
+                "generated_at_ms": generated_at_ms,
+                "currency": "USD",
+                "cost_basis": "provider_reported_not_a_bill",
+                "filters": filters,
+                "overview": analytics::overview(&store, &filters),
+                "projects": analytics::projects(&store, &filters, &names),
+                "models": analytics::models(&store, &filters),
+                "reliability": analytics::reliability(&store, &filters),
+                "interactions": analytics::interactions(&store, &filters),
+            });
+            serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("unsupported export format: {other}")),
+    };
+    // Atomic write: a crash mid-export must not leave a truncated file. On
+    // Windows `rename` refuses to overwrite an existing destination, so replace
+    // the previous export explicitly before the final rename.
+    let tmp = target.with_extension(format!(
+        "{}tmp",
+        target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("{e}."))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("could not write export: {e}"))?;
+    if let Err(first) = std::fs::rename(&tmp, &target) {
+        if target.exists() {
+            // Drop the stale export, then retry once; if the retry fails too,
+            // leave the temp file in place rather than losing the new data.
+            let _ = std::fs::remove_file(&target);
+            if let Err(e) = std::fs::rename(&tmp, &target) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("could not finalize export: {e}"));
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("could not finalize export: {first}"));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_draft_patch, archive_task, cancel_task_state, has_dependency_cycle, is_clearable,
-        log_tail, read_sound_file, render_diff, requeue_review, reset_for_rerun, restore_task_state,
-        sound_mime, valid_task_id,
+        apply_task_patch, archive_task, can_resume_task, cancel_task_state, has_dependency_cycle,
+        is_clearable, log_tail, read_sound_file, render_diff, requeue_review, reset_for_rerun,
+        restore_task_state, sound_mime, valid_task_id,
     };
     use crate::models::{
         BranchMode, DeletedTask, DiffResult, FileDiff, GitOp, Isolation, PermissionProfile,
@@ -1863,6 +2250,7 @@ mod tests {
             project_path: "/p".into(),
             title: "t".into(),
             prompt: "p".into(),
+            attachments: Vec::new(),
             isolation,
             profile: PermissionProfile::default(),
             last_permission: None,
@@ -1878,6 +2266,7 @@ mod tests {
             created_at: 1,
             started_at: None,
             finished_at: None,
+            attempts: 0,
             provider: None,
             model: None,
             fallback_provider: None,
@@ -1926,6 +2315,8 @@ mod tests {
             summary: Some("stale".into()),
             started_at: Some(10),
             finished_at: None,
+            attempts: 2,
+            prompt: None,
         });
 
         reset_for_rerun(&mut t);
@@ -1946,6 +2337,7 @@ mod tests {
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::None);
         assert!(r.summary.is_none() && r.finished_at.is_none());
+        assert_eq!(r.attempts, 0, "a re-run gets a fresh review budget");
     }
 
     #[test]
@@ -1954,6 +2346,53 @@ mod tests {
         t.depends_on = vec!["dep".into()];
         reset_for_rerun(&mut t);
         assert_eq!(t.status, TaskStatus::Waiting);
+    }
+
+    #[test]
+    fn a_finished_task_with_a_live_session_can_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        assert!(can_resume_task(&t, std::slice::from_ref(&t)));
+    }
+
+    #[test]
+    fn an_running_or_sessionless_task_cannot_be_continued() {
+        let mut running = task(TaskStatus::Running, Isolation::Shared);
+        running.session_id = Some("ses_1".into());
+        assert!(!can_resume_task(&running, std::slice::from_ref(&running)));
+
+        let mut finished = task(TaskStatus::Failed, Isolation::Shared);
+        finished.session_id = None;
+        assert!(!can_resume_task(&finished, std::slice::from_ref(&finished)));
+    }
+
+    #[test]
+    fn a_task_whose_review_is_still_running_cannot_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        t.review = Some(TaskReview {
+            mode: ReviewMode::Report,
+            status: ReviewStatus::Running,
+            provider: None,
+            model: None,
+            summary: None,
+            started_at: None,
+            finished_at: None,
+            attempts: 1,
+            prompt: None,
+        });
+        assert!(!can_resume_task(&t, std::slice::from_ref(&t)));
+    }
+
+    #[test]
+    fn a_task_another_depends_on_cannot_be_continued() {
+        let mut t = task(TaskStatus::Succeeded, Isolation::Shared);
+        t.session_id = Some("ses_1".into());
+        t.id = "dep".into();
+        let mut dependent = task(TaskStatus::Waiting, Isolation::Shared);
+        dependent.id = "child".into();
+        dependent.depends_on = vec!["dep".into()];
+        assert!(!can_resume_task(&t, &[t.clone(), dependent]));
     }
 
     #[test]
@@ -1983,6 +2422,7 @@ mod tests {
         TaskPatch {
             title: title.map(str::to_string),
             prompt: prompt.map(str::to_string),
+            attachments: None,
             isolation: None,
             profile: None,
             base_ref: None,
@@ -2001,7 +2441,7 @@ mod tests {
         t.title = "old title".into();
         t.prompt = "old prompt".into();
 
-        apply_draft_patch(&mut t, patch(Some("new title"), Some("new prompt"))).unwrap();
+        apply_task_patch(&mut t, patch(Some("new title"), Some("new prompt"))).unwrap();
 
         assert_eq!(t.title, "new title");
         assert_eq!(t.prompt, "new prompt");
@@ -2013,11 +2453,12 @@ mod tests {
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         t.not_before = None;
 
-        apply_draft_patch(
+        apply_task_patch(
             &mut t,
             TaskPatch {
                 title: Some("new title".into()),
                 prompt: Some("new prompt".into()),
+                attachments: Some(vec!["/tmp/a.png".into()]),
                 isolation: Some(Isolation::Shared),
                 profile: Some(PermissionProfile::Readonly),
                 base_ref: Some("main".into()),
@@ -2033,6 +2474,7 @@ mod tests {
 
         assert_eq!(t.title, "new title");
         assert_eq!(t.prompt, "new prompt");
+        assert_eq!(t.attachments, vec!["/tmp/a.png".to_string()]);
         assert_eq!(t.isolation, Isolation::Shared);
         assert_eq!(t.profile, PermissionProfile::Readonly);
         assert_eq!(t.base_ref.as_deref(), Some("main"));
@@ -2049,11 +2491,12 @@ mod tests {
         // stored empty string that later fails worktree creation.
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         t.base_ref = Some("main".into());
-        apply_draft_patch(
+        apply_task_patch(
             &mut t,
             TaskPatch {
                 title: None,
                 prompt: None,
+                attachments: None,
                 isolation: None,
                 profile: None,
                 base_ref: Some("   ".into()),
@@ -2070,11 +2513,31 @@ mod tests {
     }
 
     #[test]
+    fn an_attachment_patch_replaces_and_can_clear_the_list() {
+        let mut t = task(TaskStatus::Draft, Isolation::Worktree);
+        t.attachments = vec!["/tmp/old.txt".into()];
+        let mut p = patch(None, None);
+        p.attachments = Some(vec![" /tmp/new.txt ".into(), "/tmp/new.txt".into()]);
+        apply_task_patch(&mut t, p).unwrap();
+        assert_eq!(t.attachments, vec!["/tmp/new.txt".to_string()]);
+
+        // An empty list clears the attachments; omitting the field leaves them.
+        let mut p = patch(None, None);
+        p.attachments = Some(Vec::new());
+        apply_task_patch(&mut t, p).unwrap();
+        assert!(t.attachments.is_empty());
+
+        t.attachments = vec!["/tmp/keep.txt".into()];
+        apply_task_patch(&mut t, patch(None, None)).unwrap();
+        assert_eq!(t.attachments, vec!["/tmp/keep.txt".to_string()]);
+    }
+
+    #[test]
     fn a_positive_delay_becomes_a_future_hold() {
         let mut t = task(TaskStatus::Draft, Isolation::Worktree);
         let mut p = patch(None, None);
         p.delay_seconds = Some(120);
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
         assert!(
             t.not_before.is_some_and(|nb| nb > super::now()),
             "a positive delay holds the task in the future"
@@ -2090,11 +2553,14 @@ mod tests {
         p.kind = Some(TaskKind::Shell);
         p.command = Some("npm test".into());
 
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
 
         assert_eq!(t.kind, TaskKind::Shell);
         assert_eq!(t.command.as_deref(), Some("npm test"));
-        assert!(t.git_op.is_none(), "git config must not linger on a shell task");
+        assert!(
+            t.git_op.is_none(),
+            "git config must not linger on a shell task"
+        );
     }
 
     #[test]
@@ -2105,29 +2571,47 @@ mod tests {
         let mut p = patch(None, None);
         p.kind = Some(TaskKind::Agent);
 
-        apply_draft_patch(&mut t, p).unwrap();
+        apply_task_patch(&mut t, p).unwrap();
 
         assert_eq!(t.kind, TaskKind::Agent);
         assert!(t.command.is_none(), "a stale shell command must be dropped");
     }
 
     #[test]
-    fn a_released_or_running_task_cannot_be_edited() {
-        // Once a task is queued or has run, its prompt is the instruction the
+    fn a_waiting_or_ready_task_can_be_edited() {
+        // A queued task that has not started may still be edited (e.g. while it
+        // waits for its dependencies to finish).
+        for status in [TaskStatus::Waiting, TaskStatus::Ready] {
+            let mut t = task(status, Isolation::Worktree);
+            t.prompt = "original".into();
+
+            apply_task_patch(&mut t, patch(Some("new title"), Some("rewritten"))).unwrap();
+
+            assert_eq!(t.prompt, "rewritten", "{status:?}");
+            assert_eq!(t.title, "new title", "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_or_finished_task_cannot_be_edited() {
+        // Once a task is running or has run, its prompt is the instruction the
         // agent was given; rewriting it must be rejected, not silently applied.
         for status in [
-            TaskStatus::Waiting,
-            TaskStatus::Ready,
             TaskStatus::Running,
             TaskStatus::Succeeded,
+            TaskStatus::Failed,
             TaskStatus::Interrupted,
+            TaskStatus::Blocked,
         ] {
             let mut t = task(status, Isolation::Worktree);
             t.prompt = "original".into();
 
-            let err = apply_draft_patch(&mut t, patch(None, Some("rewritten"))).unwrap_err();
+            let err = apply_task_patch(&mut t, patch(None, Some("rewritten"))).unwrap_err();
 
-            assert!(err.contains("draft"), "{status:?}: {err}");
+            assert!(
+                err.contains("cannot") || err.contains("draft"),
+                "{status:?}: {err}"
+            );
             assert_eq!(t.prompt, "original", "{status:?} prompt must not change");
         }
     }
@@ -2161,6 +2645,8 @@ mod tests {
                 summary: None,
                 started_at: None,
                 finished_at: None,
+                attempts: 0,
+                prompt: None,
             });
             assert!(!is_clearable(&t), "{status:?} must hold the task");
         }
@@ -2205,6 +2691,8 @@ mod tests {
             summary: None,
             started_at: None,
             finished_at: None,
+            attempts: 0,
+            prompt: None,
         });
     }
 
@@ -2254,7 +2742,11 @@ mod tests {
         .expect("archived");
 
         assert_eq!(project, "/p");
-        assert_eq!(tasks.len(), 1, "only the deleted task leaves the active list");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "only the deleted task leaves the active list"
+        );
         assert!(tasks[0].depends_on.is_empty(), "dependents are rewired");
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0].task.id, "a");
@@ -2375,20 +2867,53 @@ mod tests {
     fn a_failed_review_can_be_requeued() {
         let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Failed);
-        requeue_review(&mut t).unwrap();
+        t.review.as_mut().unwrap().attempts = 3;
+        requeue_review(&mut t, None).unwrap();
         let r = t.review.as_ref().unwrap();
         assert_eq!(r.status, ReviewStatus::Pending);
         assert!(r.summary.is_none() && r.finished_at.is_none());
+        assert_eq!(r.attempts, 0, "a manual re-run gets a fresh budget");
+    }
+
+    #[test]
+    fn a_manual_review_rerun_keeps_the_edited_prompt() {
+        // The user can edit the reviewer prompt before re-running; it is stored
+        // on the review so `start_review` uses it for this attempt.
+        let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Failed);
+        requeue_review(&mut t, Some("only check the parser".into())).unwrap();
+        assert_eq!(
+            t.review.as_ref().unwrap().prompt.as_deref(),
+            Some("only check the parser")
+        );
+
+        // A re-run with no edited prompt clears any previous override.
+        t.review.as_mut().unwrap().status = ReviewStatus::Failed;
+        requeue_review(&mut t, None).unwrap();
+        assert!(t.review.as_ref().unwrap().prompt.is_none());
+    }
+
+    #[test]
+    fn a_blocked_incomplete_review_can_be_requeued() {
+        // Running out of attempts blocks the task; re-running the review puts
+        // the (already succeeded) task back in review.
+        let mut t = task(TaskStatus::Blocked, Isolation::Worktree);
+        reviewed(&mut t, ReviewStatus::Failed);
+        t.error = Some("review could not finish".into());
+        requeue_review(&mut t, None).unwrap();
+        assert_eq!(t.status, TaskStatus::Succeeded);
+        assert!(t.error.is_none());
+        assert_eq!(t.review.as_ref().unwrap().status, ReviewStatus::Pending);
     }
 
     #[test]
     fn a_review_cannot_be_requeued_unless_the_task_succeeded() {
         let mut t = task(TaskStatus::Running, Isolation::Worktree);
         reviewed(&mut t, ReviewStatus::Running);
-        assert!(requeue_review(&mut t).is_err());
+        assert!(requeue_review(&mut t, None).is_err());
 
         let mut t = task(TaskStatus::Succeeded, Isolation::Worktree);
-        assert!(requeue_review(&mut t).is_err(), "no review to re-run");
+        assert!(requeue_review(&mut t, None).is_err(), "no review to re-run");
     }
 
     #[test]
@@ -2440,7 +2965,9 @@ mod tests {
         let b64 = url
             .strip_prefix("data:audio/wav;base64,")
             .expect("data URL with the right MIME type");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         assert_eq!(decoded, b"RIFF....WAVE");
 
         std::fs::remove_dir_all(&dir).ok();

@@ -48,7 +48,7 @@ fn is_noise(body: &str) -> bool {
 
 /// Remove a leading log timestamp (`HH:MM:SS ` or `MM-DD HH:MM:SS `) if present,
 /// so stamped lines are classified by their content.
-fn strip_stamp(line: &str) -> &str {
+pub(crate) fn strip_stamp(line: &str) -> &str {
     let b = line.as_bytes();
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let time = |o: usize| {
@@ -159,8 +159,10 @@ pub fn from_log_file(path: &Path) -> Option<String> {
     from_log(&String::from_utf8_lossy(&buf))
 }
 
-/// The part of a log after the most recent attempt separator, if any.
-fn last_attempt(clean: &str) -> &str {
+/// The part of a log after the most recent attempt separator, if any. Review
+/// logs are appended across re-runs, so callers that read a final result must
+/// use this to ignore earlier attempts.
+pub(crate) fn last_attempt(clean: &str) -> &str {
     match clean.rfind("---- new attempt") {
         Some(i) => match clean[i..].find('\n') {
             Some(j) => &clean[i + j + 1..],

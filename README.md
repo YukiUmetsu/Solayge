@@ -93,6 +93,14 @@ Solayge turns that graph into something you can see and control:
   you or the agent), or the **current branch**.
 - **Task controls** — start now, cancel, retry, remove worktree, delete, clear
   finished.
+- **Attachments** — attach any number of files to an agent task's prompt. Under
+  opencode the files reach the model directly (text and images); other providers
+  receive their paths in the prompt.
+- **Edit before it runs** — a task that has not started yet (a **draft**, or one
+  **waiting** on its dependencies or **ready** in the queue) can still be edited:
+  title, prompt, kind, separation, delay, permissions, and dependencies. Editing
+  the dependencies or delay of a queued task moves it back to **waiting** until
+  they are satisfied again.
 
 ### Visibility
 
@@ -116,6 +124,20 @@ Solayge turns that graph into something you can see and control:
   still queued or running is shown as **In review** (blue, with a pulsing dot)
   and is not counted as done until the review settles.
 - **Desktop notifications** when a task finishes, fails, or requests permission.
+- **Analytics** — a pinned **Analytics** item in the sidebar opens a local-only,
+  cross-project view (last 7/30/90 days or all time) with four tabs: **Overview**,
+  **Projects & Models**, **Reliability**, and **Interactions**. It shows task
+  outcomes and durations, model token usage and provider-reported cost, categorized
+  and fingerprinted error events with recovery/retry/first-pass rates, and the
+  structured questions and permission prompts that pause agents, with human-wait
+  and autonomy metrics. Project and model filters, sortable comparisons, per-task
+  drill-down, and CSV/JSON export are included. A project row also offers **View
+  analytics** to open it prefiltered. Token and cost figures come from opencode
+  agent runs and are labelled as estimates — never as a charge; shell, git, merge,
+  review, and other providers report no usage, which the view shows as
+  *unavailable* rather than zero. Errors and interactions store only categories,
+  fingerprints, and timing — never prompts, commands, or transcripts; redacted
+  error samples are opt-in in Settings.
 
 ### Projects
 
@@ -139,13 +161,29 @@ Solayge turns that graph into something you can see and control:
 - **Automatic code review** — a reviewer reports, auto-fixes, or stops a task for
   your attention.
 - **Interactive questions** — when an agent asks a question or requests
-  permission, the task notifies you and shows the prompt in the side panel.
-  Choice questions can also be answered with free text when the agent allows a
-  custom answer (opencode's `custom` flag), and permission requests spell out the
-  action, the exact target(s), the provider's own details, and what
-  **Always allow** would remember. While a task is running you can also send the
-  agent an arbitrary message at any time — ask a follow-up or add instructions
-  mid-run — and its reply streams into the task log.
+  permission, the task notifies you and raises a transient in-app dialog (and a
+  reply banner in the task's side panel) that names the project and task, shows
+  the task's prompt and recent log, and spells out what is being asked — plus
+  the answer deadline when the agent supplies one. A question with several parts
+  is split into tabs so it can be answered one at a time, and the dialog can be
+  deferred with **More time…** — pick a remind-me-later interval, or send the
+  agent a note with how long you need. The whole task card is tinted and glows
+  while it waits on you (and again when a task is blocked), so a request is never
+  a tiny chip. Choice questions can also be answered with free text when the
+  agent allows a custom answer (opencode's `custom` flag), and permission
+  requests spell out the action, the exact target(s), the provider's own
+  details, and what **Always allow** would remember. While a task is running you
+  can also send the agent an arbitrary message at any time — ask a follow-up or
+  add instructions mid-run — and its reply streams into the task log. The message
+  box stays available after the task has finished, too: when its review has
+  settled and nothing depends on it, sending a message continues the same agent
+  session, flips the task back to **running**, streams the reply, and finalizes
+  it again — without re-running a review that already reached a verdict, unless
+  you choose **Re-run review**. A task that is still in review, or that another
+  task depends on, does not offer the box: resuming it would change what a review
+  or a dependent already consumed. Each surfaced ask is also written to the task log (the question or the
+  requested target, the agent's reason, and — for questions — the choices), so you
+  can look back at why it decided to ask.
 
 ## Requirements
 
@@ -175,12 +213,25 @@ git clone https://github.com/YukiUmetsu/Solayge.git
 cd Solayge
 pnpm install
 pnpm tauri dev      # run the app with hot reload
+pnpm --filter @solayge/mobile tauri android dev # run the android app
 ```
 
 Build a bundle:
 
 ```bash
 pnpm tauri build    # bundles for the host OS (dmg/app, msi/nsis, deb/rpm/AppImage)
+
+# build dmg for macos
+pnpm tauri build --bundles dmg -v
+
+# build for android app (debug)
+pnpm --filter @solayge/mobile tauri android build --debug --apk --target aarch64
+
+# install android debug apk to your mobile phone
+adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+
+# add push gateway for push notifications
+pnpm push:gateway
 ```
 
 On macOS, `pnpm tauri build` goes through `scripts/tauri.mjs`, which wraps the
@@ -195,10 +246,18 @@ Checks used in development:
 ```bash
 pnpm build                     # tsc + vite build (frontend)
 
+pnpm test                      # frontend unit/component tests (Vitest + Testing Library)
+pnpm test:coverage             # the same, with a coverage report
+pnpm test:e2e                  # end-to-end tests (Playwright, mocked Tauri IPC)
+
 cd src-tauri
 cargo test                     # unit tests
 cargo clippy --all-targets     # lints
 ```
+
+The Playwright suite drives the real Vite frontend with a mocked Tauri IPC
+bridge (`e2e/tauri-mock.ts`), so it needs no Rust toolchain, git, or provider
+CLIs. It starts its own dev server on port 4317 to stay clear of `tauri dev`.
 
 ## Concepts
 
@@ -213,10 +272,17 @@ draft → waiting → ready → running → succeeded | failed | canceled | bloc
 
 - **draft** — created, not yet released (the scheduler ignores it).
 - **blocked** — a dependency failed, or a conflict/review needs you.
+- **Editable while queued** — a **draft**, **waiting**, or **ready** task can still
+  be edited (its prompt and every creation parameter). Once it is **running** the
+  prompt is the instruction the agent was given, so edits are rejected.
 - **interrupted** — Solayge stopped while the task was running (crash, forced
   quit, out of disk, or a stalled run). The task did not finish; **Retry** (or
   **Execute**) runs it again, and the reason is written into its log. Nothing
   downstream starts until an interrupted dependency is retried.
+- **Retry after an error** — re-running a task that already ran prepends a
+  **re-run** instruction to its prompt: the agent is told the previous attempt
+  did not finish and to inspect the current state (`git status`, `git diff`, the
+  files in play) and continue rather than repeat work that is already done.
 
 A task that succeeds is not treated as "done" for its dependents until its
 automatic review (if enabled) has finished, so a review or auto-fix can never be
@@ -295,10 +361,13 @@ keep waiting without being failed; a notification fires, and the answer is poste
 back to the live session. Other providers still run non-interactively until they
 gain adapters (see the [roadmap](#roadmap)).
 
-A pending **permission** also raises an app-level popup (with a desktop
-notification) that names the task, the exact directory/command/URL it wants, and
-the purpose, so the decision is made inside Solayge instead of through an opaque OS
-prompt. The same detail appears in the task's side panel. Because a folder outside
+A pending **question or permission** also raises an app-level popup (with a
+desktop notification) that names the project and task, shows the task's prompt
+and recent log, spells out the exact directory/command/URL it wants and the
+purpose — and, when the agent supplies one, counts down to the answer deadline
+— so the decision is made inside Solayge instead of through an opaque OS prompt.
+The same detail appears in the task's side panel, and the ask is recorded in the
+task log. Because a folder outside
 the project is the one permission an agent should never take silently, **every**
 profile — including `autonomous` — asks for it; only the reply differs (autonomous
 still auto-approves every other request).
@@ -425,6 +494,19 @@ different one, so it runs under the same account and subscription. Modes:
 
 The mode can be set account-wide or per project.
 
+The verdict must be the reviewer's **final** line. A reviewer that stops early —
+for example after backgrounding a long build and ending its turn saying it is
+"waiting" for the result — has not produced a verdict, so that attempt is re-run
+automatically (up to three starts in all). An earlier attempt's verdict never
+counts for a later one, and once the retries are spent the task is **blocked** so
+its dependents (a production build, the next step) cannot run on work the
+reviewer never actually checked. Re-run the review from the **Review** tab (or
+retry the task) once it can finish. **Re-run review** opens a prompt editor
+prefilled with the effective reviewer instructions, so you can adjust them for
+that run only before starting it. The reviewer log streams live while an attempt
+is running, and each attempt is appended under a `---- new attempt ----` marker;
+only the last attempt's verdict counts.
+
 The reviewer is deliberately **skeptical**: it is told not to assume the change is
 correct, to distrust summaries and commit messages, to try to falsify the claim
 that the task is done, and to hunt for unhandled edge cases, silent failures,
@@ -444,7 +526,20 @@ Open **Settings** from the gear in the sidebar. It is organised into tabs:
   for projects without their own, and secret storage.
 - **Agent** — provider, model, backup, review, editor, and command templates.
 - **Notifications** — desktop notifications and sounds (see below).
+- **Devices** — the approved phones (see [Mobile companion](#mobile-companion)).
 - **Advanced** — cache retention and stats, and the error log.
+
+### Mobile companion
+
+**Settings → Devices** pairs the Solayge mobile app. **Add phone** opens a
+five-step walkthrough and shows a QR code (plus a copyable **pairing link** for
+when the phone's camera is unavailable). The phone dials the desktop over the
+encrypted Iroh transport; once it sends `pair.begin`, this dialog shows the same
+six-digit verification code and the phone's name for you to compare, and
+**Approve phone** grants it **View + Message** by default. Each phone keeps its
+own revocable identity; revoking one ends its sessions on every transport
+immediately. The desktop listener starts by default (disable it with
+`SOLAYGE_IROH_HOST=0`); it binds loopback unless `SOLAYGE_IROH_BIND` widens it.
 
 ### Notifications
 
@@ -460,10 +555,12 @@ UserNotifications framework (`UNUserNotificationCenter`); the older
 therefore the Tauri notification plugin) use is treated as a legacy connection
 and refused by `usernoted`, so notifications built on it are silently dropped.
 macOS asks for permission the first time the app runs — allow Solayge there.
-Every notification is also surfaced as an in-app toast and plays its sound, so a
-denied OS notification is never the only feedback. Use **Test notification** in
-the Notifications tab to check that the OS allows Solayge to post; failures are
-recorded in the **Advanced** tab's error log.
+If macOS refuses delivery (`UNErrorDomain error 1` — most often permission was
+denied, or the app is running as an unbundled dev binary), the **Notifications**
+tab shows a banner explaining how to allow Solayge and a shortcut to System
+Settings, and the **Test notification** button reports the reason instead of
+hiding it. Every notification is also surfaced as an in-app toast and plays its
+sound, so a denied OS notification is never the only feedback.
 
 Prompts you write for tasks and planner goals are cached and offered as one-click
 suggestions in **New task** and **Plan with AI**. Task logs are treated as cache
@@ -510,6 +607,10 @@ the previous failure stays readable.
   - Linux: `~/.local/share/com.solayge.desktop/`
 - Per-task logs: `<app data dir>/logs/<task-id>.log`
 - Scheduler/crash log: `<app data dir>/logs/scheduler.log`
+- Analytics records: `<app data dir>/analytics.json` (task/run lifecycle, model
+  usage, categorized errors, and structured interactions; controlled in
+  **Settings → Advanced → Analytics**, where you can turn collection off, opt in
+  to redacted error samples, set retention, or clear history)
 - Worktrees: `<project>/.dev-tools/worktrees/<short-id>` (branch `devtools/<short-id>`)
 - Secrets: never in `state.json` — either the OS keychain (macOS/Windows) or
   `<app data dir>/secrets.json` (AES-256-GCM; key in `secrets.key`, mode `0600`)
@@ -551,6 +652,9 @@ src/                  React + TypeScript frontend
 src-tauri/            Tauri app (Rust)
   src/commands.rs     Tauri command surface
   src/scheduler.rs    dispatch loop and task execution (agent/shell/git/merge)
+  src/host.rs         Iroh host: pairing, challenge-response auth, remote reads
+  src/iroh_host.rs    desktop Iroh listener lifecycle and configuration
+  src/devices.rs      desktop identity, QR offers, and the device registry
   src/agent.rs        provider commands, prompt templating, review
   src/permissions.rs  permission profiles and hard rails
   src/git.rs          repository/worktree/diff operations
@@ -569,9 +673,12 @@ src-tauri/            Tauri app (Rust)
    approve/reject and steerable sessions (interrupt, queue prompts), and apply
    permission profiles to providers other than opencode. *opencode is done; Claude
    Code (stream-json control protocol) and the remaining providers are next.*
-3. **Control plane** — an authenticated HTTP/WS API, bound to the Tailscale
-   interface, for a mobile client.
-4. **Mobile client** — monitor, steer, and approve over the tailnet.
+3. **Control plane** — the desktop host pairs and authenticates phones over
+   Iroh and serves projects, tasks, and pending questions. A Tailscale transport
+   is still a planned alternative.
+4. **Mobile client** — pairing, approval, verification, connection, and
+   read-only monitoring are wired over the real Iroh transport. Remote prompt
+   sends, approval responses, and Tailscale fallback are next.
 
 ## Contributing
 

@@ -1,0 +1,32 @@
+[package]
+name = "solayge-identity"
+description = "Stable per-device Solayge application identity, secure key storage, QR pairing with desktop approval, verification fingerprints, and device revocation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The versioned application contract. Pairing frames use its `Envelope`/`Action`
+# namespace; this crate owns the cryptographic material the protocol carries
+# opaquely (see `solayge-protocol::PairIdentityProof`).
+solayge-protocol = { path = "../solayge-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+# Audited Ed25519 (RFC 8032). We do not implement curve arithmetic or signature
+# verification ourselves.
+ed25519-dalek = { version = "2.2.0", features = ["rand_core", "zeroize"] }
+rand = "0.8"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+# Encrypted-at-rest fallback store for desktops without a native secret store.
+aes-gcm = "0.10"
+
+# Apple Keychain (kSecClassGenericPassword) for both macOS and iOS.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = "3.7"
+
+# Android Keystore-backed wrapping key, driven over JNI.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

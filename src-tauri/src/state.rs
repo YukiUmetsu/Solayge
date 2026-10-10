@@ -21,6 +21,10 @@ pub struct AppState {
     pub running: Mutex<HashMap<String, tokio::process::Child>>,
     /// Auto code-review processes, keyed by task id.
     pub reviewing: Mutex<HashMap<String, tokio::process::Child>>,
+    /// Reader tasks streaming each review's stdout/stderr to its log, keyed by
+    /// task id. The reaper drains them before parsing the verdict so the final
+    /// lines cannot race the flush.
+    pub review_readers: Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>,
     /// Multi-step integration (merge) processes, keyed by task id.
     pub merging: Mutex<HashMap<String, tokio::process::Child>>,
     /// Cached provider model lists, keyed by provider command key.
@@ -31,6 +35,9 @@ pub struct AppState {
     /// Last unix second a timestamp was emitted into a log (keyed by task id, or
     /// `review-<id>`), so a timestamp is only written after a quiet gap.
     pub log_stamp: Mutex<HashMap<String, i64>>,
+    /// Local-first analytics records (runs + model usage). Persisted separately
+    /// from `state.json` so task-history pruning/rewrites do not touch it.
+    pub analytics: Mutex<crate::analytics::AnalyticsStore>,
 }
 
 impl AppState {
@@ -47,15 +54,27 @@ impl AppState {
         if migrated || recovered || backfilled {
             let _ = save(&data_dir, &state);
         }
+        // Load analytics and drop anything past the retention window before the
+        // scheduler can add more.
+        let mut analytics = crate::analytics::load_store(&data_dir);
+        if crate::analytics::retain_recent(
+            &mut analytics,
+            state.settings.analytics_retention_days,
+            crate::analytics::now_ms(),
+        ) {
+            let _ = crate::analytics::save_store(&data_dir, &analytics);
+        }
         let st = AppState {
             data_dir,
             inner: Mutex::new(state),
             running: Mutex::new(HashMap::new()),
             reviewing: Mutex::new(HashMap::new()),
+            review_readers: Mutex::new(HashMap::new()),
             merging: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             heartbeat: Mutex::new(HashMap::new()),
             log_stamp: Mutex::new(HashMap::new()),
+            analytics: Mutex::new(analytics),
         };
         // Drop cache that is already past its retention window.
         crate::cache::prune(&st);
@@ -111,9 +130,7 @@ impl AppState {
         {
             let mut inner = lock(&self.inner);
             match inner.tasks.iter_mut().find(|t| t.id == id) {
-                Some(t) if t.result.as_deref() != Some(result.as_str()) => {
-                    t.result = Some(result)
-                }
+                Some(t) if t.result.as_deref() != Some(result.as_str()) => t.result = Some(result),
                 _ => return false,
             }
         }
@@ -250,7 +267,12 @@ fn migrate_legacy(data_dir: &Path, state: &mut PersistedState) -> bool {
 
         // Preserve file-store secrets. Keychain/DPAPI items are keyed by
         // service + account (not the identifier), so they carry over on their own.
-        for name in ["secrets.json", "secrets.key", "secrets.win.json"] {
+        for name in [
+            "secrets.json",
+            "secrets.key",
+            "secrets.win.json",
+            "analytics.json",
+        ] {
             let from = legacy.join(name);
             let to = data_dir.join(name);
             if from.is_file() && !to.exists() {
@@ -310,6 +332,11 @@ fn recover_interrupted(data_dir: &Path, state: &mut PersistedState) -> bool {
         }
     }
     for t in state.tasks.iter_mut() {
+        // No provider session survives a restart, so a saved session id is
+        // stale. Clear it before it is offered as a continuable session.
+        if t.session_id.take().is_some() {
+            changed = true;
+        }
         if let Some(r) = t.review.as_mut() {
             if r.status == ReviewStatus::Running {
                 // Re-queue so the scheduler runs (or re-runs) the review.
@@ -569,7 +596,8 @@ mod tests {
             })
             .collect();
         for h in handles {
-            h.join().expect("worker thread must not panic (no deadlock)");
+            h.join()
+                .expect("worker thread must not panic (no deadlock)");
         }
         // A final save after quiescence; with the bounded-retry save, no
         // mutation should have been lost.
@@ -658,7 +686,11 @@ mod tests {
 
         assert!(recover_interrupted(&root, &mut state));
         assert_eq!(state.tasks[0].status, TaskStatus::Interrupted);
-        assert!(state.tasks[0].error.as_deref().unwrap().contains("Interrupted"));
+        assert!(state.tasks[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Interrupted"));
         assert_eq!(
             state.tasks[1].review.as_ref().unwrap().status,
             ReviewStatus::Pending
@@ -691,13 +723,48 @@ mod tests {
         .unwrap();
 
         assert!(recover_interrupted(&root, &mut state));
-        assert!(state.tasks[0].ask.is_none(), "interrupted ask must be dropped");
+        assert!(
+            state.tasks[0].ask.is_none(),
+            "interrupted ask must be dropped"
+        );
         assert!(state.tasks[1].ask.is_none(), "canceled ask must be dropped");
         // Only the unanswerable ask is removed; the statuses are left alone.
         assert_eq!(state.tasks[0].status, TaskStatus::Interrupted);
         assert_eq!(state.tasks[1].status, TaskStatus::Canceled);
 
         // Idempotent once the asks are gone.
+        assert!(!recover_interrupted(&root, &mut state));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recovery_forgets_saved_agent_sessions() {
+        // An opencode session belongs to a `opencode serve` process that does not
+        // survive a restart, so a persisted session id must not leave a finished
+        // task looking continuable.
+        let root = std::env::temp_dir().join(format!("solayge-recover4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state: PersistedState = serde_json::from_str(
+            r#"{"tasks":[
+                {"id":"done","project_path":"/p","title":"a","prompt":"p","status":"succeeded","created_at":1,
+                 "session_id":"ses_1"},
+                {"id":"run","project_path":"/p","title":"b","prompt":"p","status":"running","created_at":2,
+                 "session_id":"ses_2"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert!(recover_interrupted(&root, &mut state));
+        assert!(
+            state.tasks[0].session_id.is_none(),
+            "a finished run's session is stale"
+        );
+        assert!(
+            state.tasks[1].session_id.is_none(),
+            "an interrupted run's session is stale"
+        );
+        // Idempotent once the sessions are gone.
         assert!(!recover_interrupted(&root, &mut state));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -721,11 +788,20 @@ mod tests {
         };
 
         let snap = snapshot_of(&state, 1);
-        let has_ask =
-            |id: &str| snap.tasks.iter().find(|t| t.id == id).unwrap().ask.is_some();
+        let has_ask = |id: &str| {
+            snap.tasks
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .ask
+                .is_some()
+        };
 
         assert!(has_ask("run"), "a running task keeps its ask");
-        assert!(!has_ask("int"), "an interrupted task must not expose an ask");
+        assert!(
+            !has_ask("int"),
+            "an interrupted task must not expose an ask"
+        );
         assert!(!has_ask("done"), "a succeeded task must not expose an ask");
         // Only the snapshot copy is sanitized; the persisted state is untouched.
         assert!(state.tasks[1].ask.is_some());

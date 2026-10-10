@@ -265,6 +265,16 @@ pub struct TaskReview {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// How many times this review has been started. A review that ends without
+    /// a final verdict is attempted again until [`crate::scheduler`]'s limit,
+    /// then it blocks the task so dependents do not run on unreviewed work.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Review-only custom instructions for the next run, set when the user edits
+    /// the prompt before re-running a review. `None` falls back to the project
+    /// then account `review_prompt`. Cleared when the task is re-run.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// Whether an agent is asking a question or requesting permission.
@@ -380,8 +390,18 @@ pub struct TaskAsk {
     /// The provider session this ask belongs to (for opencode, `ses_…`).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When the ask surfaced (unix seconds). Set by the scheduler if the
+    /// provider did not supply one, so a wait can be measured.
     #[serde(default)]
     pub created_at: Option<i64>,
+    /// A wall-clock deadline (unix seconds) after which the provider stops
+    /// waiting for an answer, when it supplied one. `None` waits indefinitely.
+    #[serde(default)]
+    pub deadline: Option<i64>,
+    /// A provider-supplied relative wait (seconds) instead of a deadline.
+    /// Resolved into `deadline` when the ask is surfaced.
+    #[serde(default)]
+    pub timeout_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +410,10 @@ pub struct Task {
     pub project_path: String,
     pub title: String,
     pub prompt: String,
+    /// Absolute paths of files attached to the prompt. Passed to the provider
+    /// as real attachments (opencode) or listed in the prompt (other CLIs).
+    #[serde(default)]
+    pub attachments: Vec<String>,
     #[serde(default)]
     pub isolation: Isolation,
     #[serde(default)]
@@ -421,6 +445,11 @@ pub struct Task {
     pub started_at: Option<i64>,
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// How many times the scheduler has dispatched this task. `0` means it has
+    /// never run; a value `> 1` marks the current run as a re-run of a previous
+    /// attempt, so the prompt can tell the agent to continue rather than repeat.
+    #[serde(default)]
+    pub attempts: u32,
 
     // ---- agent configuration, resolved when the task is created ----
     #[serde(default)]
@@ -689,6 +718,10 @@ fn default_retention_days() -> i64 {
     30
 }
 
+fn default_analytics_retention() -> i64 {
+    90
+}
+
 fn default_true() -> bool {
     true
 }
@@ -848,6 +881,18 @@ pub struct Settings {
     /// Desktop notification + sound preferences.
     #[serde(default)]
     pub notifications: NotificationSettings,
+    /// Collect local, content-free analytics (task/run lifecycle, model usage,
+    /// tokens, provider-reported cost). On by default; disabling stops new
+    /// collection without deleting existing records.
+    #[serde(default = "default_true")]
+    pub analytics_enabled: bool,
+    /// How long analytics records are kept, in days. `0` keeps forever.
+    #[serde(default = "default_analytics_retention")]
+    pub analytics_retention_days: i64,
+    /// Store a redacted, length-bounded sample alongside each error event.
+    /// Off by default: error summaries can contain sensitive fragments.
+    #[serde(default)]
+    pub analytics_capture_error_examples: bool,
 }
 
 impl Default for Settings {
@@ -867,6 +912,9 @@ impl Default for Settings {
             command_templates: CommandTemplates::default(),
             secret_store: None,
             notifications: NotificationSettings::default(),
+            analytics_enabled: true,
+            analytics_retention_days: default_analytics_retention(),
+            analytics_capture_error_examples: false,
         }
     }
 }
@@ -1041,6 +1089,48 @@ pub struct DiffResult {
     pub files: Vec<FileDiff>,
 }
 
+/// One commit in a branch/worktree's history, summarized for the Git view.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitSummary {
+    pub id: String,
+    pub short_id: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub files_changed: u32,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+/// One file touched by a commit, with its change counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitFile {
+    pub path: String,
+    pub status: String,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+/// Worktree landing detail: how far it is from the base branch, when it last
+/// changed, and its recent commits. Computed only on demand so the default Git
+/// view stays cheap.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeDetail {
+    pub path: String,
+    pub branch: Option<String>,
+    pub base: String,
+    pub head: Option<String>,
+    /// Commits on `base..HEAD` (the work this worktree introduces).
+    pub commit_count: i64,
+    pub files_changed: u32,
+    pub additions: i64,
+    pub deletions: i64,
+    pub last_commit_at: Option<i64>,
+    pub last_commit_subject: Option<String>,
+    pub dirty: bool,
+    pub commits: Vec<CommitSummary>,
+}
+
 // ---- planning DTOs ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1078,6 +1168,9 @@ pub struct NewTask {
     pub local_id: Option<String>,
     pub title: String,
     pub prompt: String,
+    /// Absolute paths of files to attach to the prompt.
+    #[serde(default)]
+    pub attachments: Vec<String>,
     #[serde(default)]
     pub isolation: Option<Isolation>,
     #[serde(default)]
@@ -1109,6 +1202,9 @@ pub struct TaskPatch {
     pub title: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Absolute paths of files attached to the prompt; `None` leaves them.
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
     #[serde(default)]
     pub isolation: Option<Isolation>,
     #[serde(default)]
@@ -1271,7 +1367,10 @@ mod tests {
             ..Default::default()
         };
         for kind in ALL_KINDS {
-            assert!(!n.allows(kind), "{kind:?} must be silenced by the master switch");
+            assert!(
+                !n.allows(kind),
+                "{kind:?} must be silenced by the master switch"
+            );
         }
     }
 
@@ -1337,7 +1436,10 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "enabled": false }))
                 .expect("a partial object is valid");
         assert!(!partial.enabled);
-        assert!(partial.on_task_complete, "unspecified toggles keep their default");
+        assert!(
+            partial.on_task_complete,
+            "unspecified toggles keep their default"
+        );
         assert_eq!(partial.complete_sound.as_deref(), Some("complete"));
     }
 

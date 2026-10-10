@@ -1,0 +1,26 @@
+[package]
+name = "solayge-push-gateway"
+description = "Minimal, authenticated push gateway that routes opaque Solayge mobile alerts to FCM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Blocking HTTP client for the FCM HTTP v1 API and the Google OAuth token
+# exchange. rustls avoids a system OpenSSL dependency.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+# RS256 signing for the service-account JWT. The service-account private key is
+# only ever loaded on the gateway, never in a distributed app.
+jsonwebtoken = "9"
+# A tiny, dependency-light HTTP server. The gateway is a single small process.
+tiny_http = "0.12"
+
+[dev-dependencies]
+# The routing/auth tests use a fake sender, so they never touch the network.
+serde_json.workspace = true

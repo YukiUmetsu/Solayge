@@ -45,6 +45,19 @@ export function isRetryable(task: { status: TaskStatus }): boolean {
 }
 
 /**
+ * Whether the task's details/prompt may still be edited. A draft has not been
+ * released; a waiting or ready task is queued but has not started, so changing
+ * it is still safe. Mirrors the backend `commands::is_editable_status`.
+ */
+export function canEditTask(task: { status: TaskStatus }): boolean {
+  return (
+    task.status === "draft" ||
+    task.status === "waiting" ||
+    task.status === "ready"
+  );
+}
+
+/**
  * Mirrors the backend `is_clearable`: finished successes and failures go;
  * paused (blocked) and retryable (interrupted) tasks stay, as does a success
  * whose review has not settled.
@@ -82,6 +95,24 @@ export function isReviewInProgress(task: Task): boolean {
 
 export function displayStatus(task: Task): TaskDisplayStatus {
   return isReviewInProgress(task) ? "in_review" : task.status;
+}
+
+/**
+ * Whether the task should offer the "message the agent" input. While a task is
+ * running the agent is live, so the input stays. Once it has finished (success
+ * or error) the same opencode session can still be continued — but only when a
+ * review is not in progress and nothing depends on the task, because resuming
+ * it changes what a dependent (or a review) already consumed. Mirrors the
+ * backend `commands::can_resume_task`.
+ */
+export function canMessageTask(task: Task, tasks: Task[]): boolean {
+  if (!task.session_id) return false;
+  if (task.status === "running") return true;
+  if (task.status !== "succeeded" && task.status !== "failed") return false;
+  if (isReviewInProgress(task)) return false;
+  return !tasks.some(
+    (d) => d.id !== task.id && d.depends_on.includes(task.id),
+  );
 }
 
 export const IN_REVIEW_META: StatusMeta = {

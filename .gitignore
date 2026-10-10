@@ -24,3 +24,20 @@ dist-ssr
 *.sw?
 .vite/
 .history/
+
+# Test output
+coverage/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Rust workspace build output (crates/, apps/mobile)
+/target/
+apps/mobile/src-tauri/target/
+
+# Tauri-generated capability schemas
+apps/mobile/src-tauri/gen/schemas/
+
+# Firebase client config (public, but environment-specific and not committed).
+apps/mobile/src-tauri/gen/android/app/google-services.json

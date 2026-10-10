@@ -53,6 +53,8 @@ export function NewTaskModal({
           {
             title: form.title.trim() || text.trim().slice(0, 48),
             prompt: text,
+            // Attachments belong to agent prompts only.
+            attachments: shell ? [] : form.attachments,
             kind: shell ? "shell" : "agent",
             command: shell ? script : null,
             isolation,

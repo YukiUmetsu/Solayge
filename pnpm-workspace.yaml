@@ -1,0 +1,15 @@
+# pnpm workspace for Solayge.
+#
+# The desktop app is the root package (`solayge`); new mobile/packages live
+# under apps/ and packages/. The desktop build keeps working unchanged:
+# `pnpm install`, `pnpm build`, `pnpm test`, and `pnpm tauri …` run from the
+# root package exactly as before.
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Security: force the patched source-map-js (>=1.2.2). The vulnerable 1.2.1 is
+# pulled transitively by build/test tooling (vite/postcss, css-tree, tailwind);
+# GHSA-68fv-2mgg-jv7q (event-loop DoS via indexed source-map offsets).
+overrides:
+  source-map-js: "^1.2.2"

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BranchInfo,
   CacheStats,
+  CommitFile,
   DiffResult,
   EnvValue,
   EnvironmentStatus,
@@ -19,6 +20,23 @@ import type {
   Snapshot,
   TaskPatch,
   Worktree,
+  WorktreeDetail,
+  AnalyticsFilters,
+  AnalyticsOverview,
+  AnalyticsTimeSeriesPoint,
+  AnalyticsProjectMetric,
+  AnalyticsModelMetric,
+  AnalyticsTaskDetail,
+  AnalyticsCollectionStatus,
+  ReliabilityResult,
+  InteractionResult,
+  ConnectedDevice,
+  DesktopIdentity,
+  PairingOffer,
+  PairingStatus,
+  PushGatewayStatus,
+  RemoteAccessPreferences,
+  RemoteStatus,
 } from "./types";
 
 export const api = {
@@ -28,6 +46,16 @@ export const api = {
   projectStatus: (path: string) => invoke<GitStatus>("project_status", { path }),
   projectWorktrees: (path: string) =>
     invoke<Worktree[]>("project_worktrees", { path }),
+  worktreeDetail: (path: string, worktree: string, limit?: number | null) =>
+    invoke<WorktreeDetail>("worktree_detail", {
+      path,
+      worktree,
+      limit: limit ?? null,
+    }),
+  worktreeCommitFiles: (path: string, commit: string) =>
+    invoke<CommitFile[]>("worktree_commit_files", { path, commit }),
+  gitRevertCommit: (path: string, commit: string) =>
+    invoke<string>("git_revert_commit", { path, commit }),
   projectBranches: (path: string) =>
     invoke<BranchInfo[]>("project_branches", { path }),
   gitMergeBranch: (path: string, branch: string, target?: string | null) =>
@@ -84,8 +112,8 @@ export const api = {
     invoke<Snapshot>("start_task_now", { taskId }),
   cancel: (taskId: string) => invoke<Snapshot>("cancel_task", { taskId }),
   retry: (taskId: string) => invoke<Snapshot>("retry_task", { taskId }),
-  retryReview: (taskId: string) =>
-    invoke<Snapshot>("retry_review", { taskId }),
+  retryReview: (taskId: string, prompt?: string | null) =>
+    invoke<Snapshot>("retry_review", { taskId, prompt: prompt ?? null }),
   answerTask: (taskId: string, answer: Record<string, unknown>) =>
     invoke<Snapshot>("answer_task", { taskId, answer }),
   sendTaskMessage: (taskId: string, text: string) =>
@@ -128,6 +156,19 @@ export const api = {
   clearErrorLog: () => invoke<void>("clear_error_log"),
   readSound: (path: string) => invoke<string>("read_sound_file", { path }),
   testNotification: () => invoke<void>("test_notification"),
+  // Background push: the embedded gateway and an on-demand synthetic push.
+  pushTestQuestion: (sessionId?: string | null) =>
+    invoke<string>("push_test_question", { sessionId: sessionId ?? null }),
+  pushGatewayStatus: () => invoke<PushGatewayStatus>("push_gateway_status"),
+  pushGatewayApply: (enabled: boolean, serviceAccount?: string | null, port?: number | null) =>
+    invoke<PushGatewayStatus>("push_gateway_apply", {
+      enabled,
+      serviceAccount: serviceAccount ?? null,
+      port: port ?? null,
+    }),
+  pushGatewayHealth: () => invoke<string>("push_gateway_health"),
+  notificationStatus: () => invoke<string>("notification_status"),
+  openNotificationSettings: () => invoke<void>("open_notification_settings"),
 
   // ---- projects ----
   reorderProjects: (paths: string[]) =>
@@ -153,6 +194,53 @@ export const api = {
   listModels: (provider: Provider, force = false) =>
     invoke<string[]>("list_models", { provider, force }),
 
+  // ---- connected devices (mobile pairing) ----
+  desktopIdentity: () => invoke<DesktopIdentity>("desktop_identity"),
+  devicesList: () => invoke<ConnectedDevice[]>("devices_list"),
+  pairingStart: () => invoke<PairingOffer>("pairing_start"),
+  pairingStatus: (pairingId: string) =>
+    invoke<PairingStatus | null>("pairing_status", { pairingId }),
+  pairingApprove: (pairingId: string, scopes?: string[] | null) =>
+    invoke<ConnectedDevice>("pairing_approve", {
+      pairingId,
+      scopes: scopes ?? null,
+    }),
+  pairingReject: (pairingId: string) =>
+    invoke<void>("pairing_reject", { pairingId }),
+  deviceRevoke: (deviceId: string) =>
+    invoke<void>("device_revoke", { deviceId }),
+
+  // ---- remote access (WebSocket listener + Tailscale Serve) ----
+  remoteStatus: () => invoke<RemoteStatus>("remote_status"),
+  remoteApply: (prefs: RemoteAccessPreferences) =>
+    invoke<RemoteStatus>("remote_apply", { prefs }),
+  remoteRetry: () => invoke<RemoteStatus>("remote_retry"),
+
   // ---- preflight ----
   environmentCheck: () => invoke<EnvironmentStatus>("environment_check"),
+
+  // ---- analytics ----
+  analyticsOverview: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsOverview>("get_analytics_overview", { filters }),
+  analyticsTimeseries: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsTimeSeriesPoint[]>("get_analytics_timeseries", { filters }),
+  analyticsProjects: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsProjectMetric[]>("get_analytics_projects", { filters }),
+  analyticsModels: (filters: AnalyticsFilters) =>
+    invoke<AnalyticsModelMetric[]>("get_analytics_models", { filters }),
+  analyticsReliability: (filters: AnalyticsFilters) =>
+    invoke<ReliabilityResult>("get_analytics_reliability", { filters }),
+  analyticsInteractions: (filters: AnalyticsFilters) =>
+    invoke<InteractionResult>("get_analytics_interactions", { filters }),
+  analyticsTaskDetail: (taskId: string) =>
+    invoke<AnalyticsTaskDetail | null>("get_analytics_task_detail", { taskId }),
+  analyticsCollectionStatus: () =>
+    invoke<AnalyticsCollectionStatus>("get_analytics_collection_status"),
+  clearAnalytics: () =>
+    invoke<AnalyticsCollectionStatus>("clear_analytics"),
+  exportAnalytics: (
+    filters: AnalyticsFilters,
+    format: "csv" | "json",
+    path: string,
+  ) => invoke<void>("export_analytics", { filters, format, path }),
 };

@@ -24,13 +24,35 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 # Local HTTP client for the opencode v2 server API (interactive questions and
 # permission prompts). Plain HTTP to 127.0.0.1, so no TLS backend is needed.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 # Local wall-clock timestamps in task logs (already in the dependency tree).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Encrypted-at-rest storage for per-project environment variables.
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+# Per-device identity, QR pairing, and device revocation for the mobile host.
+solayge-identity = { path = "../crates/solayge-identity" }
+# The versioned, transport-neutral remote protocol DTOs the host serves.
+solayge-protocol = { path = "../crates/solayge-protocol" }
+# The FCM gateway server, embedded so the desktop runs its own loopback push
+# gateway when the user configures a Firebase service account.
+solayge-push-gateway = { path = "../crates/solayge-push-gateway" }
+# Optional: the Iroh-encrypted transport and connection manager. Enabled with
+# the `mobile-network` feature; a normal desktop build does not pull it in.
+solayge-network = { path = "../crates/solayge-network", optional = true }
+
+[features]
+default = ["mobile-network"]
+# The Iroh-encrypted host listener phone clients connect to. On by default so a
+# paired phone can reach the desktop; the listener is additionally opt-out at
+# runtime via `SOLAYGE_IROH_HOST=0`.
+mobile-network = ["dep:solayge-network"]
+
+[dev-dependencies]
+# Enables `tauri::test::mock_app`, so the host handshake can be tested without a
+# real window or a real network endpoint.
+tauri = { version = "2", features = ["test"] }
 
 # macOS desktop notifications go through the modern UserNotifications
 # framework. The older `NSUserNotificationCenter` (used by `notify-rust` /
@@ -72,3 +94,9 @@ incremental = false
 
 [profile.dev.package."*"]
 debug = false
+
+# The desktop app is its own workspace root. Without this table, Cargo would
+# discover the repository-level workspace (which hosts the mobile crate) and
+# reject this package as a non-member. Keeping it standalone preserves the
+# `src-tauri/target` output directory the build scripts depend on.
+[workspace]

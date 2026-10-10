@@ -371,7 +371,12 @@ pub fn worktree_root(repo: &Path) -> PathBuf {
 pub async fn branch_exists(dir: &Path, branch: &str) -> bool {
     if git_ok(
         dir,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .await
     {
@@ -474,15 +479,18 @@ pub async fn has_staged_changes(dir: &Path) -> bool {
 /// empty, not option-like (leading `-`), and free of whitespace/control chars.
 pub fn valid_ref(name: &str) -> bool {
     let t = name.trim();
-    !t.is_empty()
-        && !t.starts_with('-')
-        && !t.chars().any(|c| c.is_whitespace() || c.is_control())
+    !t.is_empty() && !t.starts_with('-') && !t.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// The repository's default branch: `origin/HEAD`, else `main`/`master`, else
 /// the current branch.
 pub async fn default_branch(repo: &Path) -> String {
-    if let Ok(s) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).await {
+    if let Ok(s) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
         if let Some(name) = s.trim().strip_prefix("origin/") {
             if !name.is_empty() {
                 return name.to_string();
@@ -492,7 +500,12 @@ pub async fn default_branch(repo: &Path) -> String {
     for cand in ["main", "master"] {
         if git_ok(
             repo,
-            &["show-ref", "--verify", "--quiet", &format!("refs/heads/{cand}")],
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{cand}"),
+            ],
         )
         .await
         {
@@ -516,7 +529,12 @@ pub async fn has_changes(dir: &Path) -> bool {
 pub async fn conflicted_files(dir: &Path) -> Vec<String> {
     git(dir, &["diff", "--name-only", "--diff-filter=U"])
         .await
-        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -541,10 +559,7 @@ pub async fn ahead_behind(dir: &Path, base: &str, branch: &str) -> (i64, i64) {
         Ok(out) => {
             let parts: Vec<&str> = out.split_whitespace().collect();
             if parts.len() == 2 {
-                (
-                    parts[0].parse().unwrap_or(0),
-                    parts[1].parse().unwrap_or(0),
-                )
+                (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0))
             } else {
                 (0, 0)
             }
@@ -570,12 +585,19 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
         .filter_map(|w| w.branch.map(|b| (b, w.path)))
         .collect();
 
-    let local_out = git(repo, &["for-each-ref", "refs/heads", "--format=%(refname:short)"])
-        .await
-        .unwrap_or_default();
+    let local_out = git(
+        repo,
+        &["for-each-ref", "refs/heads", "--format=%(refname:short)"],
+    )
+    .await
+    .unwrap_or_default();
     let remote_out = git(
         repo,
-        &["for-each-ref", "refs/remotes/origin", "--format=%(refname:short)"],
+        &[
+            "for-each-ref",
+            "refs/remotes/origin",
+            "--format=%(refname:short)",
+        ],
     )
     .await
     .unwrap_or_default();
@@ -624,11 +646,7 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
 
     // Remote-tracking branches with no local counterpart: they can still be
     // landed or deleted from here.
-    for r in remote_out
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    for r in remote_out.lines().map(str::trim).filter(|s| !s.is_empty()) {
         let Some(name) = r.strip_prefix("origin/") else {
             continue;
         };
@@ -657,6 +675,261 @@ pub async fn branches(repo: &Path) -> Result<Vec<BranchInfo>> {
         });
     }
     Ok(out)
+}
+
+/// Parse `git diff --shortstat` output such as
+/// `3 files changed, 10 insertions(+), 2 deletions(-)`.
+fn parse_shortstat(text: &str) -> (u32, i64, i64) {
+    let mut files = 0u32;
+    let mut additions = 0i64;
+    let mut deletions = 0i64;
+    for part in text.split(',') {
+        let part = part.trim();
+        let number: i64 = part
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if part.contains("file") {
+            files = number.max(0) as u32;
+        } else if part.contains("insertion") {
+            additions = number;
+        } else if part.contains("deletion") {
+            deletions = number;
+        }
+    }
+    (files, additions, deletions)
+}
+
+/// Parse one `git log` record (`<sha>␟<short>␟<author>␟<unix-seconds>␟<subject>`
+/// followed by optional `--shortstat` output) into a commit summary.
+fn parse_commit_record(record: &str) -> Option<crate::models::CommitSummary> {
+    let record = record.trim_start_matches('\n');
+    let (header, rest) = match record.split_once('\n') {
+        Some((header, rest)) => (header, rest),
+        None => (record, ""),
+    };
+    let mut fields = header.split('\u{1f}');
+    let id = fields.next()?.trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let short_id = fields.next().unwrap_or("").trim().to_string();
+    let author = fields.next().unwrap_or("").trim().to_string();
+    let committed_at = fields.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    let subject = fields.next().unwrap_or("").trim().to_string();
+    let (files_changed, additions, deletions) = parse_shortstat(rest);
+    Some(crate::models::CommitSummary {
+        id,
+        short_id,
+        subject,
+        author,
+        committed_at,
+        files_changed,
+        additions,
+        deletions,
+    })
+}
+
+/// Parse `git log` output into commit summaries. Records are separated by the
+/// ASCII record separator (`\u{1e}`) so a multi-line subject can never be
+/// mistaken for a stat line.
+fn parse_commits(output: &str) -> Vec<crate::models::CommitSummary> {
+    output
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+        .filter_map(parse_commit_record)
+        .collect()
+}
+
+/// Worktree landing detail against the repository's default branch: how many
+/// commits and files it introduces, when it last changed, and its recent
+/// commits. Computed on demand so the default Git view stays cheap.
+pub async fn worktree_detail(
+    repo: &Path,
+    worktree: &Path,
+    limit: usize,
+) -> Result<crate::models::WorktreeDetail> {
+    if !is_repo(repo).await {
+        return Err(anyhow!("not a git repository"));
+    }
+    let base = default_branch(repo).await;
+    let branch = current_branch(worktree).await;
+    let head = git(worktree, &["rev-parse", "HEAD"])
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let range = format!("{base}..HEAD");
+    let commit_count = git(worktree, &["rev-list", "--count", &range])
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+
+    // Three-dot diff: only the work this branch introduces since diverging.
+    let diff_range = format!("{base}...HEAD");
+    let shortstat = git(worktree, &["diff", "--shortstat", &diff_range])
+        .await
+        .unwrap_or_default();
+    let (files_changed, additions, deletions) = parse_shortstat(&shortstat);
+
+    let (last_commit_at, last_commit_subject) =
+        match git(worktree, &["log", "-1", "--format=%ct\u{1f}%s"]).await {
+            Ok(line) => {
+                let mut parts = line.trim().split('\u{1f}');
+                let at = parts.next().and_then(|s| s.trim().parse::<i64>().ok());
+                let subject = parts
+                    .next()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                (at, subject)
+            }
+            Err(_) => (None, None),
+        };
+
+    let cap = limit.clamp(1, 200);
+    let log = git(
+        worktree,
+        &[
+            "log",
+            &format!("-{cap}"),
+            "--shortstat",
+            "--format=\u{1e}%H\u{1f}%h\u{1f}%an\u{1f}%ct\u{1f}%s",
+            &range,
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    Ok(crate::models::WorktreeDetail {
+        path: worktree.to_string_lossy().to_string(),
+        branch,
+        base,
+        head,
+        commit_count,
+        files_changed,
+        additions,
+        deletions,
+        last_commit_at,
+        last_commit_subject,
+        dirty: has_changes(worktree).await,
+        commits: parse_commits(&log),
+    })
+}
+
+/// The files one commit touched, with add/delete counts. The status comes from
+/// `--name-status` so a modification that happens to only add lines is still
+/// reported as modified, not added.
+pub async fn commit_files(dir: &Path, sha: &str) -> Result<Vec<crate::models::CommitFile>> {
+    if !valid_commit(sha) {
+        return Err(anyhow!("invalid commit id: {sha}"));
+    }
+    let numstat = git(
+        dir,
+        &["show", "--numstat", "--format=", "--find-renames", sha],
+    )
+    .await?;
+    let name_status = git(
+        dir,
+        &["show", "--name-status", "--format=", "--find-renames", sha],
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut statuses: HashMap<String, String> = HashMap::new();
+    for line in name_status.lines() {
+        let mut parts = line.split('\t');
+        let code = parts.next().unwrap_or("").trim();
+        let paths: Vec<&str> = parts.collect();
+        let Some(path) = paths.last().map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let status = match code.chars().next() {
+            Some('A') => "added",
+            Some('D') => "deleted",
+            Some('R') => "renamed",
+            Some('C') => "copied",
+            _ => "modified",
+        };
+        statuses.insert(path.to_string(), status.to_string());
+    }
+
+    let mut files = Vec::new();
+    for line in numstat.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let adds_raw = parts.next().unwrap_or("").trim();
+        let dels_raw = parts.next().unwrap_or("").trim();
+        let Some(raw_path) = parts.next().map(str::trim).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        // `--numstat` reports a rename as `dir/{old => new}.ext`; report the
+        // destination path so it matches `--name-status` and reads sanely.
+        let path = rename_target(raw_path);
+        files.push(crate::models::CommitFile {
+            path: path.clone(),
+            status: statuses
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| "modified".to_string()),
+            additions: adds_raw.parse::<i64>().unwrap_or(0),
+            deletions: dels_raw.parse::<i64>().unwrap_or(0),
+        });
+    }
+    Ok(files)
+}
+
+/// Resolve git's compact rename notation to the destination path:
+/// `src/{old => new}.ts` -> `src/new.ts`, `old => new` -> `new`.
+fn rename_target(path: &str) -> String {
+    if let (Some(open), Some(close)) = (path.find('{'), path.rfind('}')) {
+        if open < close {
+            let prefix = &path[..open];
+            let inner = &path[open + 1..close];
+            let suffix = &path[close + 1..];
+            if let Some(arrow) = inner.find(" => ") {
+                return format!("{prefix}{}{suffix}", &inner[arrow + 4..]);
+            }
+        }
+    }
+    if let Some(arrow) = path.find(" => ") {
+        return path[arrow + 4..].to_string();
+    }
+    path.to_string()
+}
+
+/// Undo a commit by reverting it (a new commit that inverts its changes), so
+/// history is preserved and nothing is discarded. Refuses an invalid id and a
+/// dirty working tree (a revert needs a clean tree to start from); a conflicted
+/// revert is aborted so the worktree is never left mid-revert.
+pub async fn revert_commit(dir: &Path, sha: &str) -> Result<String> {
+    if !valid_commit(sha) {
+        return Err(anyhow!("invalid commit id: {sha}"));
+    }
+    if has_tracked_changes(dir).await {
+        return Err(anyhow!(
+            "the working tree has uncommitted changes; commit or stash them first"
+        ));
+    }
+    match git(dir, &["revert", "--no-edit", sha]).await {
+        Ok(_) => Ok(format!("Reverted commit {sha}.")),
+        Err(e) => {
+            let _ = git(dir, &["revert", "--abort"]).await;
+            Err(anyhow!("could not revert {sha}: {e}"))
+        }
+    }
+}
+
+/// A commit id is 7–40 hex characters. Revision expressions like `HEAD~1` are
+/// deliberately rejected: the Git view only acts on exact ids from its own
+/// commit list, so a revision syntax can never reach the `git` arguments.
+pub fn valid_commit(sha: &str) -> bool {
+    let t = sha.trim();
+    (7..=40).contains(&t.len()) && t.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Whether `origin/<branch>` exists locally (i.e. the branch was pushed).
@@ -747,7 +1020,9 @@ pub async fn delete_remote_branch(repo: &Path, branch: &str) -> Result<String> {
         return Err(anyhow!("invalid branch name: {branch}"));
     }
     if branch == default_branch(repo).await {
-        return Err(anyhow!("refusing to delete the default branch origin/{branch}"));
+        return Err(anyhow!(
+            "refusing to delete the default branch origin/{branch}"
+        ));
     }
     git(repo, &["push", "origin", "--delete", branch]).await?;
     Ok(format!("Deleted origin/{branch}."))
@@ -782,8 +1057,9 @@ pub async fn remove_worktree(repo: &Path, worktree: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_exists, branches, default_branch, delete_local_branch, delete_remote_branch,
-        merge_branch_into, parse_status, remove_worktree, valid_ref,
+        branch_exists, branches, commit_files, default_branch, delete_local_branch,
+        delete_remote_branch, git, merge_branch_into, parse_shortstat, parse_status,
+        remove_worktree, rename_target, revert_commit, valid_commit, valid_ref, worktree_detail,
     };
     use std::path::Path;
 
@@ -875,7 +1151,8 @@ mod tests {
 
     #[tokio::test]
     async fn branches_flag_uncommitted_work_in_their_worktree() {
-        let dir = std::env::temp_dir().join(format!("solayge-branchdirty-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("solayge-branchdirty-{}", uuid::Uuid::new_v4()));
         init_repo(&dir).await;
 
         // A branch checked out in its own worktree.
@@ -891,7 +1168,10 @@ mod tests {
         std::fs::write(wt.join("wip.txt"), "half done").unwrap();
         let list = branches(&dir).await.unwrap();
         let feat = list.iter().find(|b| b.name == "feat").unwrap();
-        assert!(feat.dirty, "uncommitted work in the worktree must be flagged");
+        assert!(
+            feat.dirty,
+            "uncommitted work in the worktree must be flagged"
+        );
 
         // Once committed, it is clean again.
         run(&wt, &["add", "-A"]).await;
@@ -949,6 +1229,120 @@ mod tests {
         run(&dir, &["branch", "tmp"]).await;
         delete_local_branch(&dir, "tmp").await.unwrap();
         assert!(!branch_exists(&dir, "tmp").await);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_shortstat_and_commit_ids() {
+        assert_eq!(
+            parse_shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"),
+            (3, 10, 2)
+        );
+        assert_eq!(parse_shortstat(" 1 file changed, 1 insertion(+)"), (1, 1, 0));
+        assert_eq!(parse_shortstat(""), (0, 0, 0));
+        assert!(valid_commit("a1b2c3d"));
+        assert!(valid_commit("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!valid_commit("abc"));
+        assert!(!valid_commit("not-a-sha"));
+        assert!(!valid_commit("HEAD~1"));
+    }
+
+    #[test]
+    fn resolves_rename_destinations() {
+        assert_eq!(rename_target("src/{old.ts => new.ts}"), "src/new.ts");
+        assert_eq!(rename_target("old.ts => new.ts"), "new.ts");
+        assert_eq!(rename_target("src/plain.ts"), "src/plain.ts");
+        assert_eq!(rename_target("{a => b}"), "b");
+    }
+
+    #[tokio::test]
+    async fn commit_files_reports_rename_destination_path_and_status() {
+        let dir = std::env::temp_dir().join(format!("solayge-rename-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/old.ts"), "one\n").unwrap();
+        run(&dir, &["add", "-A"]).await;
+        run(&dir, &["commit", "-qm", "add old"]).await;
+        run(&dir, &["mv", "src/old.ts", "src/new.ts"]).await;
+        run(&dir, &["commit", "-qm", "rename"]).await;
+
+        let sha = git(&dir, &["rev-parse", "HEAD"]).await.unwrap();
+        let files = commit_files(&dir, sha.trim()).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/new.ts");
+        assert_eq!(files[0].status, "renamed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn worktree_detail_counts_commits_files_and_lists_history() {
+        let dir = std::env::temp_dir().join(format!("solayge-wtdetail-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        let wt = dir.join("wt");
+        let wt_arg = wt.to_string_lossy().to_string();
+        run(&dir, &["worktree", "add", "-q", "-b", "feat", &wt_arg]).await;
+
+        std::fs::write(wt.join("a.txt"), "one\n").unwrap();
+        run(&wt, &["add", "-A"]).await;
+        run(&wt, &["commit", "-qm", "add a"]).await;
+        std::fs::write(wt.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&wt, &["add", "-A"]).await;
+        run(&wt, &["commit", "-qm", "extend a"]).await;
+
+        let detail = worktree_detail(&dir, &wt, 20).await.unwrap();
+        assert_eq!(detail.branch.as_deref(), Some("feat"));
+        assert_eq!(detail.commit_count, 2);
+        assert_eq!(detail.files_changed, 1);
+        assert_eq!(detail.additions, 2);
+        assert_eq!(detail.deletions, 0);
+        assert_eq!(detail.last_commit_subject.as_deref(), Some("extend a"));
+        assert_eq!(detail.commits.len(), 2);
+        assert_eq!(detail.commits[0].subject, "extend a");
+        assert_eq!(detail.commits[0].files_changed, 1);
+        assert!(!detail.dirty);
+
+        // Per-commit files carry add/delete counts.
+        let files = commit_files(&wt, &detail.commits[0].id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "a.txt");
+        assert_eq!(files[0].additions, 1);
+        assert_eq!(files[0].status, "modified");
+
+        // A commit that creates the file is reported as added.
+        let first = commit_files(&wt, &detail.commits[1].id).await.unwrap();
+        assert_eq!(first[0].status, "added");
+
+        // An uncommitted edit is reported as dirty.
+        std::fs::write(wt.join("a.txt"), "wip\n").unwrap();
+        let dirty = worktree_detail(&dir, &wt, 5).await.unwrap();
+        assert!(dirty.dirty);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn revert_commit_inverts_work_and_refuses_a_dirty_tree() {
+        let dir = std::env::temp_dir().join(format!("solayge-revert-{}", uuid::Uuid::new_v4()));
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&dir, &["add", "-A"]).await;
+        run(&dir, &["commit", "-qm", "add a"]).await;
+        let sha = git(&dir, &["rev-parse", "HEAD"]).await.unwrap();
+        let sha = sha.trim().to_string();
+
+        // A dirty tree refuses the revert instead of guessing.
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        assert!(revert_commit(&dir, &sha).await.is_err());
+        run(&dir, &["checkout", "--", "a.txt"]).await;
+
+        // A clean revert removes the file and records a new commit.
+        revert_commit(&dir, &sha).await.unwrap();
+        assert!(!dir.join("a.txt").exists());
+
+        // A malformed id is refused before any git command runs.
+        assert!(revert_commit(&dir, "HEAD~1").await.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

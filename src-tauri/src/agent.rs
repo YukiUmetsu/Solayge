@@ -24,10 +24,7 @@ pub const EDITORS: &[(&str, &str)] = &[
 ];
 
 fn editor_binary(id: &str) -> Option<&'static str> {
-    EDITORS
-        .iter()
-        .find(|(k, _)| *k == id)
-        .map(|(_, b)| *b)
+    EDITORS.iter().find(|(k, _)| *k == id).map(|(_, b)| *b)
 }
 
 /// Split a template into argv, dropping `[ … ]` groups whose placeholders are
@@ -166,6 +163,118 @@ pub fn with_access_planning(prompt: &str) -> String {
     format!("{ACCESS_PLANNING_INSTRUCTION}\n\n{prompt}")
 }
 
+/// Instruction prepended to a task prompt when the task is being run again after
+/// an earlier attempt stopped (usually an error). Without it the agent receives
+/// the identical prompt and may redo work that a previous attempt already
+/// finished. The agent is told to inspect the current state first and continue
+/// rather than start over.
+pub const RERUN_INSTRUCTION: &str = "\
+THIS IS A RE-RUN\n\
+This task was started before and did not finish. Some of the work may already be \
+done, and changes from the previous attempt may still be present. Before you start, \
+inspect the current state: `git status`, `git diff`, the recent history, and the files \
+this task touches. Continue from where the previous attempt left off. Do not repeat \
+work that is already complete, and do not discard, revert, or overwrite existing \
+changes unless the task requires it.";
+
+/// Wrap a re-run prompt (attempt 2 and later) with [`RERUN_INSTRUCTION`].
+pub fn with_rerun_context(prompt: &str, attempt: u32) -> String {
+    format!("{RERUN_INSTRUCTION}\n(attempt {attempt})\n\n{prompt}")
+}
+
+/// Build the base prompt for an agent task: the access-planning instruction,
+/// the re-run notice when this is not the first attempt, then the task prompt.
+/// A project system prompt is applied by the caller afterwards.
+pub fn compose_task_prompt(prompt: &str, attempt: u32) -> String {
+    let body = if attempt > 1 {
+        with_rerun_context(prompt, attempt)
+    } else {
+        prompt.to_string()
+    };
+    with_access_planning(&body)
+}
+
+/// One file attached to a task prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// A `file://` URL opencode's prompt API understands.
+    pub uri: String,
+    /// The original absolute path, kept for providers without real attachments.
+    pub path: String,
+    /// The file's display name (its basename).
+    pub name: String,
+}
+
+/// Turn an absolute path into a `file://` URL. Special characters are
+/// percent-encoded so paths with spaces or `#` still resolve. Windows paths
+/// (`C:\dir\file`) become `file:///C:/dir/file`.
+pub fn file_uri(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut out = String::with_capacity(normalized.len() + 8);
+    out.push_str("file://");
+    if !normalized.starts_with('/') {
+        out.push('/');
+    }
+    for &b in normalized.as_bytes() {
+        let keep =
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~' | b':');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Build the attachments for a list of paths: trimmed, de-duplicated, blanks
+/// dropped, with each path's name and `file://` URL.
+pub fn attachments(paths: &[String]) -> Vec<Attachment> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in paths {
+        let path = raw.trim();
+        if path.is_empty() || !seen.insert(path.to_string()) {
+            continue;
+        }
+        let name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or(path)
+            .to_string();
+        out.push(Attachment {
+            uri: file_uri(path),
+            path: path.to_string(),
+            name,
+        });
+    }
+    out
+}
+
+/// Append a note listing the attached files. Every provider gets it, so a CLI
+/// (which cannot receive real attachments) can still open them by path; the
+/// opencode server additionally receives the files themselves.
+pub fn apply_attachments(prompt: &str, files: &[Attachment]) -> String {
+    if files.is_empty() {
+        return prompt.to_string();
+    }
+    let list = files
+        .iter()
+        .map(|f| format!("- {}", f.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{prompt}\n\nThe user attached the following file(s) to this task. Use them as \
+         needed:\n{list}"
+    )
+}
+
+/// Trim, drop blanks, and de-duplicate attachment paths (stored on a task).
+pub fn attachment_paths(paths: &[String]) -> Vec<String> {
+    attachments(paths).into_iter().map(|a| a.path).collect()
+}
+
 /// Expand `{{project_name}}`, `{{project_path}}`, `{{current_branch}}` and
 /// `{{env.NAME}}` (also `{{env:NAME}}` and `{{$NAME}}`). Unknown tokens are
 /// left as-is so typos are visible.
@@ -295,7 +404,11 @@ pub fn review_prompt(
          THE INSTRUCTION THE TASK WAS GIVEN:\n{task_prompt}\n\n\
          {instructions}\n\n\
          {fix}\n\
-         Finish with EXACTLY one line, on its own, in this format:\n\
+         Run any commands or tests you need in the foreground and WAIT for them to finish. \
+         Never end your turn to wait for a result: do not background a check and reply that \
+         you are still waiting for it. Your review is only finished once every check you \
+         started has completed and you have written the verdict below.\n\
+         Finish with EXACTLY one line, on its own, as the very last line, in this format:\n\
          REVIEW: PASS\n\
          or\n\
          REVIEW: ISSUES: <one short line describing the main problem>"
@@ -303,40 +416,48 @@ pub fn review_prompt(
 }
 
 /// Parse the reviewer's final verdict line.
+///
+/// Only the **latest attempt** counts: review logs are appended across re-runs,
+/// so a verdict from an earlier attempt must never settle a later one (that was
+/// the bug where a review that stopped mid-run was reported as a pass from the
+/// previous run). Within that attempt the verdict must also be the reviewer's
+/// **final** non-empty line — the prompt asks for exactly one line at the end —
+/// so a stray `REVIEW:` mentioned mid-report cannot settle the review.
 pub fn parse_verdict(output: &str) -> (ReviewStatus, Option<String>) {
     let clean = crate::opencode::strip_ansi(output);
-    let mut verdict: Option<(ReviewStatus, Option<String>)> = None;
-    for line in clean.lines() {
-        let t = line.trim();
-        if t.len() < 7 || !t.is_char_boundary(7) || !t[..7].eq_ignore_ascii_case("REVIEW:") {
-            continue;
-        }
-        let rest = t[7..].trim();
-        let upper = rest.to_ascii_uppercase();
-        if upper.starts_with("PASS") {
-            verdict = Some((ReviewStatus::Passed, None));
-        } else if upper.starts_with("ISSUES:") && rest.is_char_boundary(7) {
-            verdict = Some((
-                ReviewStatus::Issues,
-                Some(rest[7..].trim().to_string()),
-            ));
-        } else if upper.starts_with("ISSUES") {
-            verdict = Some((ReviewStatus::Issues, Some("issues found".to_string())));
-        }
+    let attempt = crate::summary::last_attempt(&clean);
+    let last = attempt
+        .lines()
+        .map(crate::summary::strip_stamp)
+        .map(str::trim)
+        .rfind(|line| !line.is_empty());
+    let failed = |message: &str| (ReviewStatus::Failed, Some(message.to_string()));
+    let Some(t) = last else {
+        return failed("the reviewer did not report a verdict");
+    };
+    if t.len() < 7 || !t.is_char_boundary(7) || !t[..7].eq_ignore_ascii_case("REVIEW:") {
+        return failed("the reviewer stopped before giving a final verdict");
     }
-    verdict.unwrap_or((
-        // No verdict line is a failed review, not a pass: a reviewer that exits
-        // 0 without reporting must not be silently recorded as "passed".
-        ReviewStatus::Failed,
-        Some("the reviewer did not report a verdict".to_string()),
-    ))
+    let rest = t[7..].trim();
+    let upper = rest.to_ascii_uppercase();
+    if upper.starts_with("PASS") {
+        (ReviewStatus::Passed, None)
+    } else if upper.starts_with("ISSUES:") && rest.is_char_boundary(7) {
+        (ReviewStatus::Issues, Some(rest[7..].trim().to_string()))
+    } else if upper.starts_with("ISSUES") {
+        (ReviewStatus::Issues, Some("issues found".to_string()))
+    } else {
+        failed("the reviewer did not report a verdict")
+    }
 }
 
 /// Last ~40 lines of the review output, used as the recorded summary when there
-/// is no explicit issue line.
+/// is no explicit issue line. Only the latest attempt is considered, so a
+/// re-run's summary does not resurface the previous attempt's text.
 pub fn tail(output: &str) -> String {
     let clean = crate::opencode::strip_ansi(output);
-    let lines: Vec<&str> = clean.lines().filter(|l| !l.trim().is_empty()).collect();
+    let attempt = crate::summary::last_attempt(&clean);
+    let lines: Vec<&str> = attempt.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(40);
     lines[start..].join("\n")
 }
@@ -419,7 +540,12 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
             let pathext =
                 std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
             let mut v = vec![String::new()];
-            v.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_string));
+            v.extend(
+                pathext
+                    .split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_string),
+            );
             v
         }
         #[cfg(not(windows))]
@@ -502,10 +628,7 @@ fn parse_models(raw: &str) -> Vec<String> {
     let clean = crate::opencode::strip_ansi(raw);
     let mut out: Vec<String> = Vec::new();
     for line in clean.lines() {
-        let t = line
-            .trim()
-            .trim_start_matches(['-', '*', '•', '>'])
-            .trim();
+        let t = line.trim().trim_start_matches(['-', '*', '•', '>']).trim();
         // Model ids never contain spaces; this filters out headings, progress
         // lines ("Loading models…"), and prose.
         if t.is_empty() || t.len() > 120 || t.contains(char::is_whitespace) {
@@ -532,9 +655,7 @@ pub async fn fetch_models(provider: Provider) -> Vec<String> {
         let Some((bin, args)) = cmd.split_first() else {
             continue;
         };
-        let run = tokio::process::Command::new(bin)
-            .args(args)
-            .output();
+        let run = tokio::process::Command::new(bin).args(args).output();
         let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(90), run).await
         else {
             continue;
@@ -600,7 +721,10 @@ fn choose_review_model(explicit: Option<String>, task_model: Option<&str>) -> Op
 /// The provider segment of a `provider/model` id (`opencode-go` in
 /// `opencode-go/deepseek-v4.1-flash`).
 fn model_provider(model: &str) -> &str {
-    model.split_once('/').map(|(provider, _)| provider).unwrap_or("")
+    model
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or("")
 }
 
 /// The model segment of a `provider/model` id (`deepseek-v4.1-flash` in
@@ -654,7 +778,12 @@ mod tests {
 
     #[test]
     fn keeps_model_flag_only_when_set() {
-        let with = expand("claude -p {prompt} [--model {model}]", "do it", Some("opus"), false);
+        let with = expand(
+            "claude -p {prompt} [--model {model}]",
+            "do it",
+            Some("opus"),
+            false,
+        );
         assert_eq!(with, vec!["claude", "-p", "do it", "--model", "opus"]);
         let without = expand("claude -p {prompt} [--model {model}]", "do it", None, false);
         assert_eq!(without, vec!["claude", "-p", "do it"]);
@@ -668,9 +797,19 @@ mod tests {
 
     #[test]
     fn auto_flag_is_optional() {
-        let on = expand("opencode run --standalone {auto} [--model {model}] {prompt}", "p", None, true);
+        let on = expand(
+            "opencode run --standalone {auto} [--model {model}] {prompt}",
+            "p",
+            None,
+            true,
+        );
         assert_eq!(on, vec!["opencode", "run", "--standalone", "--auto", "p"]);
-        let off = expand("opencode run --standalone {auto} [--model {model}] {prompt}", "p", None, false);
+        let off = expand(
+            "opencode run --standalone {auto} [--model {model}] {prompt}",
+            "p",
+            None,
+            false,
+        );
         assert_eq!(off, vec!["opencode", "run", "--standalone", "p"]);
     }
 
@@ -701,6 +840,46 @@ mod tests {
         let (status, summary) = parse_verdict("I looked at the code and it seems fine");
         assert_eq!(status, ReviewStatus::Failed);
         assert!(summary.is_some(), "the reason is recorded");
+    }
+
+    #[test]
+    fn an_earlier_attempts_verdict_does_not_count() {
+        // The exact regression: a review was re-run, the new attempt stopped
+        // while waiting for a build, but the first attempt's PASS was reused.
+        let log = "some report\nREVIEW: PASS\n\
+                   [Solayge] ---- new attempt: 10-01 14:00:00 ----\n\
+                   Frontend checks pass; I'm waiting on the Rust checks before the verdict.\n";
+        let (status, summary) = parse_verdict(log);
+        assert_eq!(
+            status,
+            ReviewStatus::Failed,
+            "an older attempt's verdict must not settle a later one"
+        );
+        assert!(summary.is_some());
+    }
+
+    #[test]
+    fn a_mid_stream_verdict_does_not_count() {
+        // The verdict must be the reviewer's final word, not a mention that the
+        // reviewer then continued past.
+        let (status, _) = parse_verdict("REVIEW: PASS\nActually, one more check first.\n");
+        assert_eq!(status, ReviewStatus::Failed);
+    }
+
+    #[test]
+    fn a_timestamped_verdict_is_read() {
+        // A quiet gap can prefix the verdict line with a clock stamp.
+        let (status, summary) = parse_verdict("report\n14:11:02 REVIEW: ISSUES: race\n");
+        assert_eq!(status, ReviewStatus::Issues);
+        assert_eq!(summary.as_deref(), Some("race"));
+    }
+
+    #[test]
+    fn the_latest_attempt_summary_wins() {
+        // `tail` is the recorded summary when there is no issue line; it must
+        // come from the latest attempt, not the first.
+        let log = "old text\n[Solayge] ---- new attempt: 10-01 14:00:00 ----\nbroke at step 2";
+        assert_eq!(tail(log), "broke at step 2");
     }
 
     #[test]
@@ -751,7 +930,10 @@ mod tests {
             text: "end".into(),
             enabled: true,
         };
-        assert_eq!(apply_system_prompt("do it", Some(&suffix), &ctx), "do it\n\nend");
+        assert_eq!(
+            apply_system_prompt("do it", Some(&suffix), &ctx),
+            "do it\n\nend"
+        );
         let off = SystemPrompt {
             position: SystemPromptPosition::Prefix,
             text: "x".into(),
@@ -785,9 +967,40 @@ mod tests {
     }
 
     #[test]
+    fn a_rerun_prompt_tells_the_agent_to_continue() {
+        let wrapped = with_rerun_context("do the thing", 2);
+        assert!(wrapped.starts_with(RERUN_INSTRUCTION));
+        assert!(wrapped.contains("attempt 2"));
+        assert!(wrapped.ends_with("do the thing"));
+        // The original prompt is still present, so this is an addition not a
+        // replacement.
+        assert!(wrapped.contains("do the thing"));
+    }
+
+    #[test]
+    fn only_a_later_attempt_is_told_it_is_a_rerun() {
+        // First attempt: the exact task prompt, no re-run notice.
+        let first = compose_task_prompt("do the thing", 1);
+        assert!(!first.contains(RERUN_INSTRUCTION));
+        assert!(first.contains(ACCESS_PLANNING_INSTRUCTION));
+        assert!(first.contains("do the thing"));
+
+        // Second attempt: the re-run notice is present, on top of the same
+        // access-planning wrapper and original prompt.
+        let second = compose_task_prompt("do the thing", 2);
+        assert!(second.contains(RERUN_INSTRUCTION));
+        assert!(second.contains("attempt 2"));
+        assert!(second.contains(ACCESS_PLANNING_INSTRUCTION));
+        assert!(second.contains("do the thing"));
+    }
+
+    #[test]
     fn sanitizes_branch_names() {
         assert_eq!(sanitize_branch_name("Add Login Page!"), "add-login-page");
-        assert_eq!(sanitize_branch_name("  fix: null deref  "), "fix-null-deref");
+        assert_eq!(
+            sanitize_branch_name("  fix: null deref  "),
+            "fix-null-deref"
+        );
         assert_eq!(sanitize_branch_name("`feature/x`"), "feature-x");
         assert_eq!(sanitize_branch_name(""), "task");
         assert_eq!(sanitize_branch_name("***"), "task");
@@ -887,5 +1100,67 @@ mod tests {
         );
         assert_eq!(provider, Provider::Opencode);
         assert_eq!(model.as_deref(), Some("opencode-go/deepseek-v4.1-flash"));
+    }
+
+    #[test]
+    fn file_uris_encode_special_characters() {
+        assert_eq!(
+            file_uri("/Users/me/My Docs/a b#c.png"),
+            "file:///Users/me/My%20Docs/a%20b%23c.png"
+        );
+        assert_eq!(file_uri("/tmp/plain.txt"), "file:///tmp/plain.txt");
+    }
+
+    #[test]
+    fn file_uris_handle_windows_paths() {
+        assert_eq!(file_uri(r"C:\Users\me\a.txt"), "file:///C:/Users/me/a.txt");
+    }
+
+    #[test]
+    fn attachments_trim_dedupe_and_drop_blanks() {
+        let paths = vec![
+            "  /tmp/a.txt  ".to_string(),
+            "/tmp/a.txt".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "/tmp/img.png".to_string(),
+        ];
+        let files = attachments(&paths);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "/tmp/a.txt");
+        assert_eq!(files[0].name, "a.txt");
+        assert_eq!(files[0].uri, "file:///tmp/a.txt");
+        assert_eq!(files[1].name, "img.png");
+    }
+
+    #[test]
+    fn attachment_names_use_the_last_path_segment() {
+        let files = attachments(&["/a/b/c/report.pdf".to_string()]);
+        assert_eq!(files[0].name, "report.pdf");
+    }
+
+    #[test]
+    fn apply_attachments_lists_paths_and_is_a_no_op_when_empty() {
+        assert_eq!(apply_attachments("do it", &[]), "do it");
+        let files = attachments(&["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()]);
+        let out = apply_attachments("do it", &files);
+        assert!(out.starts_with("do it"));
+        assert!(out.contains("- /tmp/a.txt"));
+        assert!(out.contains("- /tmp/b.png"));
+        assert!(out.contains("attached"));
+    }
+
+    #[test]
+    fn attachment_paths_normalize_like_attachments() {
+        let paths = vec![
+            " /tmp/a.txt ".to_string(),
+            "/tmp/a.txt".to_string(),
+            "".to_string(),
+            "/tmp/b.png".to_string(),
+        ];
+        assert_eq!(
+            attachment_paths(&paths),
+            vec!["/tmp/a.txt".to_string(), "/tmp/b.png".to_string()]
+        );
     }
 }

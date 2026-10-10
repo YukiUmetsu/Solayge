@@ -2,6 +2,8 @@ import type { PermissionProfile, Project, Separation, Task, TaskKind } from "../
 import { PromptSuggestions } from "./PromptSuggestions";
 import { CommandPicker } from "./CommandPicker";
 import { Label } from "./Field";
+import { Icon } from "./Icons";
+import { fileName, mergeAttachments, pickFiles, removeAttachment } from "../lib/attachments";
 import {
   DEFAULT_SEPARATION,
   SEPARATIONS,
@@ -17,6 +19,8 @@ export interface TaskFormState {
   kind: TaskKind;
   title: string;
   prompt: string;
+  /** Absolute paths of files attached to the prompt. */
+  attachments: string[];
   command: string;
   separation: Separation;
   newBranch: string;
@@ -32,6 +36,7 @@ export function emptyTaskForm(profile: PermissionProfile): TaskFormState {
     kind: "agent",
     title: "",
     prompt: "",
+    attachments: [],
     command: "",
     separation: DEFAULT_SEPARATION,
     newBranch: "",
@@ -125,6 +130,11 @@ export function TaskFormFields({
               }
               onChange(patch);
             }}
+          />
+
+          <AttachmentsField
+            attachments={value.attachments}
+            onChange={(attachments) => onChange({ attachments })}
           />
         </>
       )}
@@ -242,6 +252,68 @@ export function TaskFormFields({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Attach one or more files to an agent prompt. The files are passed to the
+ * provider as real attachments when it supports them (text and images), and
+ * listed by path for providers that do not.
+ */
+export function AttachmentsField({
+  attachments,
+  onChange,
+}: {
+  attachments: string[];
+  onChange: (attachments: string[]) => void;
+}) {
+  async function add() {
+    const picked = await pickFiles();
+    if (picked.length === 0) return;
+    onChange(mergeAttachments(attachments, picked));
+  }
+
+  return (
+    <div>
+      <Label>Attachments</Label>
+      <p className="mb-1.5 text-[11px] leading-relaxed text-ink-subtle">
+        Files the agent should use — text and images (PNG, JPEG, GIF, WebP)
+        reach the model directly.
+      </p>
+      {attachments.length > 0 && (
+        <ul className="mb-1.5 space-y-1">
+          {attachments.map((path) => (
+            <li
+              key={path}
+              className="flex items-center gap-2 rounded-lg border border-line bg-well px-2.5 py-1.5 text-[11.5px] text-ink-muted"
+            >
+              <Icon name="file" className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-ink" title={path}>
+                  {fileName(path)}
+                </span>
+                <span className="mono block truncate text-[10.5px] text-ink-faint">
+                  {path}
+                </span>
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost shrink-0 !px-2"
+                title="Remove attachment"
+                aria-label={`Remove ${fileName(path)}`}
+                onClick={() => onChange(removeAttachment(attachments, path))}
+              >
+                <Icon name="trash" className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button type="button" className="btn btn-ghost" onClick={() => void add()}>
+        <Icon name="paperclip" className="h-3.5 w-3.5" />
+        Attach files
+      </button>
     </div>
   );
 }

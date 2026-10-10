@@ -7,6 +7,7 @@ import {
 } from "../lib/format";
 import {
   canCancel,
+  canEditTask,
   canRun,
   displayStatus,
   isTerminalStatus,
@@ -48,13 +49,22 @@ export function TaskCard({
   const kindLabel = taskKindLabel(task);
   const kindIcon = kind === "merge" ? "diff" : kind === "git" ? "branch" : "terminal";
   const separation = taskSeparationDisplay(task);
+  // Whole-card attention cue: an agent waiting on an answer, or a task stopped
+  // on a conflict/review that needs a human. The small chip below stays as a
+  // fallback label, but the card itself is what should catch your eye.
+  const attention =
+    task.status === "running" && task.ask
+      ? "card-attention-ask"
+      : task.status === "blocked"
+        ? "card-attention-blocked"
+        : "";
 
   return (
     <div
       onClick={onSelect}
       className={`card group cursor-pointer rounded-xl px-3.5 py-3 transition ${
         selected ? "ring-1 ring-accent-line" : ""
-      }`}
+      } ${attention}`}
     >
       <div className="flex items-start gap-2.5">
         <span
@@ -174,8 +184,8 @@ export function TaskCard({
           {canRun(task) && (
             <IconBtn name="play" title="Start now" onClick={onStartNow} />
           )}
-          {task.status === "draft" && (
-            <IconBtn name="edit" title="Edit prompt" onClick={onEdit} />
+          {canEditTask(task) && (
+            <IconBtn name="edit" title="Edit task" onClick={onEdit} />
           )}
           {canCancel(task) && (
             <IconBtn name="stop" title="Cancel" onClick={onCancel} danger />

@@ -99,7 +99,10 @@ async fn spawn_server() -> Result<ServerProc, String> {
     let stdout = child.stdout.take().ok_or("no server stdout")?;
     let stderr = child.stderr.take().ok_or("no server stderr")?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    for stream in [Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box::new(stderr)] {
+    for stream in [
+        Box::new(stdout) as Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box::new(stderr),
+    ] {
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stream).lines();
@@ -131,8 +134,7 @@ async fn spawn_server() -> Result<ServerProc, String> {
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
     let base = base.ok_or("opencode server did not report a listening URL")?;
-    let password =
-        password.ok_or("opencode server did not report a password")?;
+    let password = password.ok_or("opencode server did not report a password")?;
     Ok(ServerProc {
         base,
         password,
@@ -205,15 +207,49 @@ pub async fn create_session(
 }
 
 pub async fn prompt(conn: &Connection, session: &str, text: &str) -> Result<(), String> {
+    prompt_with_files(conn, session, text, &[]).await
+}
+
+/// Build the JSON body for a prompt. Attachments are sent as `files` parts so
+/// opencode can pass supported ones (text, directories, images) to the model.
+pub fn prompt_body(text: &str, files: &[crate::agent::Attachment]) -> Value {
+    let mut body = json!({ "text": text });
+    if !files.is_empty() {
+        body["files"] = Value::Array(
+            files
+                .iter()
+                .map(|f| json!({ "uri": f.uri, "name": f.name }))
+                .collect(),
+        );
+    }
+    body
+}
+
+/// Send a prompt with file attachments. The opencode server reads each file
+/// before admitting the prompt, so files the user attached work even when they
+/// live outside the task's directory.
+pub async fn prompt_with_files(
+    conn: &Connection,
+    session: &str,
+    text: &str,
+    files: &[crate::agent::Attachment],
+) -> Result<(), String> {
     let path = format!("/api/session/{session}/prompt");
-    request(conn, reqwest::Method::POST, &path, Some(json!({ "text": text })))
-        .await
-        .map(|_| ())
+    request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(prompt_body(text, files)),
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn interrupt(conn: &Connection, session: &str) -> Result<(), String> {
     let path = format!("/api/session/{session}/interrupt");
-    request(conn, reqwest::Method::POST, &path, Some(json!({}))).await.map(|_| ())
+    request(conn, reqwest::Method::POST, &path, Some(json!({})))
+        .await
+        .map(|_| ())
 }
 
 pub async fn messages(conn: &Connection, session: &str) -> Result<Vec<Value>, String> {
@@ -241,9 +277,14 @@ pub async fn reply_form(
     answer: Value,
 ) -> Result<(), String> {
     let path = format!("/api/session/{session}/form/{form}/reply");
-    request(conn, reqwest::Method::POST, &path, Some(json!({ "answer": answer })))
-        .await
-        .map(|_| ())
+    request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(json!({ "answer": answer })),
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn reply_permission(
@@ -267,15 +308,38 @@ fn list(v: &Value) -> Vec<Value> {
     data(v).as_array().cloned().unwrap_or_default()
 }
 
-/// The terminal outcome of a session, read from its `idle` message.
+/// The terminal outcome of a session, read from its most recent `idle` message.
+///
+/// A session that is continued has several `idle` messages (one per turn), so
+/// the newest one must win. Messages arrive newest-first, but exports are
+/// oldest-first, so pick by completion time and fall back to position rather
+/// than trusting iteration order.
 pub fn session_outcome(messages: &[Value]) -> Option<String> {
-    messages.iter().rev().find_map(|m| {
-        if m.get("type").and_then(Value::as_str) == Some("idle") {
-            m.get("outcome").and_then(Value::as_str).map(str::to_string)
-        } else {
-            None
+    let mut best: Option<(i64, usize, String)> = None;
+    for (i, m) in messages.iter().enumerate() {
+        if m.get("type").and_then(Value::as_str) != Some("idle") {
+            continue;
         }
-    })
+        let Some(outcome) = m.get("outcome").and_then(Value::as_str) else {
+            continue;
+        };
+        let at = m
+            .get("time")
+            .and_then(|t| t.get("completed").or_else(|| t.get("created")))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let better = match &best {
+            None => true,
+            // A later time wins; on a tie the earlier index (newer-first) wins.
+            Some((previous, previous_i, _)) => {
+                at > *previous || (at == *previous && i < *previous_i)
+            }
+        };
+        if better {
+            best = Some((at, i, outcome.to_string()));
+        }
+    }
+    best.map(|(_, _, outcome)| outcome)
 }
 
 /// Collapse whitespace so a tool line stays a single line.
@@ -355,7 +419,10 @@ pub fn part_lines(message: &Value) -> Vec<String> {
                     .and_then(|s| s.get("status"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let input = state.and_then(|s| s.get("input")).cloned().unwrap_or(Value::Null);
+                let input = state
+                    .and_then(|s| s.get("input"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let mut line = format!("[tool] {name}");
                 if let Some(target) = tool_target(name, &input).filter(|t| !t.trim().is_empty()) {
                     line.push_str(": ");
@@ -469,13 +536,19 @@ fn field_from_json(f: &Value) -> Option<AskField> {
     Some(AskField {
         key,
         label,
-        description: f.get("description").and_then(Value::as_str).map(str::to_string),
+        description: f
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         kind,
         required: f.get("required").and_then(Value::as_bool).unwrap_or(false),
         custom: f.get("custom").and_then(Value::as_bool).unwrap_or(false),
         options,
         default: f.get("default").cloned(),
-        placeholder: f.get("placeholder").and_then(Value::as_str).map(str::to_string),
+        placeholder: f
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         format: f.get("format").and_then(Value::as_str).map(str::to_string),
         min: json_f64(f, "minimum"),
         max: json_f64(f, "maximum"),
@@ -486,6 +559,45 @@ fn field_from_json(f: &Value) -> Option<AskField> {
         max_items: json_u64(f, "maxItems"),
         url: f.get("url").and_then(Value::as_str).map(str::to_string),
     })
+}
+
+/// Read a JSON number, accepting a numeric string as well.
+fn json_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|n| n as i64))
+        .or_else(|| {
+            v.as_str()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .map(|n| n as i64)
+        })
+}
+
+/// Read an absolute deadline (unix seconds) and/or a relative timeout (seconds)
+/// from a provider payload, accepting the common spellings. A millisecond value
+/// is converted to seconds. Either half is `None` when the provider did not
+/// supply it, so the UI simply omits the deadline.
+fn read_deadline(v: &Value) -> (Option<i64>, Option<i64>) {
+    let get = |keys: &[&str]| keys.iter().find_map(|k| v.get(*k).and_then(json_i64));
+    // An absolute instant may arrive in seconds or milliseconds.
+    let deadline = get(&["deadline", "expires_at", "expiresAt", "expires"]).map(|d| {
+        if d > 1_000_000_000_000 {
+            d / 1000
+        } else {
+            d
+        }
+    });
+    let timeout_secs = if let Some(ms) = get(&["timeout_ms", "timeoutMs", "timeoutMillis"]) {
+        Some((ms + 999) / 1000)
+    } else {
+        get(&[
+            "timeout_secs",
+            "timeoutSecs",
+            "timeout_seconds",
+            "timeoutSeconds",
+            "timeout",
+        ])
+    };
+    (deadline.filter(|d| *d > 0), timeout_secs.filter(|t| *t > 0))
 }
 
 /// Map an opencode form (the `question` tool) to a [`TaskAsk`].
@@ -501,6 +613,7 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(field_from_json).collect())
         .unwrap_or_default();
+    let (deadline, timeout_secs) = read_deadline(form);
     Some(TaskAsk {
         id,
         kind: AskKind::Question,
@@ -515,6 +628,8 @@ pub fn form_to_ask(session: &str, form: &Value) -> Option<TaskAsk> {
         fields,
         options: Vec::new(),
         created_at: None,
+        deadline,
+        timeout_secs,
         session_id: Some(session.to_string()),
     })
 }
@@ -572,6 +687,7 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
         .cloned();
     let source = req.get("source").filter(|v| !v.is_null()).cloned();
     let purpose = permission_purpose(&action);
+    let (deadline, timeout_secs) = read_deadline(req);
     Some(TaskAsk {
         id,
         kind: AskKind::Permission,
@@ -586,6 +702,8 @@ pub fn permission_to_ask(session: &str, req: &Value) -> Option<TaskAsk> {
         fields: Vec::new(),
         options: vec!["once".into(), "always".into(), "reject".into()],
         created_at: None,
+        deadline,
+        timeout_secs,
         session_id: Some(session.to_string()),
     })
 }
@@ -605,6 +723,26 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_prompt_has_no_files_key() {
+        let body = prompt_body("do it", &[]);
+        assert_eq!(body["text"], "do it");
+        assert!(body.get("files").is_none());
+    }
+
+    #[test]
+    fn attachments_are_sent_as_file_parts() {
+        let files =
+            crate::agent::attachments(&["/tmp/a.txt".to_string(), "/tmp/pic.png".to_string()]);
+        let body = prompt_body("look", &files);
+        assert_eq!(body["text"], "look");
+        let arr = body["files"].as_array().expect("files");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["uri"], "file:///tmp/a.txt");
+        assert_eq!(arr[0]["name"], "a.txt");
+        assert_eq!(arr[1]["name"], "pic.png");
+    }
+
+    #[test]
     fn reads_session_outcome_from_idle() {
         let msgs = vec![
             json!({"type":"assistant","content":[]}),
@@ -612,6 +750,34 @@ mod tests {
         ];
         assert_eq!(session_outcome(&msgs).as_deref(), Some("succeeded"));
         assert_eq!(session_outcome(&[]), None);
+    }
+
+    #[test]
+    fn a_continued_session_takes_the_newest_idle() {
+        // Newest-first: the top idle is the latest turn and must win over the
+        // older one, even though a naive `rev().find` would pick the oldest.
+        let newest_first = vec![
+            json!({"type":"idle","outcome":"failed","time":{"completed":200}}),
+            json!({"type":"assistant","content":[]}),
+            json!({"type":"idle","outcome":"succeeded","time":{"completed":100}}),
+        ];
+        assert_eq!(session_outcome(&newest_first).as_deref(), Some("failed"));
+
+        // Oldest-first must give the same answer by time.
+        let oldest_first = vec![
+            json!({"type":"idle","outcome":"succeeded","time":{"completed":100}}),
+            json!({"type":"assistant","content":[]}),
+            json!({"type":"idle","outcome":"failed","time":{"completed":200}}),
+        ];
+        assert_eq!(session_outcome(&oldest_first).as_deref(), Some("failed"));
+
+        // With no timestamps, position is the tiebreaker: the earlier index is
+        // the newer turn in the server's newest-first ordering.
+        let no_times = vec![
+            json!({"type":"idle","outcome":"failed"}),
+            json!({"type":"idle","outcome":"succeeded"}),
+        ];
+        assert_eq!(session_outcome(&no_times).as_deref(), Some("failed"));
     }
 
     #[test]
@@ -685,7 +851,10 @@ mod tests {
         assert_eq!(ask.action.as_deref(), Some("bash"));
         assert!(ask.purpose.as_deref().unwrap().contains("shell command"));
         assert_eq!(
-            ask.metadata.as_ref().and_then(|m| m.get("cwd")).and_then(Value::as_str),
+            ask.metadata
+                .as_ref()
+                .and_then(|m| m.get("cwd"))
+                .and_then(Value::as_str),
             Some("/tmp")
         );
         assert!(ask.source.is_some());
@@ -699,6 +868,46 @@ mod tests {
         });
         let ask = permission_to_ask("ses_1", &req).expect("ask");
         assert!(ask.metadata.is_none());
+    }
+
+    #[test]
+    fn reads_a_relative_timeout_from_a_form() {
+        let form = json!({
+            "id":"frm_3","title":"Pick one","timeout_secs":90,
+            "fields":[{"key":"a","type":"string","title":"A"}]
+        });
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.timeout_secs, Some(90));
+        assert_eq!(ask.deadline, None);
+    }
+
+    #[test]
+    fn reads_an_absolute_expiry_in_millis() {
+        let req = json!({
+            "id":"per_3","sessionID":"ses_1","action":"bash",
+            "resources":["ls"],"expiresAt":1_700_000_000_000i64
+        });
+        let ask = permission_to_ask("ses_1", &req).expect("ask");
+        assert_eq!(ask.deadline, Some(1_700_000_000));
+        assert_eq!(ask.timeout_secs, None);
+    }
+
+    #[test]
+    fn accepts_a_millisecond_timeout() {
+        let form = json!({
+            "id":"frm_4","title":"Pick one","timeoutMs":1500,
+            "fields":[]
+        });
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.timeout_secs, Some(2));
+    }
+
+    #[test]
+    fn no_timeout_field_means_no_deadline() {
+        let form = json!({"id":"frm_5","title":"Pick one","fields":[]});
+        let ask = form_to_ask("ses_1", &form).expect("ask");
+        assert_eq!(ask.deadline, None);
+        assert_eq!(ask.timeout_secs, None);
     }
 
     #[test]
@@ -752,16 +961,25 @@ mod tests {
         // The server returns newest-first; exports are oldest-first. Either way
         // the latest text must win, not the first one encountered.
         let newest_first = vec![newer.clone(), tool_only.clone(), older.clone()];
-        assert_eq!(final_text(&newest_first).as_deref(), Some("# Done\n\nAll good."));
+        assert_eq!(
+            final_text(&newest_first).as_deref(),
+            Some("# Done\n\nAll good.")
+        );
 
         let oldest_first = vec![older, tool_only, newer];
-        assert_eq!(final_text(&oldest_first).as_deref(), Some("# Done\n\nAll good."));
+        assert_eq!(
+            final_text(&oldest_first).as_deref(),
+            Some("# Done\n\nAll good.")
+        );
     }
 
     #[test]
     fn no_final_text_when_there_is_none() {
         assert_eq!(final_text(&[]), None);
-        assert_eq!(final_text(&[json!({"type":"assistant","content":[]})]), None);
+        assert_eq!(
+            final_text(&[json!({"type":"assistant","content":[]})]),
+            None
+        );
         assert_eq!(
             final_text(&[json!({"type":"user","content":[{"type":"text","text":"hi"}]})]),
             None

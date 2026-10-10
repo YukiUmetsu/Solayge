@@ -1,21 +1,24 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { AskField, DiffResult, LogEntry, Project, Task, TaskAsk, Worktree } from "../types";
+import type { DiffResult, LogEntry, Project, Task, TaskAsk, Worktree } from "../types";
 import { api } from "../api";
 import {
   PROFILE_META,
+  askDeadline,
   clock,
+  compactDuration,
   isLive,
   runDuration,
   shortId,
 } from "../lib/format";
-import { displayStatus, statusMeta } from "../lib/tasks";
+import { displayStatus, canEditTask, canMessageTask, statusMeta } from "../lib/tasks";
 import { providerLabel, reviewModeLabel, reviewStatusMeta, separationMeta, taskSeparation } from "../lib/providers";
 import { useNow } from "../lib/useNow";
+import { fileName } from "../lib/attachments";
 import { Icon } from "./Icons";
 import { DiffBody } from "./DiffView";
 import { classifyLine, LogBody } from "./LogView";
-import { DECISION_HINTS, DECISION_LABELS, PermissionDetails } from "./PermissionDetails";
+import { ReviewPromptModal } from "./ReviewPromptModal";
 
 type Tab = "logs" | "result" | "diff" | "worktrees" | "review" | "details";
 
@@ -25,20 +28,25 @@ const Markdown = lazy(() => import("./Markdown"));
 export function DetailPanel({
   task,
   project,
+  tasks,
   logs,
   width,
   onEdit,
   onRemoveWorktree,
   onRetryReview,
+  onOpenAsk,
   onCollapse,
 }: {
   task: Task | null;
   project: Project | null;
+  /** All tasks in the selected project, for the dependency check on resume. */
+  tasks: Task[];
   logs: LogEntry[];
   width: number;
   onEdit: (id: string) => void;
   onRemoveWorktree: (id: string) => void;
-  onRetryReview: (id: string) => void;
+  onRetryReview: (id: string, prompt: string) => void;
+  onOpenAsk: (id: string) => void;
   onCollapse: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("logs");
@@ -147,8 +155,14 @@ export function DetailPanel({
 
       {/* Only a running task can accept an answer; a leftover ask on an
           interrupted or canceled task would render buttons that cannot work. */}
-      {task?.status === "running" && task.ask && <AskPanel task={task} />}
-      {task?.status === "running" && task.session_id && <MessageComposer task={task} />}
+      {task?.status === "running" && task.ask && (
+        <AskPanel task={task} onOpenAsk={onOpenAsk} />
+      )}
+      {/* A running task is live; a finished one stays continuable while its
+          review has settled and nothing depends on it. */}
+      {task && canMessageTask(task, tasks) && (
+        <MessageComposer task={task} resuming={task.status !== "running"} />
+      )}
 
       {!task && tab !== "worktrees" ? (
         <EmptyDetail />
@@ -247,7 +261,11 @@ export function DetailPanel({
           )}
 
           {tab === "review" && task && (
-            <ReviewView task={task} onRetryReview={onRetryReview} />
+            <ReviewView
+              task={task}
+              projectPath={project?.path ?? null}
+              onRetryReview={onRetryReview}
+            />
           )}
 
           {tab === "details" && task && (
@@ -264,356 +282,61 @@ export function DetailPanel({
   );
 }
 
-function defaultAnswer(ask: TaskAsk): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const f of ask.fields) {
-    // External fields are completed elsewhere; there is no value to submit.
-    if (f.kind === "external") continue;
-    if (f.kind === "multiselect") out[f.key] = Array.isArray(f.default) ? f.default : [];
-    else if (f.kind === "boolean") out[f.key] = typeof f.default === "boolean" ? f.default : false;
-    else out[f.key] = f.default ?? "";
-  }
-  return out;
-}
-
-/** A pending question or permission request, answered in place. */
-function AskPanel({ task }: { task: Task }) {
-  const ask = task.ask as TaskAsk;
-  const [answer, setAnswer] = useState<Record<string, unknown>>(() => defaultAnswer(ask));
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    setAnswer(defaultAnswer(ask));
-    setErr(null);
-    // Reset only when the ask itself changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ask.id]);
-
-  const set = (key: string, value: unknown) =>
-    setAnswer((a) => ({ ...a, [key]: value }));
-
-  const missing = ask.fields.some((f) => {
-    // External fields are completed elsewhere and carry no submitted value.
-    if (!f.required || f.kind === "external") return false;
-    const v = answer[f.key];
-    return v === "" || v === undefined || v === null || (Array.isArray(v) && v.length === 0);
-  });
-
-  async function send(value: Record<string, unknown>) {
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.answerTask(task.id, value);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="border-b border-warning-line bg-warning-soft px-3 py-3">
-      <div className="mb-2 flex items-center gap-2 text-[12px] text-warning">
-        <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
-        <span className="font-medium">{ask.title}</span>
-        <span className="rounded bg-warning-soft px-1.5 text-[10px] uppercase tracking-wide">
-          {ask.kind === "permission" ? "permission" : "question"}
-        </span>
-      </div>
-
-      {ask.kind === "permission" ? (
-        <>
-          <PermissionDetails ask={ask} />
-          <div className="mt-3 flex flex-wrap gap-2">
-            {ask.options.map((o) => (
-              <button
-                key={o}
-                className={
-                  o === "once"
-                    ? "btn btn-primary !py-1"
-                    : o === "reject"
-                      ? "btn btn-danger !py-1"
-                      : "btn btn-ghost !py-1"
-                }
-                disabled={busy}
-                title={DECISION_HINTS[o]}
-                onClick={() => void send({ decision: o })}
-              >
-                {DECISION_LABELS[o] ?? o}
-              </button>
-            ))}
-          </div>
-        </>
-      ) : (
-        <>
-          {ask.message && (
-            <pre className="mono mb-2 whitespace-pre-wrap rounded-lg border border-line bg-well p-2 text-[11px] leading-relaxed text-ink-muted">
-              {ask.message}
-            </pre>
-          )}
-          <div className="space-y-3">
-            {ask.fields.map((f) => (
-              <AskFieldInput
-                key={f.key}
-                field={f}
-                value={answer[f.key]}
-                onChange={(v) => set(f.key, v)}
-              />
-            ))}
-            <div className="flex items-center gap-2">
-              <button
-                className="btn btn-primary !py-1"
-                disabled={busy || missing}
-                onClick={() => void send(answer)}
-              >
-                <Icon name="check" className="h-3.5 w-3.5" />
-                Send answer
-              </button>
-              {missing && (
-                <span className="text-[11px] text-ink-subtle">
-                  Fill in the required fields
-                </span>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-
-      {err && <p className="mt-2 text-[11px] text-danger">{err}</p>}
-    </div>
-  );
-}
-
-function AskFieldInput({
-  field,
-  value,
-  onChange,
+/** A running task is waiting on the agent. The inline form is intentionally a
+ * compact banner so the task log stays in view; the full, tabbed answer dialog
+ * is opened from here (or automatically when the ask arrives). */
+function AskPanel({
+  task,
+  onOpenAsk,
 }: {
-  field: AskField;
-  value: unknown;
-  onChange: (v: unknown) => void;
+  task: Task;
+  onOpenAsk: (id: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
-  const label = (
-    <div className="mb-1 text-[11px] font-medium text-ink">
-      {field.label}
-      {field.required && <span className="text-danger"> *</span>}
-    </div>
-  );
-  const description = field.description ? (
-    <p className="mt-1 text-[10.5px] text-ink-subtle">{field.description}</p>
-  ) : null;
-
-  // An external field is completed outside the form (e.g. an OAuth page).
-  if (field.kind === "external") {
-    return (
-      <div>
-        {label}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            className="btn btn-ghost !py-1"
-            disabled={!field.url}
-            onClick={() => {
-              if (field.url) void api.openExternal(field.url).catch(() => {});
-            }}
-          >
-            <Icon name="external" className="h-3.5 w-3.5" />
-            Open
-          </button>
-          <span className="text-[10.5px] text-ink-subtle">
-            Finish this outside Solayge, then send your answer below.
-          </span>
-        </div>
-        {description}
-      </div>
-    );
-  }
-
-  if (field.kind === "boolean") {
-    return (
-      <div>
-        {label}
-        <div className="flex gap-1.5">
-          {[
-            { l: "Yes", v: true },
-            { l: "No", v: false },
-          ].map((b) => (
-            <button
-              key={b.l}
-              className={`rounded-lg border px-2 py-1 text-[11.5px] ${
-                value === b.v
-                  ? "border-accent-line bg-accent-soft text-accent-text"
-                  : "border-line bg-well text-ink-muted"
-              }`}
-              onClick={() => onChange(b.v)}
-            >
-              {b.l}
-            </button>
-          ))}
-        </div>
-        {description}
-      </div>
-    );
-  }
-
-  const numeric = field.kind === "number" || field.kind === "integer";
-
-  if (field.options.length > 0) {
-    const isOption = (v: string) => field.options.some((o) => o.value === v);
-    const arr = Array.isArray(value) ? (value as string[]) : [];
-    // Hand-typed multiselect entries, shown as removable chips.
-    const customValues = arr.filter((v) => !isOption(v));
-    // For a single-choice field, a typed value that is not one of the options.
-    const customText =
-      !Array.isArray(value) && typeof value === "string" && value !== "" && !isOption(value)
-        ? value
-        : "";
-
-    const optionClass = (on: boolean) =>
-      `rounded-lg border px-2 py-1 text-[11.5px] transition ${
-        on
-          ? "border-accent-line bg-accent-soft text-accent-text"
-          : "border-line bg-well text-ink-muted hover:border-accent-line"
-      }`;
-
-    return (
-      <div>
-        {label}
-        <div className="flex flex-wrap gap-1.5">
-          {field.options.map((o) => {
-            const on = field.kind === "multiselect" ? arr.includes(o.value) : value === o.value;
-            return (
-              <button
-                key={o.value}
-                title={o.description ?? undefined}
-                className={optionClass(on)}
-                onClick={() => {
-                  if (field.kind === "multiselect") {
-                    const next = [...arr];
-                    const i = next.indexOf(o.value);
-                    if (i >= 0) next.splice(i, 1);
-                    else next.push(o.value);
-                    onChange(next);
-                  } else {
-                    onChange(o.value);
-                  }
-                }}
-              >
-                {o.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {customValues.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {customValues.map((v) => (
-              <span
-                key={v}
-                className="inline-flex items-center gap-1 rounded-lg border border-accent-line bg-accent-soft px-2 py-0.5 text-[11px] text-accent-text"
-              >
-                {v}
-                <button
-                  className="text-accent-text hover:text-ink"
-                  title="Remove"
-                  onClick={() => onChange(arr.filter((x) => x !== v))}
-                >
-                  <Icon name="x" className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {field.custom &&
-          (field.kind === "multiselect" ? (
-            <div className="mt-1.5 flex gap-1.5">
-              <input
-                className="min-w-0 flex-1 rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
-                placeholder={field.placeholder ?? "Type your own answer"}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && draft.trim()) {
-                    e.preventDefault();
-                    onChange([...arr, draft.trim()]);
-                    setDraft("");
-                  }
-                }}
-              />
-              <button
-                className="btn btn-ghost !py-1"
-                disabled={!draft.trim()}
-                onClick={() => {
-                  onChange([...arr, draft.trim()]);
-                  setDraft("");
-                }}
-              >
-                Add
-              </button>
-            </div>
-          ) : (
-            <input
-              className="mt-1.5 w-full rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
-              placeholder={field.placeholder ?? "Or type your own answer"}
-              value={customText}
-              onChange={(e) => onChange(e.target.value)}
-            />
-          ))}
-
-        {!field.custom && field.kind !== "multiselect" && (
-          <p className="mt-1 text-[10.5px] text-ink-subtle">
-            Choose one of the options above.
-          </p>
-        )}
-        {description}
-      </div>
-    );
-  }
-
-  const inputType = numeric
-    ? "number"
-    : field.format === "email"
-      ? "email"
-      : field.format === "uri"
-        ? "url"
-        : field.format === "date"
-          ? "date"
-          : field.format === "date-time"
-            ? "datetime-local"
-            : "text";
+  const ask = task.ask as TaskAsk;
+  const isPermission = ask.kind === "permission";
+  const now = useNow();
+  const deadline = askDeadline(ask);
+  const remaining = deadline ? deadline - now : 0;
   return (
-    <div>
-      {label}
-      <input
-        className="w-full rounded-lg border border-line bg-well px-2 py-1 text-[12px] text-ink outline-none focus:border-accent-line"
-        type={inputType}
-        placeholder={field.placeholder ?? ""}
-        min={field.min ?? undefined}
-        max={field.max ?? undefined}
-        minLength={field.min_length ?? undefined}
-        maxLength={field.max_length ?? undefined}
-        pattern={field.pattern ?? undefined}
-        step={field.kind === "integer" ? 1 : numeric ? "any" : undefined}
-        value={typeof value === "string" || typeof value === "number" ? value : ""}
-        onChange={(e) =>
-          onChange(
-            numeric
-              ? e.target.value === ""
-                ? ""
-                : Number(e.target.value)
-              : e.target.value,
-          )
-        }
-      />
-      {description}
+    <div className="border-b border-warning-line bg-warning-soft px-3 py-2.5">
+      <div className="flex items-center gap-2 text-[12px] text-warning">
+        <span className="h-1.5 w-1.5 rounded-full bg-warning running-dot" />
+        <span className="font-medium">
+          {isPermission ? "Permission needed" : "Waiting for your answer"}
+        </span>
+        <span className="rounded bg-warning-soft px-1.5 text-[10px] uppercase tracking-wide">
+          {isPermission ? "permission" : "question"}
+        </span>
+        {deadline && (
+          <span className="ml-auto text-[11px] text-ink-muted">
+            {remaining > 0
+              ? `Answer within ${compactDuration(remaining)}`
+              : "Answer window passed"}
+          </span>
+        )}
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        <span
+          className="min-w-0 flex-1 truncate text-[11.5px] text-ink-muted"
+          title={ask.title}
+        >
+          {ask.title}
+        </span>
+        <button
+          className="btn btn-primary !py-1"
+          onClick={() => onOpenAsk(task.id)}
+        >
+          <Icon name="check" className="h-3.5 w-3.5" />
+          Answer
+        </button>
+      </div>
     </div>
   );
 }
 
-/** Send a free-form message to a running agent, like typing at its prompt. */
-function MessageComposer({ task }: { task: Task }) {
+/** Send a free-form message to an agent, like typing at its prompt. On a
+ *  finished task this continues the same session, flipping it back to running. */
+function MessageComposer({ task, resuming }: { task: Task; resuming: boolean }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -639,7 +362,11 @@ function MessageComposer({ task }: { task: Task }) {
         <textarea
           className="scroll max-h-28 min-h-9 flex-1 resize-y rounded-lg border border-line bg-well px-2 py-1.5 text-[12px] text-ink outline-none focus:border-accent-line"
           rows={1}
-          placeholder="Message the agent — ask a question or add instructions…"
+          placeholder={
+            resuming
+              ? "Continue with the agent — the task resumes and starts running again…"
+              : "Message the agent — ask a question or add instructions…"
+          }
           value={text}
           disabled={busy}
           onChange={(e) => setText(e.target.value)}
@@ -661,8 +388,9 @@ function MessageComposer({ task }: { task: Task }) {
         </button>
       </div>
       <div className="mt-1 text-[10.5px] text-ink-subtle">
-        The agent keeps working; its reply streams into the log. Enter sends,
-        Shift+Enter adds a line.
+        {resuming
+          ? "This task is finished. Sending a message continues the same agent session and sets it back to running; a review that already finished is not re-run."
+          : "The agent keeps working; its reply streams into the log. Enter sends, Shift+Enter adds a line."}
       </div>
       {err && <p className="mt-1 text-[11px] text-danger">{err}</p>}
     </div>
@@ -747,36 +475,65 @@ function LogsView({
 
 function ReviewView({
   task,
+  projectPath,
   onRetryReview,
 }: {
   task: Task;
-  onRetryReview: (id: string) => void;
+  projectPath: string | null;
+  onRetryReview: (id: string, prompt: string) => void;
 }) {
   const review = task.review && task.review.mode !== "off" ? task.review : null;
   const [log, setLog] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
   const now = useNow();
 
   const status = review?.status ?? "none";
   const settled = status !== "pending" && status !== "running";
-  // Reload on task/verdict changes only. Depending on the `review` object made
-  // this refetch on every snapshot poll; the rendered body keys off `log`, so
-  // this alone avoids the "Loading…" flash.
+  const active = !settled;
+  // Primitive values, so a new snapshot object with the same review does not
+  // re-run the effect below.
+  const startedAt = review?.started_at ?? null;
+  const finishedAt = review?.finished_at ?? null;
+  // Poll the reviewer log while a review is queued or running so it updates
+  // live during a (re-)run, and reload on every settle. The body keys off
+  // `log`, so a background poll never flashes "Loading…" once output exists.
   useEffect(() => {
     if (!review) return;
     let alive = true;
-    setLoading(true);
-    api
-      .reviewLog(task.id)
-      .then((t) => alive && setLog(t))
-      .catch((e) => alive && setErr(String(e)))
-      .finally(() => alive && setLoading(false));
+    const load = (initial: boolean) => {
+      if (initial) setLoading(true);
+      api
+        .reviewLog(task.id)
+        .then((t) => {
+          // A successful poll must clear any earlier transient error, or one
+          // failed request would hide the (live-updating) log for the rest of
+          // the run since the render prefers `err` over `log`.
+          if (alive) {
+            setLog(t);
+            setErr(null);
+          }
+        })
+        .catch((e) => alive && setErr(String(e)))
+        .finally(() => alive && initial && setLoading(false));
+    };
+    setErr(null);
+    load(true);
+    if (!active) return () => { alive = false; };
+    const timer = window.setInterval(() => load(false), 1000);
     return () => {
       alive = false;
+      window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, status]);
+  }, [task.id, status, startedAt, finishedAt]);
+
+  // Follow the transcript as it grows, so a live re-run is visibly updating.
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
 
   if (!review) return <EmptyDetail />;
   const meta = reviewStatusMeta(review.status);
@@ -817,20 +574,27 @@ function ReviewView({
                 reviewing
               </span>
             )}
-            {task.status === "succeeded" && settled && (
-              <button
-                className="btn btn-ghost !px-2 !py-1"
-                onClick={() => onRetryReview(task.id)}
-                title="Run the review again (does not re-run the task)"
-              >
-                <Icon name="retry" className="h-3 w-3" />
-                Re-run review
-              </button>
-            )}
+            {settled &&
+              (task.status === "succeeded" ||
+                // A task blocked because its review could not finish can be
+                // unblocked by re-running just the review.
+                (task.status === "blocked" && review.status === "failed")) && (
+                <button
+                  className="btn btn-ghost !px-2 !py-1"
+                  onClick={() => setEditing(true)}
+                  title="Edit the prompt and run the review again (does not re-run the task)"
+                >
+                  <Icon name="retry" className="h-3 w-3" />
+                  Re-run review
+                </button>
+              )}
           </div>
         </div>
       </div>
-      <div className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed">
+      <div
+        ref={logRef}
+        className="scroll mono min-h-0 flex-1 whitespace-pre-wrap break-words border-t border-line bg-well-strong p-3 text-[11.5px] leading-relaxed"
+      >
         {loading && !log ? (
           <span className="text-[11px] text-ink-subtle">Loading…</span>
         ) : err ? (
@@ -843,6 +607,16 @@ function ReviewView({
           <span className="text-[11px] text-ink-subtle">No reviewer output yet.</span>
         )}
       </div>
+      {editing && (
+        <ReviewPromptModal
+          projectPath={projectPath}
+          onClose={() => setEditing(false)}
+          onStart={(prompt) => {
+            setEditing(false);
+            onRetryReview(task.id, prompt);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -938,20 +712,41 @@ function DetailsView({
       )}
 
       <Field label="Prompt">
-        {/* A draft has not run yet, so its prompt is still safe to change. */}
-        {task.status === "draft" && (
+        {/* A task that has not started yet (draft, waiting, or ready) can still
+            have its prompt changed. */}
+        {canEditTask(task) && (
           <button
             className="btn btn-ghost mb-1.5 !px-2 !py-1"
             onClick={() => onEdit(task.id)}
           >
             <Icon name="edit" className="h-3 w-3" />
-            Edit prompt
+            Edit task
           </button>
         )}
         <pre className="mono whitespace-pre-wrap rounded-lg border border-line bg-well-strong p-2.5 text-[11.5px] leading-relaxed text-ink-muted">
           {task.prompt}
         </pre>
       </Field>
+
+      {task.attachments && task.attachments.length > 0 && (
+        <Field label="Attachments">
+          <ul className="space-y-1">
+            {task.attachments.map((path) => (
+              <li
+                key={path}
+                className="flex items-center gap-2 rounded-lg border border-line bg-well px-2.5 py-1.5 text-[11.5px] text-ink-muted"
+                title={path}
+              >
+                <Icon name="file" className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate text-ink">{fileName(path)}</span>
+                <span className="mono truncate text-[10.5px] text-ink-faint">
+                  {path}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Field>
+      )}
 
       {task.command && (
         <Field label="Command">

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentConfig,
+  AnalyticsCollectionStatus,
   CacheStats,
   CommandTemplates,
   EnvironmentStatus,
@@ -27,6 +28,8 @@ import { ErrorNote } from "./Field";
 import { SaveButton, SavedPill, type SaveState } from "./SaveButton";
 import { Modal } from "./Modal";
 import { Icon, type IconName } from "./Icons";
+import { ConnectedDevices } from "./ConnectedDevices";
+import { RemoteAccess } from "./RemoteAccess";
 
 const RETENTION_OPTIONS: { value: number; label: string }[] = [
   { value: 7, label: "7 days" },
@@ -38,12 +41,13 @@ const RETENTION_OPTIONS: { value: number; label: string }[] = [
 
 const THEME_OPTIONS: ThemePref[] = ["system", "light", "dark"];
 
-type Tab = "general" | "agent" | "notifications" | "advanced";
+type Tab = "general" | "agent" | "notifications" | "devices" | "advanced";
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "settings" },
   { id: "agent", label: "Agent", icon: "sparkles" },
   { id: "notifications", label: "Notifications", icon: "zap" },
+  { id: "devices", label: "Devices", icon: "eye" },
   { id: "advanced", label: "Advanced", icon: "layers" },
 ];
 
@@ -342,6 +346,13 @@ export function SettingsModal({
             />
           )}
 
+          {tab === "devices" && (
+            <div className="space-y-6">
+              <RemoteAccess />
+              <ConnectedDevices />
+            </div>
+          )}
+
           {tab === "advanced" && (
             <AdvancedTab
               settings={settings}
@@ -480,10 +491,58 @@ function NotificationsTab({
   onChange: (p: Partial<NotificationSettings>) => void;
   onError: (e: string | null) => void;
 }) {
+  const [osStatus, setOsStatus] = useState<string | null>(null);
+
+  const refreshStatus = useCallback(() => {
+    api
+      .notificationStatus()
+      .then(setOsStatus)
+      .catch(() => setOsStatus(null));
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  const blocked = osStatus === "denied";
   return (
     <>
       <section className="space-y-3">
         <SectionLabel icon="zap">Desktop notifications</SectionLabel>
+
+        {blocked && (
+          <div
+            className="flex items-start justify-between gap-3 rounded-lg border border-danger/40 bg-danger/10 p-3"
+            role="alert"
+          >
+            <div className="text-[12px] leading-relaxed text-ink">
+              <div className="font-medium">macOS is blocking notifications</div>
+              <p className="mt-0.5 text-ink-subtle">
+                Allow Solayge under System Settings → Notifications, then test
+                again. In-app toasts and sounds keep working either way.
+              </p>
+            </div>
+            <div className="flex shrink-0 flex-col gap-1.5">
+              <button
+                className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+                type="button"
+                onClick={() => {
+                  api.openNotificationSettings().catch((e) => onError(String(e)));
+                }}
+              >
+                Open settings
+              </button>
+              <button
+                className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+                type="button"
+                onClick={refreshStatus}
+              >
+                Re-check
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-lg border border-line bg-well p-3">
           <ToggleRow
             label="Enable notifications"
@@ -530,7 +589,11 @@ function NotificationsTab({
               onError(null);
               api
                 .testNotification()
-                .catch((e) => onError(String(e)));
+                .then(() => refreshStatus())
+                .catch((e) => {
+                  onError(String(e));
+                  refreshStatus();
+                });
             }}
           >
             <Icon name="zap" className="h-3 w-3" />
@@ -610,8 +673,140 @@ function AdvancedTab({
   refreshErrorLog: () => Promise<void>;
   clearErrors: () => Promise<void>;
 }) {
+  const [analyticsStatus, setAnalyticsStatus] =
+    useState<AnalyticsCollectionStatus | null>(null);
+  const [clearingAnalytics, setClearingAnalytics] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  useEffect(() => {
+    api
+      .analyticsCollectionStatus()
+      .then(setAnalyticsStatus)
+      .catch(() => {});
+  }, []);
+
+  async function clearAnalyticsHistory() {
+    setClearingAnalytics(true);
+    try {
+      setAnalyticsStatus(await api.clearAnalytics());
+      setConfirmClear(false);
+    } finally {
+      setClearingAnalytics(false);
+    }
+  }
+
+  const analyticsEmpty =
+    !analyticsStatus ||
+    (analyticsStatus.usage_count === 0 &&
+      analyticsStatus.run_count === 0 &&
+      (analyticsStatus.error_count ?? 0) === 0 &&
+      (analyticsStatus.interaction_count ?? 0) === 0);
+
   return (
     <>
+      <section className="space-y-2">
+        <div className="flex items-center justify-between">
+          <SectionLabel icon="chart">Analytics</SectionLabel>
+          <SavedPill show={flash === "analytics"} />
+        </div>
+        <div className="rounded-lg border border-line bg-well p-3">
+          <ToggleRow
+            label="Collect local analytics"
+            hint="Task/run lifecycle, model, token, and provider-reported cost. Stored only on this machine; no prompts, code, or terminal output."
+            checked={settings.analytics_enabled}
+            disabled={busy}
+            onChange={(v) => void persist({ analytics_enabled: v }, "analytics")}
+          />
+          <div className="mt-1 flex items-center justify-between gap-3 border-t border-line px-3 py-2.5 text-[12px]">
+            <span className="text-ink-muted">Keep analytics history for</span>
+            <select
+              className="select !w-auto"
+              disabled={busy}
+              value={settings.analytics_retention_days}
+              onChange={(e) =>
+                void persist(
+                  { analytics_retention_days: Number(e.target.value) },
+                  "analytics",
+                )
+              }
+            >
+              {RETENTION_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="mt-1 border-t border-line">
+            <ToggleRow
+              label="Capture redacted error examples"
+              hint="Store a short, redacted sample beside each categorized error. Off by default; paths, URLs, ids, and secrets are stripped before saving."
+              checked={settings.analytics_capture_error_examples}
+              disabled={busy}
+              onChange={(v) =>
+                void persist({ analytics_capture_error_examples: v }, "analytics")
+              }
+            />
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-[11px] text-ink-subtle">
+              {analyticsStatus
+                ? `${analyticsStatus.usage_count} usage · ${analyticsStatus.run_count} runs · ${analyticsStatus.error_count ?? 0} errors · ${analyticsStatus.interaction_count ?? 0} interactions`
+                : "—"}
+            </span>
+            {confirmClear ? (
+              <div className="flex items-center gap-2">
+                <button
+                  className="btn btn-ghost"
+                  disabled={clearingAnalytics}
+                  onClick={() => setConfirmClear(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-danger"
+                  disabled={clearingAnalytics}
+                  onClick={() => void clearAnalyticsHistory()}
+                >
+                  <Icon name="trash" className="h-3.5 w-3.5" />
+                  Delete all analytics
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-danger"
+                disabled={busy || clearingAnalytics || analyticsEmpty}
+                onClick={() => setConfirmClear(true)}
+              >
+                <Icon name="trash" className="h-3.5 w-3.5" />
+                Clear analytics history
+              </button>
+            )}
+          </div>
+          {confirmClear && (
+            <p className="mt-2 text-[11px] leading-relaxed text-danger">
+              This permanently deletes every collected analytics record. Projects,
+              tasks, and their logs are untouched.
+            </p>
+          )}
+          <p className="mt-3 text-[11px] leading-relaxed text-ink-subtle">
+            Turning collection off stops new records without deleting existing
+            ones. Clearing history resets only analytics; projects, tasks, and
+            their logs are untouched.
+          </p>
+          {analyticsStatus && analyticsStatus.usage_count > 0 && (
+            <p className="mt-1 text-[11px] text-ink-subtle">
+              Telemetry quality: {analyticsStatus.usage_complete} complete,{" "}
+              {analyticsStatus.usage_partial} partial usage records
+              {analyticsStatus.capture_error_examples
+                ? " · redacted error examples on"
+                : ""}
+              .
+            </p>
+          )}
+        </div>
+      </section>
+
       <section className="space-y-2">
         <div className="flex items-center justify-between">
           <SectionLabel icon="trash">Cache</SectionLabel>
