@@ -35,6 +35,9 @@ base64 = "0.22"
 solayge-identity = { path = "../crates/solayge-identity" }
 # The versioned, transport-neutral remote protocol DTOs the host serves.
 solayge-protocol = { path = "../crates/solayge-protocol" }
+# The FCM gateway server, embedded so the desktop runs its own loopback push
+# gateway when the user configures a Firebase service account.
+solayge-push-gateway = { path = "../crates/solayge-push-gateway" }
 # Optional: the Iroh-encrypted transport and connection manager. Enabled with
 # the `mobile-network` feature; a normal desktop build does not pull it in.
 solayge-network = { path = "../crates/solayge-network", optional = true }

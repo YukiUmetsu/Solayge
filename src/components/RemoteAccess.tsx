@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { api } from "../api";
-import type { DevPushConfigView, RemoteStatus } from "../types";
+import type { PushGatewayStatus, RemoteStatus } from "../types";
 import { ErrorNote } from "./Field";
 import { Icon } from "./Icons";
 import { SectionLabel } from "./AgentConfigForm";
@@ -90,10 +91,8 @@ export function RemoteAccess() {
   const ts = status?.tailscale;
   const [httpsPort, setHttpsPort] = useState("");
 
-  // TEMPORARY (dev-only): state for the background-push test controls.
-  const [devConfig, setDevConfig] = useState<DevPushConfigView | null>(null);
-  const [gatewayUrl, setGatewayUrl] = useState("");
-  const [gatewayToken, setGatewayToken] = useState("");
+  // Background push: the embedded gateway's status and the on-demand test.
+  const [gateway, setGateway] = useState<PushGatewayStatus | null>(null);
   const [testSessionId, setTestSessionId] = useState("");
   const [pushResult, setPushResult] = useState<string | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
@@ -103,51 +102,66 @@ export function RemoteAccess() {
     // Only reset when the manager reports a different port (after apply/retry).
   }, [status?.https_port]);
 
-  // TEMPORARY (dev-only): load the runtime gateway config on mount.
-  const loadDevConfig = useCallback(async () => {
+  const loadGateway = useCallback(async () => {
     try {
-      const config = await api.pushDevConfig();
-      setDevConfig(config);
-      if (config?.url) setGatewayUrl(config.url);
+      setGateway(await api.pushGatewayStatus());
     } catch {
-      // Optional dev feature; ignore when the command is unavailable.
+      // A build without the push commands still renders the remote panel.
     }
   }, []);
 
   useEffect(() => {
-    void loadDevConfig();
-  }, [loadDevConfig]);
+    void loadGateway();
+  }, [loadGateway]);
 
-  // TEMPORARY (dev-only): save / clear the runtime gateway config.
-  async function saveGateway() {
+  // Apply a new enable/service-account/port combination, then show the result.
+  async function applyGateway(
+    enabled: boolean,
+    serviceAccount: string | null,
+    port: number | null,
+  ) {
     setPushBusy(true);
     setPushResult(null);
     try {
-      const config = await api.pushDevConfigSet(gatewayUrl.trim(), gatewayToken);
-      setDevConfig(config);
-      setGatewayToken("");
-      setPushResult("Gateway saved. Check it, then send a test push.");
+      setGateway(await api.pushGatewayApply(enabled, serviceAccount, port));
+      setPushResult(
+        enabled
+          ? "Background push updated."
+          : "Background push turned off.",
+      );
     } catch (e) {
       setPushResult(String(e));
+      // Re-read so the toggle reflects what actually happened.
+      await loadGateway();
     } finally {
       setPushBusy(false);
     }
   }
 
-  async function clearGateway() {
-    setPushBusy(true);
-    setPushResult(null);
+  // Pick the Firebase service-account JSON and enable push with it.
+  async function chooseServiceAccount() {
+    let picked: string | null = null;
     try {
-      const config = await api.pushDevConfigClear();
-      setDevConfig(config);
-      setGatewayUrl(config?.url ?? "");
-      setGatewayToken("");
-      setPushResult("Gateway override cleared.");
+      picked = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Firebase service account", extensions: ["json"] }],
+      });
     } catch (e) {
       setPushResult(String(e));
-    } finally {
-      setPushBusy(false);
+      return;
     }
+    if (typeof picked !== "string") return;
+    await applyGateway(true, picked, gateway?.port ?? null);
+  }
+
+  async function togglePush(next: boolean) {
+    if (next && !gateway?.service_account) {
+      // Enabling requires a service account; let the user pick one.
+      await chooseServiceAccount();
+      return;
+    }
+    await applyGateway(next, gateway?.service_account ?? null, gateway?.port ?? null);
   }
 
   async function checkGateway() {
@@ -162,7 +176,6 @@ export function RemoteAccess() {
     }
   }
 
-  // TEMPORARY (dev-only): send a synthetic question push to every paired phone.
   async function sendTestQuestion() {
     setPushBusy(true);
     setPushResult(null);
@@ -355,67 +368,82 @@ export function RemoteAccess() {
 
       <ErrorNote error={error} />
 
-      {/* TEMPORARY (dev-only): configure a local push gateway and fire a
-          synthetic "Agent has a question" push at every paired phone. */}
-      <div className="space-y-2 rounded-lg border border-dashed border-line p-3">
-        <div className="text-[11px] font-medium text-ink">
-          Developer: test background push
+      <section className="space-y-3 rounded-lg border border-line bg-well p-4">
+        <div>
+          <div className="text-[12.5px] font-medium text-ink">
+            Background push notifications
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-ink-subtle">
+            Solayge runs a push gateway on this computer so a paired phone can be
+            alerted when an agent needs you or a task finishes — even when the
+            phone app is closed. Only opaque ids leave this machine; prompts,
+            code, and results stay here and are read peer-to-peer after the app
+            reconnects.
+          </p>
         </div>
-        <p className="text-[11px] leading-relaxed text-ink-subtle">
-          Easiest path: run{" "}
-          <span className="mono">pnpm push:gateway</span> in the repo. It starts a
-          local gateway and fills these fields in; background the phone, then send
-          a test push.
-        </p>
-        <div className="text-[11px] text-ink-subtle">
-          Gateway:{" "}
-          <span className="text-ink">
-            {!devConfig
-              ? "…"
-              : devConfig.source === "none"
-                ? "not configured"
-                : `${devConfig.source === "dev" ? "runtime override" : "environment"}${
-                    devConfig.has_token ? " · token set" : " · no token"
-                  }`}
+
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={gateway?.enabled ?? false}
+            disabled={pushBusy || !gateway}
+            onChange={() => void togglePush(!(gateway?.enabled ?? false))}
+          />
+          <span>
+            <span className="text-[12.5px] font-medium text-ink">
+              Enable background push
+            </span>
+            <span className="block text-[11px] leading-relaxed text-ink-subtle">
+              Uses the FCM project whose <span className="mono">google-services.json</span>{" "}
+              the phone build was made with. Only devices you approved receive pushes,
+              and only for the kinds they enabled on the phone.
+            </span>
+          </span>
+        </label>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+            onClick={() => void chooseServiceAccount()}
+            disabled={pushBusy}
+          >
+            <Icon name="folder" className="h-3 w-3" />
+            {gateway?.service_account ? "Change service account" : "Choose service account"}
+          </button>
+          <span className="mono min-w-0 flex-1 truncate text-[11px] text-ink-subtle">
+            {gateway?.service_account ?? "No Firebase service account configured"}
           </span>
         </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="text-[11px] text-ink-subtle">
-            <span className="block">Gateway URL</span>
-            <input
-              value={gatewayUrl}
-              disabled={pushBusy}
-              onChange={(e) => setGatewayUrl(e.target.value)}
-              placeholder="http://127.0.0.1:8787/v1/push"
-              className="mono mt-1 w-72 rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink"
+
+        {gateway && (
+          <div className="overflow-hidden rounded-lg border border-line bg-surface">
+            <StatusRow
+              label="Push gateway"
+              value={
+                gateway.running
+                  ? gateway.url ?? "Running"
+                  : gateway.enabled
+                    ? "Enabled but not running"
+                    : "Off"
+              }
+              ok={gateway.running}
             />
-          </label>
-          <label className="text-[11px] text-ink-subtle">
-            <span className="block">Bearer token</span>
-            <input
-              type="password"
-              value={gatewayToken}
-              disabled={pushBusy}
-              onChange={(e) => setGatewayToken(e.target.value)}
-              placeholder={devConfig?.has_token ? "(blank keeps it)" : "PUSH_GATEWAY_TOKEN"}
-              className="mono mt-1 w-56 rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink"
+            <StatusRow
+              label="Phones registered"
+              value={`${gateway.registered_devices}`}
+              ok={gateway.registered_devices > 0}
             />
-          </label>
-          <button
-            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
-            onClick={() => void saveGateway()}
-            disabled={pushBusy || !gatewayUrl.trim()}
-          >
-            Save gateway
-          </button>
-          <button
-            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
-            onClick={() => void clearGateway()}
-            disabled={pushBusy || devConfig?.source !== "dev"}
-          >
-            Clear
-          </button>
-        </div>
+          </div>
+        )}
+
+        {gateway?.last_error && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-ink">
+            <div className="font-medium">Background push needs attention</div>
+            <p className="mt-0.5 text-ink-subtle">{gateway.last_error}</p>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-[11px] text-ink-subtle">
             <span className="block">Session id (optional)</span>
@@ -430,7 +458,7 @@ export function RemoteAccess() {
           <button
             className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
             onClick={() => void checkGateway()}
-            disabled={pushBusy || devConfig?.source === "none" || !devConfig}
+            disabled={pushBusy || !gateway?.running}
           >
             <Icon name="refresh" className="h-3 w-3" />
             Check gateway
@@ -438,7 +466,7 @@ export function RemoteAccess() {
           <button
             className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
             onClick={() => void sendTestQuestion()}
-            disabled={pushBusy || !status}
+            disabled={pushBusy || !gateway?.running}
           >
             <Icon name="zap" className="h-3 w-3" />
             Send test question push
@@ -447,7 +475,7 @@ export function RemoteAccess() {
         {pushResult && (
           <p className="text-[11px] leading-relaxed text-ink-subtle">{pushResult}</p>
         )}
-      </div>
+      </section>
     </section>
   );
 }

@@ -381,6 +381,45 @@ pub struct DeviceRevokeResult {
 
 // ---- push ----
 
+/// Per-kind notification preferences mirrored from the phone at registration.
+/// The desktop uses these to decide whether a given event kind may wake the
+/// device; they are the phone's settings expressed where the push originates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushPreferences {
+    /// Agent questions and permission requests.
+    pub on_questions: bool,
+    /// Tasks that finished successfully.
+    pub on_completed: bool,
+    /// Tasks that failed or errored.
+    pub on_failed: bool,
+}
+
+impl Default for PushPreferences {
+    /// Without an explicit choice every kind is allowed, matching the phone's
+    /// defaults and preserving behavior for clients that never send them.
+    fn default() -> Self {
+        PushPreferences {
+            on_questions: true,
+            on_completed: true,
+            on_failed: true,
+        }
+    }
+}
+
+impl PushPreferences {
+    /// Whether an event of wire `kind` may be pushed to a device with these
+    /// preferences. Unknown kinds are allowed so a future event is not silently
+    /// dropped by an old desktop.
+    pub fn allows(&self, kind: &str) -> bool {
+        match kind {
+            "question" | "approval" => self.on_questions,
+            "task_completed" => self.on_completed,
+            "task_failed" => self.on_failed,
+            _ => true,
+        }
+    }
+}
+
 /// Register a device's push token with the desktop host. The token is opaque to
 /// the host; it is forwarded to the push gateway as an addressing hint only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +427,10 @@ pub struct PushRegisterPayload {
     pub token: String,
     /// `android` | `ios`.
     pub platform: String,
+    /// The phone's per-kind notification settings. Absent on older clients,
+    /// which are treated as allowing every kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferences: Option<PushPreferences>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

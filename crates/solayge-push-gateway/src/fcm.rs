@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{FcmMessage, FcmSender};
+use crate::{FcmError, FcmMessage, FcmSender};
 
 const TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
@@ -139,8 +139,8 @@ impl GoogleFcmSender {
 }
 
 impl FcmSender for GoogleFcmSender {
-    fn send(&self, message: &FcmMessage) -> Result<(), String> {
-        let token = self.access_token()?;
+    fn send(&self, message: &FcmMessage) -> Result<(), FcmError> {
+        let token = self.access_token().map_err(FcmError::other)?;
         let priority = if message.high_priority {
             "high"
         } else {
@@ -174,12 +174,20 @@ impl FcmSender for GoogleFcmSender {
             .bearer_auth(token)
             .json(&body)
             .send()
-            .map_err(|e| format!("FCM request failed: {e}"))?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            // Do not echo the body: it can contain the registration token.
-            Err(format!("FCM rejected the message: {}", response.status()))
+            .map_err(|e| FcmError::other(format!("FCM request failed: {e}")))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
+        // A 404 (NOT_FOUND / UNREGISTERED) means the registration token is no
+        // longer valid: the app was uninstalled or the token expired. That is a
+        // terminal per-device condition the desktop must act on, not retry.
+        // Do not echo the body: it can contain the registration token.
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(FcmError::unregistered(format!(
+                "FCM rejected the message: {status}"
+            )));
+        }
+        Err(FcmError::other(format!("FCM rejected the message: {status}")))
     }
 }

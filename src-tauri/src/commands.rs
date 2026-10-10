@@ -1615,10 +1615,9 @@ pub fn test_notification(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// TEMPORARY (remove before release): fire a synthetic `question` background
-/// push at every paired phone so the FCM delivery + deep-link path can be
-/// tested on demand. `session_id` is optional; when given, tapping the
-/// notification opens that session.
+/// Fire a synthetic `question` background push at every paired phone so the
+/// FCM delivery + deep-link path can be verified on demand. `session_id` is
+/// optional; when given, tapping the notification opens that session.
 #[tauri::command]
 pub async fn push_test_question(
     app: AppHandle,
@@ -1631,31 +1630,7 @@ pub async fn push_test_question(
     .map_err(|error| format!("test push task failed: {error}"))?
 }
 
-/// TEMPORARY (remove before release): the gateway configuration the Settings
-/// test panel shows and edits.
-#[tauri::command]
-pub fn push_dev_config(app: AppHandle) -> crate::push::DevPushConfigView {
-    crate::push::dev_config_view(&app)
-}
-
-/// TEMPORARY (remove before release): persist a runtime gateway override so no
-/// environment variables or app restart are needed to test.
-#[tauri::command]
-pub fn push_dev_config_set(
-    app: AppHandle,
-    url: String,
-    token: String,
-) -> Result<crate::push::DevPushConfigView, String> {
-    crate::push::set_dev_config(&app, &url, &token)
-}
-
-/// TEMPORARY (remove before release): clear the runtime gateway override.
-#[tauri::command]
-pub fn push_dev_config_clear(app: AppHandle) -> Result<crate::push::DevPushConfigView, String> {
-    crate::push::clear_dev_config(&app)
-}
-
-/// TEMPORARY (remove before release): verify the gateway answers `/healthz`.
+/// Verify the configured gateway answers `/healthz`.
 #[tauri::command]
 pub async fn push_gateway_health(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || crate::push::check_gateway(&app))

@@ -37,6 +37,31 @@ pub struct PushToken {
     pub token: String,
     pub platform: String,
     pub updated_at: i64,
+    /// The phone's per-kind settings, mirrored at registration. Defaults to
+    /// allowing every kind so an older `push-tokens.json` still pushes.
+    #[serde(default = "allow_all")]
+    pub on_questions: bool,
+    #[serde(default = "allow_all")]
+    pub on_completed: bool,
+    #[serde(default = "allow_all")]
+    pub on_failed: bool,
+}
+
+fn allow_all() -> bool {
+    true
+}
+
+impl PushToken {
+    /// Whether an event of wire `kind` may wake this device.
+    pub fn allows(&self, kind: &str) -> bool {
+        match kind {
+            "question" | "approval" => self.on_questions,
+            "task_completed" => self.on_completed,
+            "task_failed" => self.on_failed,
+            // An unknown future kind is allowed rather than silently dropped.
+            _ => true,
+        }
+    }
 }
 
 /// The desktop-side device manager, managed by Tauri.
@@ -137,8 +162,17 @@ impl DeviceManager {
         write_push_tokens(&self.data_dir, &snapshot)
     }
 
-    /// Record a device's push token. Only called for an authenticated device.
-    pub fn set_push_token(&self, device_id: &str, token: String, platform: String) -> Result<()> {
+    /// Record a device's push token and notification preferences. Only called
+    /// for an authenticated device. A `None` preferences object (older client)
+    /// allows every kind.
+    pub fn set_push_token(
+        &self,
+        device_id: &str,
+        token: String,
+        platform: String,
+        preferences: Option<solayge_protocol::PushPreferences>,
+    ) -> Result<()> {
+        let preferences = preferences.unwrap_or_default();
         {
             let mut guard = self.push_tokens.lock().unwrap_or_else(|p| p.into_inner());
             guard.insert(
@@ -147,6 +181,9 @@ impl DeviceManager {
                     token,
                     platform,
                     updated_at: now(),
+                    on_questions: preferences.on_questions,
+                    on_completed: preferences.on_completed,
+                    on_failed: preferences.on_failed,
                 },
             );
         }
@@ -584,15 +621,39 @@ mod tests {
         let store = || solayge_identity::FileStore::new(&dir, "test-identity");
         let manager = DeviceManager::with_store(&dir, &store()).unwrap();
         manager
-            .set_push_token("dev_x", "token-1".into(), "android".into())
+            .set_push_token("dev_x", "token-1".into(), "android".into(), None)
             .unwrap();
-        assert_eq!(manager.push_token("dev_x").unwrap().token, "token-1");
+        let stored = manager.push_token("dev_x").unwrap();
+        assert_eq!(stored.token, "token-1");
+        // A token with no preferences allows every kind.
+        assert!(stored.allows("question") && stored.allows("task_completed"));
         // A device that is not authorized is never a push target.
         assert!(manager.push_targets().is_empty());
+
+        // Preferences are honored per kind and persist.
+        manager
+            .set_push_token(
+                "dev_x",
+                "token-1".into(),
+                "android".into(),
+                Some(solayge_protocol::PushPreferences {
+                    on_questions: false,
+                    on_completed: true,
+                    on_failed: false,
+                }),
+            )
+            .unwrap();
+        let stored = manager.push_token("dev_x").unwrap();
+        assert!(!stored.allows("question"));
+        assert!(!stored.allows("approval"));
+        assert!(stored.allows("task_completed"));
+        assert!(!stored.allows("task_failed"));
         drop(manager);
 
         let restarted = DeviceManager::with_store(&dir, &store()).unwrap();
-        assert_eq!(restarted.push_token("dev_x").unwrap().token, "token-1");
+        let stored = restarted.push_token("dev_x").unwrap();
+        assert_eq!(stored.token, "token-1");
+        assert!(!stored.allows("question"));
         restarted.clear_push_token("dev_x").unwrap();
         assert!(restarted.push_token("dev_x").is_none());
 

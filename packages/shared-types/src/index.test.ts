@@ -111,7 +111,7 @@ const EXPECTED_KEYS: Record<string, string[]> = {
   devices_response: ["devices"],
   device_revoke_payload: ["device_id"],
   device_revoke_result: ["revoked"],
-  push_register_payload: ["token", "platform"],
+  push_register_payload: ["token", "platform", "preferences"],
   push_register_result: ["registered"],
   push_unregister_payload: ["token"],
   pair_begin_payload: ["pairing_id", "desktop_id", "verification_code", "expires_at"],

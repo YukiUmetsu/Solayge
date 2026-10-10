@@ -2,22 +2,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-const { apiMock } = vi.hoisted(() => ({
+const { apiMock, openMock } = vi.hoisted(() => ({
   apiMock: {
     remoteStatus: vi.fn(),
     remoteApply: vi.fn(),
     remoteRetry: vi.fn(),
     pushTestQuestion: vi.fn(),
-    pushDevConfig: vi.fn(),
-    pushDevConfigSet: vi.fn(),
-    pushDevConfigClear: vi.fn(),
+    pushGatewayStatus: vi.fn(),
+    pushGatewayApply: vi.fn(),
     pushGatewayHealth: vi.fn(),
   },
+  openMock: vi.fn(),
 }));
 vi.mock("../api", () => ({ api: apiMock }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openMock }));
 
 import { RemoteAccess } from "./RemoteAccess";
-import type { RemoteStatus } from "../types";
+import type { PushGatewayStatus, RemoteStatus } from "../types";
 
 const STATUS: RemoteStatus = {
   enabled: true,
@@ -42,19 +43,24 @@ const STATUS: RemoteStatus = {
   local_port: 51234,
 };
 
+const GATEWAY: PushGatewayStatus = {
+  enabled: true,
+  running: true,
+  url: "http://127.0.0.1:8787/v1/push",
+  port: 8787,
+  service_account: "/home/me/fcm-service-account.json",
+  registered_devices: 1,
+};
+
 beforeEach(() => {
   apiMock.remoteStatus.mockReset().mockResolvedValue(STATUS);
   apiMock.remoteApply.mockReset().mockResolvedValue(STATUS);
   apiMock.remoteRetry.mockReset().mockResolvedValue(STATUS);
   apiMock.pushTestQuestion.mockReset();
-  apiMock.pushDevConfig.mockReset().mockResolvedValue({
-    url: "",
-    has_token: false,
-    source: "none",
-  });
-  apiMock.pushDevConfigSet.mockReset();
-  apiMock.pushDevConfigClear.mockReset();
+  apiMock.pushGatewayStatus.mockReset().mockResolvedValue(GATEWAY);
+  apiMock.pushGatewayApply.mockReset().mockResolvedValue(GATEWAY);
   apiMock.pushGatewayHealth.mockReset();
+  openMock.mockReset();
 });
 
 describe("Remote access", () => {
@@ -112,13 +118,14 @@ describe("Remote access", () => {
     expect(screen.getByText(/Install Tailscale from tailscale\.com/i)).toBeInTheDocument();
   });
 
-  it("the dev test button sends a synthetic question push and shows the result", async () => {
+  it("the test button sends a synthetic question push and shows the result", async () => {
     const user = userEvent.setup();
     apiMock.pushTestQuestion.mockResolvedValue(
       "Sent a test question push to 1 device(s).",
     );
     render(<RemoteAccess />);
     await screen.findByText("Running on 127.0.0.1:51234");
+    await screen.findByText("http://127.0.0.1:8787/v1/push");
 
     await user.type(screen.getByPlaceholderText("ses_…"), "ses_42");
     await user.click(
@@ -133,30 +140,34 @@ describe("Remote access", () => {
     ).toBeInTheDocument();
   });
 
-  it("the dev panel saves the gateway override", async () => {
+  it("choosing a service account enables the embedded gateway", async () => {
     const user = userEvent.setup();
-    apiMock.pushDevConfigSet.mockResolvedValue({
-      url: "http://127.0.0.1:8787/v1/push",
-      has_token: true,
-      source: "dev",
+    openMock.mockResolvedValue("/home/me/fcm-service-account.json");
+    apiMock.pushGatewayStatus.mockResolvedValue({
+      ...GATEWAY,
+      enabled: false,
+      running: false,
+      service_account: undefined,
     });
     render(<RemoteAccess />);
     await screen.findByText("Running on 127.0.0.1:51234");
 
-    await user.type(
-      screen.getByPlaceholderText("http://127.0.0.1:8787/v1/push"),
-      "http://127.0.0.1:8787/v1/push",
-    );
-    await user.type(screen.getByPlaceholderText("PUSH_GATEWAY_TOKEN"), "secret");
-    await user.click(screen.getByRole("button", { name: /save gateway/i }));
+    await user.click(screen.getByRole("button", { name: /choose service account/i }));
 
     await waitFor(() =>
-      expect(apiMock.pushDevConfigSet).toHaveBeenCalledWith(
-        "http://127.0.0.1:8787/v1/push",
-        "secret",
+      expect(apiMock.pushGatewayApply).toHaveBeenCalledWith(
+        true,
+        "/home/me/fcm-service-account.json",
+        8787,
       ),
     );
-    expect(await screen.findByText(/Gateway saved/)).toBeInTheDocument();
+    expect(await screen.findByText(/Background push updated/)).toBeInTheDocument();
+  });
+
+  it("shows the registered phone count from the gateway status", async () => {
+    render(<RemoteAccess />);
+    expect(await screen.findByText("Phones registered")).toBeInTheDocument();
+    expect(await screen.findByText("1")).toBeInTheDocument();
   });
 
   it("retry re-runs the lifecycle check", async () => {

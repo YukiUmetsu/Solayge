@@ -69,7 +69,13 @@ describe("FCM token registration", () => {
 
     renderCenter(client);
 
-    await waitFor(() => expect(register).toHaveBeenCalledWith("fcm-token", "android"));
+    await waitFor(() =>
+      expect(register).toHaveBeenCalledWith("fcm-token", "android", {
+        on_questions: true,
+        on_completed: true,
+        on_failed: true,
+      }),
+    );
     expect(unregister).not.toHaveBeenCalled();
   });
 });

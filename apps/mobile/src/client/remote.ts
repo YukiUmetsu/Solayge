@@ -18,6 +18,7 @@ import type {
   HostMetadata,
   JsonValue,
   ProjectSummary,
+  PushPreferences,
   SessionDetail,
   SessionSummary,
 } from "@solayge/shared-types";
@@ -98,9 +99,15 @@ export interface RemoteClient {
 
   /**
    * Register this device's push token with the desktop so background alerts can
-   * be delivered over FCM. Idempotent: re-registering the same token is safe.
+   * be delivered over FCM. The per-kind `preferences` let the desktop honor the
+   * phone's notification settings when deciding what to push. Idempotent:
+   * re-registering the same token is safe and also refreshes the preferences.
    */
-  registerPush(token: string, platform: string): Promise<void>;
+  registerPush(
+    token: string,
+    platform: string,
+    preferences: PushPreferences,
+  ): Promise<void>;
 
   /** Forget a previously registered push token (e.g. when removing a desktop). */
   unregisterPush(token: string): Promise<void>;

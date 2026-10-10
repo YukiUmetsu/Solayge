@@ -32,9 +32,9 @@ import type {
   InteractionResult,
   ConnectedDevice,
   DesktopIdentity,
-  DevPushConfigView,
   PairingOffer,
   PairingStatus,
+  PushGatewayStatus,
   RemoteAccessPreferences,
   RemoteStatus,
 } from "./types";
@@ -156,13 +156,16 @@ export const api = {
   clearErrorLog: () => invoke<void>("clear_error_log"),
   readSound: (path: string) => invoke<string>("read_sound_file", { path }),
   testNotification: () => invoke<void>("test_notification"),
-  // TEMPORARY (dev-only): fire a synthetic background `question` push.
+  // Background push: the embedded gateway and an on-demand synthetic push.
   pushTestQuestion: (sessionId?: string | null) =>
     invoke<string>("push_test_question", { sessionId: sessionId ?? null }),
-  pushDevConfig: () => invoke<DevPushConfigView>("push_dev_config"),
-  pushDevConfigSet: (url: string, token: string) =>
-    invoke<DevPushConfigView>("push_dev_config_set", { url, token }),
-  pushDevConfigClear: () => invoke<DevPushConfigView>("push_dev_config_clear"),
+  pushGatewayStatus: () => invoke<PushGatewayStatus>("push_gateway_status"),
+  pushGatewayApply: (enabled: boolean, serviceAccount?: string | null, port?: number | null) =>
+    invoke<PushGatewayStatus>("push_gateway_apply", {
+      enabled,
+      serviceAccount: serviceAccount ?? null,
+      port: port ?? null,
+    }),
   pushGatewayHealth: () => invoke<string>("push_gateway_health"),
   notificationStatus: () => invoke<string>("notification_status"),
   openNotificationSettings: () => invoke<void>("open_notification_settings"),

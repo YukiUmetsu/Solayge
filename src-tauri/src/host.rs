@@ -717,7 +717,7 @@ impl<R: tauri::Runtime> HostHandler<R> {
         }
         let manager = self.app.state::<DeviceManager>();
         manager
-            .set_push_token(device_id, payload.token, payload.platform)
+            .set_push_token(device_id, payload.token, payload.platform, payload.preferences)
             .map_err(|e| ProtocolError::internal(e.to_string()))?;
         typed(&PushRegisterResult { registered: true })
     }

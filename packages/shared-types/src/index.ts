@@ -428,11 +428,26 @@ export interface DeviceRevokeResult {
 
 // ---- push ----
 
+/**
+ * Per-kind notification preferences mirrored from the phone at registration.
+ * The desktop uses these to decide whether an event kind may wake the device.
+ */
+export interface PushPreferences {
+  /** Agent questions and permission requests. */
+  on_questions: boolean;
+  /** Tasks that finished successfully. */
+  on_completed: boolean;
+  /** Tasks that failed or errored. */
+  on_failed: boolean;
+}
+
 /** Register this device's push token with the desktop host. */
 export interface PushRegisterPayload {
   token: string;
   /** `android` | `ios`. */
   platform: string;
+  /** Absent on older clients, which allow every kind. */
+  preferences?: PushPreferences | null;
 }
 
 export interface PushRegisterResult {

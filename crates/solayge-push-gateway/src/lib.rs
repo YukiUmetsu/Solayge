@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 
 pub mod fcm;
+pub mod server;
 
 use std::collections::BTreeMap;
 
@@ -101,9 +102,47 @@ impl FcmMessage {
     }
 }
 
+/// Why an FCM send failed. `Unregistered` is the one case the desktop acts on:
+/// it clears that device's token so a reinstalled/expired address is not retried
+/// forever. Everything else is a transient or server-side failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FcmErrorKind {
+    /// FCM reported the registration token is no longer valid.
+    Unregistered,
+    /// Any other failure (network, auth, rate limit, invalid message).
+    Other,
+}
+
+/// A typed FCM send failure. Never contains the registration token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FcmError {
+    pub kind: FcmErrorKind,
+    pub message: String,
+}
+
+impl FcmError {
+    pub fn other(message: impl Into<String>) -> Self {
+        FcmError {
+            kind: FcmErrorKind::Other,
+            message: message.into(),
+        }
+    }
+
+    pub fn unregistered(message: impl Into<String>) -> Self {
+        FcmError {
+            kind: FcmErrorKind::Unregistered,
+            message: message.into(),
+        }
+    }
+
+    pub fn is_unregistered(&self) -> bool {
+        self.kind == FcmErrorKind::Unregistered
+    }
+}
+
 /// Sends a built message. Implemented by the real FCM client and by tests.
 pub trait FcmSender: Send + Sync {
-    fn send(&self, message: &FcmMessage) -> Result<(), String>;
+    fn send(&self, message: &FcmMessage) -> Result<(), FcmError>;
 }
 
 /// Map a validated request onto the FCM message. Pure and content-free.
@@ -241,6 +280,11 @@ pub fn handle_push(
     let message = build_message(&request);
     match sender.send(&message) {
         Ok(()) => GatewayResponse::json(202, "{\"delivered\":true}"),
+        // The token is dead: tell the desktop so it can forget it instead of
+        // retrying on every event.
+        Err(error) if error.is_unregistered() => {
+            GatewayResponse::json(410, "{\"error\":\"unregistered\"}")
+        }
         Err(_) => GatewayResponse::json(502, "{\"error\":\"delivery failed\"}"),
     }
 }
@@ -254,12 +298,16 @@ mod tests {
     struct RecordingSender {
         messages: Mutex<Vec<FcmMessage>>,
         fail: bool,
+        unregistered: bool,
     }
 
     impl FcmSender for RecordingSender {
-        fn send(&self, message: &FcmMessage) -> Result<(), String> {
+        fn send(&self, message: &FcmMessage) -> Result<(), FcmError> {
+            if self.unregistered {
+                return Err(FcmError::unregistered("token is not registered"));
+            }
             if self.fail {
-                return Err("nope".into());
+                return Err(FcmError::other("nope"));
             }
             self.messages
                 .lock()
@@ -380,12 +428,27 @@ mod tests {
         let sender = RecordingSender {
             messages: Mutex::new(Vec::new()),
             fail: true,
+            unregistered: false,
         };
         let body = serde_json::to_vec(&request(PushEventKind::TaskFailed)).unwrap();
         assert_eq!(
             handle_push(&body, Some("Bearer secret"), "secret", &sender).status,
             502
         );
+    }
+
+    #[test]
+    fn an_unregistered_token_is_reported_as_gone() {
+        // The desktop clears the device's token on 410 instead of retrying.
+        let sender = RecordingSender {
+            messages: Mutex::new(Vec::new()),
+            fail: false,
+            unregistered: true,
+        };
+        let body = serde_json::to_vec(&request(PushEventKind::Question)).unwrap();
+        let response = handle_push(&body, Some("Bearer secret"), "secret", &sender);
+        assert_eq!(response.status, 410);
+        assert!(response.body.contains("unregistered"));
     }
 
     #[test]

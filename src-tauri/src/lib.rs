@@ -32,6 +32,7 @@ mod opencode;
 mod opencode_server;
 mod permissions;
 mod push;
+mod push_gateway;
 mod scheduler;
 mod secrets;
 mod state;
@@ -86,6 +87,10 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             app.manage(AppState::new(data_dir.clone()));
             app.manage(devices::DeviceManager::new(&data_dir)?);
+            app.manage(push_gateway::PushGatewayManager::new(&data_dir));
+            // Start the embedded gateway before the window opens so a task that
+            // finishes immediately still reaches a paired phone.
+            push_gateway::restore_on_startup(app.handle());
             #[cfg(target_os = "macos")]
             macos_notify::init();
             scheduler::spawn_scheduler(app.handle().clone());
@@ -142,12 +147,12 @@ pub fn run() {
             commands::update_settings,
             commands::read_sound_file,
             commands::test_notification,
-            // TEMPORARY (remove before release): on-demand background push test.
+            // Background push: the embedded gateway lifecycle and an on-demand
+            // synthetic push that exercises the real FCM path.
             commands::push_test_question,
-            commands::push_dev_config,
-            commands::push_dev_config_set,
-            commands::push_dev_config_clear,
             commands::push_gateway_health,
+            push_gateway::push_gateway_status,
+            push_gateway::push_gateway_apply,
             commands::notification_status,
             commands::open_notification_settings,
             commands::get_prompt_history,
@@ -194,6 +199,7 @@ pub fn run() {
                 // remove Solayge's Tailscale Serve entry, and flush any
                 // analytics still in memory.
                 remote::shutdown(app);
+                push_gateway::shutdown(app);
                 opencode_server::shutdown();
                 analytics::flush(app);
             }

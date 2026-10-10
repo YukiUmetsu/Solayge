@@ -322,6 +322,7 @@ pub trait RemoteClient: Send + Sync {
         let payload = typed(&PushRegisterPayload {
             token: token.to_string(),
             platform: platform.to_string(),
+            preferences: None,
         })?;
         let command_id = command_id_for(
             self.desktop_id().unwrap_or_default(),

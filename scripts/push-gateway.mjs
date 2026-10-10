@@ -127,8 +127,8 @@ function main() {
   console.log(`  gateway URL     : ${url}`);
   console.log(`  desktop config  : ${configPath}`);
   console.log("");
-  console.log("In Solayge → Settings → Remote access → Developer: test background push,");
-  console.log("leave the fields as pre-filled and click \"Send test question push\".");
+  console.log("In Solayge → Settings → Devices → Background push notifications,");
+  console.log("click \"Send test question push\" (the manual gateway override above is used).");
   console.log("");
 
   const child = spawn("cargo", ["run", "-p", "solayge-push-gateway"], {

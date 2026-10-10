@@ -502,12 +502,20 @@ export interface RemoteStatus {
   last_error?: string;
 }
 
-/** TEMPORARY (dev-only): the desktop's push-gateway configuration. */
-export interface DevPushConfigView {
-  url: string;
-  has_token: boolean;
-  /** `dev` (runtime override), `env` (environment), or `none`. */
-  source: string;
+/** The embedded push gateway's status, shown in Settings → Devices. */
+export interface PushGatewayStatus {
+  /** Whether the user asked the gateway to run. */
+  enabled: boolean;
+  /** Whether it is listening right now. */
+  running: boolean;
+  /** The loopback `POST /v1/push` URL, when running. */
+  url?: string;
+  port: number;
+  /** The configured Firebase service-account path (not a secret). */
+  service_account?: string;
+  /** Authorized paired devices that registered an FCM token. */
+  registered_devices: number;
+  last_error?: string;
 }
 
 export interface CacheStats {

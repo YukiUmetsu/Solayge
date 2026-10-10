@@ -19,6 +19,7 @@ import type {
   HostMetadata,
   JsonValue,
   ProjectSummary,
+  PushPreferences,
   SessionDetail,
   SessionEvent,
   SessionSummary,
@@ -382,7 +383,11 @@ export class MockRemoteClient implements RemoteClient {
     return { ...receipt };
   }
 
-  async registerPush(_token: string, _platform: string): Promise<void> {
+  async registerPush(
+    _token: string,
+    _platform: string,
+    _preferences: PushPreferences,
+  ): Promise<void> {
     // The in-memory mock has no push gateway; registration is a no-op.
   }
 

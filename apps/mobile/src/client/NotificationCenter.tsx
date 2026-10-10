@@ -155,22 +155,32 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   // The master switch is authoritative for the push path too: while
   // notifications are disabled the token is explicitly *unregistered*, so the
   // desktop stops sending background pushes to a user who never opted in (or
-  // turned them back off). The desktop cannot read the phone's per-kind
-  // preferences, so enabling notifications re-registers and lets the shared
-  // preference file gate the local path.
+  // turned them back off). The per-kind preferences are sent with the token so
+  // the desktop only pushes what the user asked for; changing any of them
+  // re-registers, which refreshes them on the desktop.
   const syncPushRegistration = useCallback(async () => {
     const token = await pushToken();
     if (!token) return;
     try {
       if (settings.enabled) {
-        await client.registerPush(token.token, token.platform);
+        await client.registerPush(token.token, token.platform, {
+          on_questions: settings.onQuestions,
+          on_completed: settings.onCompleted,
+          on_failed: settings.onFailed,
+        });
       } else {
         await client.unregisterPush(token.token);
       }
     } catch {
       // The desktop may have dropped; the next refresh or foreground retries.
     }
-  }, [client, settings.enabled]);
+  }, [
+    client,
+    settings.enabled,
+    settings.onQuestions,
+    settings.onCompleted,
+    settings.onFailed,
+  ]);
 
   useEffect(() => {
     if (status !== "online" || !desktopId) return undefined;

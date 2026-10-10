@@ -18,6 +18,7 @@ import type {
   HostMetadata,
   JsonValue,
   ProjectSummary,
+  PushPreferences,
   SessionDetail,
   SessionSummary,
 } from "@solayge/shared-types";
@@ -200,10 +201,14 @@ export class TauriRemoteClient implements RemoteClient {
     );
   }
 
-  async registerPush(token: string, platform: string): Promise<void> {
+  async registerPush(
+    token: string,
+    platform: string,
+    preferences: PushPreferences,
+  ): Promise<void> {
     await this.call<{ registered: boolean }>(
       "push.register",
-      { token, platform },
+      { token, platform, preferences },
       undefined,
       newCommandId(),
     );

@@ -222,7 +222,15 @@
   },
   "device_revoke_payload": { "device_id": "dev_1" },
   "device_revoke_result": { "revoked": true },
-  "push_register_payload": { "token": "fcm-token-abc", "platform": "android" },
+  "push_register_payload": {
+    "token": "fcm-token-abc",
+    "platform": "android",
+    "preferences": {
+      "on_questions": true,
+      "on_completed": false,
+      "on_failed": true
+    }
+  },
   "push_register_result": { "registered": true },
   "push_unregister_payload": { "token": "fcm-token-abc" },
   "pair_begin_payload": {

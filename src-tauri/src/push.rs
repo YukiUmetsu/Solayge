@@ -6,13 +6,18 @@
 //! or credentials. The phone reconnects over Iroh/Tailscale to read the real
 //! content.
 //!
-//! Configuration is environment-only, so no gateway secret is compiled into the
-//! distributed app:
+//! The gateway is normally embedded: the desktop runs its own loopback gateway
+//! when the user configures a Firebase service account (see
+//! [`crate::push_gateway`]), so background alerts work without any external
+//! process. Two explicit overrides exist for advanced setups:
 //!
-//! * `SOLAYGE_PUSH_GATEWAY_URL` — e.g. `https://push.example.com/v1/push`.
-//! * `SOLAYGE_PUSH_GATEWAY_TOKEN` — the bearer secret the gateway issued.
+//! * `SOLAYGE_PUSH_GATEWAY_URL` / `SOLAYGE_PUSH_GATEWAY_TOKEN` — a remote or
+//!   shared gateway (environment, so no secret is compiled in).
+//! * `push-dev.json` — a manual loopback override written by
+//!   `pnpm push:gateway` for development.
 //!
-//! With either unset, push dispatch is a no-op and local notifications still
+//! Precedence is environment, then `push-dev.json`, then the embedded gateway.
+//! With none configured, push dispatch is a no-op and local notifications still
 //! work.
 
 use std::path::{Path, PathBuf};
@@ -21,13 +26,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
-use crate::devices::DeviceManager;
+use crate::devices::{DeviceManager, PushToken};
 use crate::models::NotifyKind;
 
-/// Where a *temporary, dev-only* gateway override is stored. Production and CI
-/// configure the gateway through `SOLAYGE_PUSH_GATEWAY_URL`/`_TOKEN`; this file
-/// only exists when the developer creates it (through the Settings test panel
-/// or `pnpm push:gateway`), so it never affects a normal install.
+/// A manual, loopback gateway override written by `pnpm push:gateway`. It is
+/// not created by the app; production installs use the embedded gateway.
 const DEV_CONFIG_FILE: &str = "push-dev.json";
 
 /// One alert to deliver. Identifiers only.
@@ -51,45 +54,77 @@ struct GatewayRequest<'a> {
     event: &'a PushEvent,
 }
 
-/// Sends one request to the gateway. Implemented for real HTTP and for tests.
-pub trait PushTransport: Send + Sync {
-    fn send(&self, url: &str, bearer: &str, payload: &Value) -> Result<(), String>;
+/// A push delivery failure. `unregistered` is the only recoverable case: the
+/// gateway reported the device's FCM token is dead, so the desktop forgets it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushError {
+    pub unregistered: bool,
+    pub message: String,
 }
 
-/// The production transport: a blocking HTTPS POST with a bounded timeout.
+impl PushError {
+    fn other(message: impl Into<String>) -> Self {
+        PushError {
+            unregistered: false,
+            message: message.into(),
+        }
+    }
+
+    fn unregistered(message: impl Into<String>) -> Self {
+        PushError {
+            unregistered: true,
+            message: message.into(),
+        }
+    }
+}
+
+/// Sends one request to the gateway. Implemented for real HTTP and for tests.
+pub trait PushTransport: Send + Sync {
+    fn send(&self, url: &str, bearer: &str, payload: &Value) -> Result<(), PushError>;
+}
+
+/// The production transport: a blocking HTTP(S) POST with a bounded timeout.
 pub struct HttpPushTransport;
 
 impl PushTransport for HttpPushTransport {
-    fn send(&self, url: &str, bearer: &str, payload: &Value) -> Result<(), String> {
+    fn send(&self, url: &str, bearer: &str, payload: &Value) -> Result<(), PushError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| PushError::other(e.to_string()))?;
         let response = client
             .post(url)
             .bearer_auth(bearer)
             .json(payload)
             .send()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| PushError::other(e.to_string()))?;
         let status = response.status();
         if status.is_success() {
-            Ok(())
+            return Ok(());
+        }
+        // `410 Gone` means the gateway reported the token is no longer
+        // registered. Treat it as terminal for this device, not a retry.
+        if status.as_u16() == 410 {
+            return Err(PushError::unregistered(format!(
+                "gateway returned {status}"
+            )));
+        }
+        // Surface the gateway's small JSON error (for example a shape hint)
+        // so Settings can show something actionable. The gateway returns
+        // only fixed error strings, and this is length-capped regardless.
+        let detail = response
+            .text()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(300)
+            .collect::<String>();
+        if detail.is_empty() {
+            Err(PushError::other(format!("gateway returned {status}")))
         } else {
-            // Surface the gateway's small JSON error (for example a shape hint)
-            // so Settings can show something actionable. The gateway returns
-            // only fixed error strings, and this is length-capped regardless.
-            let detail = response
-                .text()
-                .unwrap_or_default()
-                .trim()
-                .chars()
-                .take(300)
-                .collect::<String>();
-            if detail.is_empty() {
-                Err(format!("gateway returned {status}"))
-            } else {
-                Err(format!("gateway returned {status}: {detail}"))
-            }
+            Err(PushError::other(format!(
+                "gateway returned {status}: {detail}"
+            )))
         }
     }
 }
@@ -143,29 +178,12 @@ fn env_gateway_config() -> Option<(String, String)> {
     Some((url, bearer))
 }
 
-// ============================================================================
-// TEMPORARY DEV-ONLY gateway configuration — remove with the test hook below.
-//
-// Production config is environment-only. This lets the desktop's Settings test
-// panel point at a local gateway at runtime (no restarting the app with new
-// environment variables). The file is owner-only (0600) and lives in the app's
-// private data directory; it is never logged or sent anywhere.
-// ============================================================================
-
-/// The persisted dev override. `token` is a bearer secret; never log it.
+/// A manual `push-dev.json` override (only created by `pnpm push:gateway`).
+/// `token` is a bearer secret; never log it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DevPushConfig {
     url: String,
     token: String,
-}
-
-/// What the Settings panel shows about the current gateway configuration.
-#[derive(Debug, Clone, Serialize)]
-pub struct DevPushConfigView {
-    pub url: String,
-    pub has_token: bool,
-    /// `dev` (the file above), `env` (process environment), or `none`.
-    pub source: String,
 }
 
 fn app_data_dir(app: &AppHandle) -> Option<PathBuf> {
@@ -185,63 +203,19 @@ fn read_dev_config(data_dir: &Path) -> Option<DevPushConfig> {
     Some(config)
 }
 
-fn write_dev_config(data_dir: &Path, config: &DevPushConfig) -> Result<(), String> {
-    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(dev_config_path(data_dir))
-            .map_err(|e| e.to_string())?;
-        file.write_all(&bytes).map_err(|e| e.to_string())?;
-        file.flush().map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(dev_config_path(data_dir), &bytes).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn remove_dev_config_file(data_dir: &Path) -> Result<(), String> {
-    match std::fs::remove_file(dev_config_path(data_dir)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-/// The gateway to dispatch to: the dev override wins when present, otherwise
-/// the process environment. A normal install has no override file, so this is
-/// identical to the previous environment-only behavior.
+/// The gateway to dispatch to. Precedence: process environment (a remote
+/// gateway), then a manual `push-dev.json`, then the embedded gateway the
+/// desktop runs itself. A normal install therefore uses the embedded gateway
+/// with no environment configuration at all.
 fn app_gateway_config(app: &AppHandle) -> Option<(String, String)> {
-    app_data_dir(app)
-        .as_deref()
-        .and_then(read_dev_config)
-        .map(|config| (config.url, config.token))
-        .or_else(env_gateway_config)
-}
-
-/// Validate and normalize a gateway URL. Only `http`/`https` is accepted.
-pub(crate) fn normalize_gateway_url(raw: &str) -> Result<String, String> {
-    let url = raw.trim();
-    if url.is_empty() {
-        return Err("Enter the gateway URL".to_string());
+    if let Some(env) = env_gateway_config() {
+        return Some(env);
     }
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| "The gateway URL must start with http:// or https://".to_string())?;
-    if rest.is_empty() || rest.starts_with('/') {
-        return Err("The gateway URL is missing a host".to_string());
+    if let Some(config) = app_data_dir(app).as_deref().and_then(read_dev_config) {
+        return Some((config.url, config.token));
     }
-    Ok(url.to_string())
+    app.try_state::<crate::push_gateway::PushGatewayManager>()
+        .and_then(|manager| manager.local_config())
 }
 
 /// Derive the gateway's `/healthz` URL from the configured push endpoint.
@@ -255,58 +229,6 @@ pub(crate) fn health_url(push_url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}://{}/healthz", &url[..scheme_end], authority))
-}
-
-/// The current gateway configuration, as the Settings panel should show it.
-pub(crate) fn dev_config_view(app: &AppHandle) -> DevPushConfigView {
-    if let Some(config) = app_data_dir(app).as_deref().and_then(read_dev_config) {
-        return DevPushConfigView {
-            url: config.url,
-            has_token: !config.token.is_empty(),
-            source: "dev".to_string(),
-        };
-    }
-    if let Some((url, token)) = env_gateway_config() {
-        return DevPushConfigView {
-            url,
-            has_token: !token.is_empty(),
-            source: "env".to_string(),
-        };
-    }
-    DevPushConfigView {
-        url: String::new(),
-        has_token: false,
-        source: "none".to_string(),
-    }
-}
-
-/// Persist a dev gateway override (owner-only). Returns the updated view.
-pub(crate) fn set_dev_config(
-    app: &AppHandle,
-    url: &str,
-    token: &str,
-) -> Result<DevPushConfigView, String> {
-    let url = normalize_gateway_url(url)?;
-    let dir = app_data_dir(app)
-        .ok_or_else(|| "Could not resolve the app data directory".to_string())?;
-    // A blank token keeps the previously stored one, so the URL can be changed
-    // without re-pasting the secret.
-    let token = match token.trim() {
-        "" => read_dev_config(&dir)
-            .map(|config| config.token)
-            .ok_or_else(|| "Enter the gateway bearer token".to_string())?,
-        token => token.to_string(),
-    };
-    write_dev_config(&dir, &DevPushConfig { url, token })?;
-    Ok(dev_config_view(app))
-}
-
-/// Remove the dev gateway override. Returns the updated view.
-pub(crate) fn clear_dev_config(app: &AppHandle) -> Result<DevPushConfigView, String> {
-    if let Some(dir) = app_data_dir(app) {
-        remove_dev_config_file(&dir)?;
-    }
-    Ok(dev_config_view(app))
 }
 
 /// Best-effort reachability check against the gateway's `/healthz`.
@@ -330,20 +252,49 @@ pub(crate) fn check_gateway(app: &AppHandle) -> Result<String, String> {
     }
 }
 
-/// Deliver one event to every authorized device's token. Kept separate from the
-/// app handle so it is unit-testable with a fake transport.
+/// Deliver one event to every authorized device that has opted into this kind.
+///
+/// Returns the device ids whose FCM token the gateway reported as dead
+/// (`410 Gone`), so the caller can forget them and stop retrying. Kept separate
+/// from the app handle so it is unit-testable with a fake transport.
 pub fn deliver(
     transport: &dyn PushTransport,
     url: &str,
     bearer: &str,
-    targets: &[String],
+    targets: &[(String, PushToken)],
     event: &PushEvent,
-) {
-    for token in targets {
-        let payload = serde_json::to_value(GatewayRequest { token, event })
-            .unwrap_or(Value::Null);
+) -> Vec<String> {
+    let mut unregistered = Vec::new();
+    for (device_id, token) in targets {
+        // The phone's per-kind settings are authoritative for background pushes.
+        if !token.allows(event.kind) {
+            continue;
+        }
+        let payload = serde_json::to_value(GatewayRequest {
+            token: &token.token,
+            event,
+        })
+        .unwrap_or(Value::Null);
         // A push failure is never fatal: the phone still syncs on reconnect.
-        let _ = transport.send(url, bearer, &payload);
+        if let Err(error) = transport.send(url, bearer, &payload) {
+            if error.unregistered {
+                unregistered.push(device_id.clone());
+            }
+        }
+    }
+    unregistered
+}
+
+/// Forget the tokens the gateway reported as unregistered.
+fn forget_unregistered(app: &AppHandle, device_ids: &[String]) {
+    if device_ids.is_empty() {
+        return;
+    }
+    let Some(manager) = app.try_state::<DeviceManager>() else {
+        return;
+    };
+    for device_id in device_ids {
+        let _ = manager.clear_push_token(device_id);
     }
 }
 
@@ -354,11 +305,7 @@ pub(crate) fn dispatch_kind(app: &AppHandle, push_kind: &'static str, session_id
         return;
     };
     let manager = app.state::<DeviceManager>();
-    let targets: Vec<String> = manager
-        .push_targets()
-        .into_iter()
-        .map(|(_, token)| token.token)
-        .collect();
+    let targets = manager.push_targets();
     if targets.is_empty() {
         return;
     }
@@ -370,40 +317,33 @@ pub(crate) fn dispatch_kind(app: &AppHandle, push_kind: &'static str, session_id
         session_id: session_id.map(str::to_string),
         approval_id: None,
     };
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        deliver(&HttpPushTransport, &url, &bearer, &targets, &event);
+        let dead = deliver(&HttpPushTransport, &url, &bearer, &targets, &event);
+        forget_unregistered(&app, &dead);
     });
 }
 
-// ============================================================================
-// TEMPORARY DEV-ONLY TEST HOOK — remove this block before release.
-//
-// It fires a synthetic `question` background push to every paired phone so the
-// FCM path (gateway → FCM → Android notification → tap deep-link) can be
-// exercised on demand, without waiting for a real agent to ask something. It
-// deliberately bypasses the desktop's local notification settings.
-// ============================================================================
-
-/// TEMPORARY: send a synthetic `question` push to every paired phone.
+/// Send a synthetic `question` push to every paired phone.
 ///
-/// Each call uses a unique event id so repeated tests are not swallowed by the
-/// phone's deduplication. Returns a human-readable summary; the error describes
-/// the first failure so Settings can show something actionable.
+/// This exercises the exact production path (gateway bearer auth → FCM HTTP v1
+/// → Android notification with a tap deep-link) on demand, without waiting for
+/// an agent to ask. Each call uses a unique event id so it is not swallowed by
+/// the phone's deduplication; it deliberately bypasses the per-kind settings.
+/// Returns a human-readable summary, or the first error so Settings can show
+/// something actionable.
 pub(crate) fn dispatch_test_question(
     app: &AppHandle,
     session_id: Option<String>,
 ) -> Result<String, String> {
     let (url, bearer) = app_gateway_config(app).ok_or_else(|| {
-        "No push gateway is configured. Run `pnpm push:gateway` or fill in the gateway \
-         URL and token above."
+        "No push gateway is running. Add a Firebase service account under \
+         Settings → Devices → Background push notifications, or start one with \
+         `pnpm push:gateway`."
             .to_string()
     })?;
     let manager = app.state::<DeviceManager>();
-    let targets: Vec<String> = manager
-        .push_targets()
-        .into_iter()
-        .map(|(_, token)| token.token)
-        .collect();
+    let targets = manager.push_targets();
     if targets.is_empty() {
         return Err(
             "No paired phone has registered a push token yet. Enable notifications on the \
@@ -429,22 +369,27 @@ pub(crate) fn dispatch_test_question(
 
     let transport = HttpPushTransport;
     let mut delivered = 0usize;
+    let mut dead: Vec<String> = Vec::new();
     let mut first_error: Option<String> = None;
-    for token in &targets {
+    for (device_id, token) in &targets {
         let payload = serde_json::to_value(GatewayRequest {
-            token: token.as_str(),
+            token: &token.token,
             event: &event,
         })
         .unwrap_or(Value::Null);
         match transport.send(&url, &bearer, &payload) {
             Ok(()) => delivered += 1,
             Err(error) => {
+                if error.unregistered {
+                    dead.push(device_id.clone());
+                }
                 if first_error.is_none() {
-                    first_error = Some(error);
+                    first_error = Some(error.message);
                 }
             }
         }
     }
+    forget_unregistered(app, &dead);
 
     match first_error {
         None => Ok(format!(
@@ -467,15 +412,31 @@ mod tests {
     #[derive(Default)]
     struct RecordingTransport {
         calls: Mutex<Vec<(String, Value)>>,
+        /// When set, every send fails as an unregistered token.
+        unregistered: bool,
     }
 
     impl PushTransport for RecordingTransport {
-        fn send(&self, _url: &str, _bearer: &str, payload: &Value) -> Result<(), String> {
+        fn send(&self, _url: &str, _bearer: &str, payload: &Value) -> Result<(), PushError> {
+            if self.unregistered {
+                return Err(PushError::unregistered("token is dead"));
+            }
             self.calls
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .push((String::new(), payload.clone()));
             Ok(())
+        }
+    }
+
+    fn token(allowed: bool) -> PushToken {
+        PushToken {
+            token: "token".into(),
+            platform: "android".into(),
+            updated_at: 0,
+            on_questions: allowed,
+            on_completed: allowed,
+            on_failed: allowed,
         }
     }
 
@@ -513,18 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn gateway_urls_must_be_http_and_have_a_host() {
-        assert_eq!(
-            normalize_gateway_url(" https://push.example.com/v1/push ").unwrap(),
-            "https://push.example.com/v1/push"
-        );
-        assert!(normalize_gateway_url("http://127.0.0.1:8787/v1/push").is_ok());
-        assert!(normalize_gateway_url("").is_err());
-        assert!(normalize_gateway_url("ftp://push.example.com").is_err());
-        assert!(normalize_gateway_url("https:///nohost").is_err());
-    }
-
-    #[test]
     fn the_health_url_is_the_gateway_origin_plus_healthz() {
         assert_eq!(
             health_url("https://push.example.com/v1/push"),
@@ -547,13 +496,17 @@ mod tests {
             session_id: Some("ses".into()),
             approval_id: None,
         };
-        deliver(
+        let dead = deliver(
             &transport,
             "https://gateway/v1/push",
             "secret",
-            &["token_a".to_string(), "token_b".to_string()],
+            &[
+                ("dev_a".to_string(), token(true)),
+                ("dev_b".to_string(), token(true)),
+            ],
             &event,
         );
+        assert!(dead.is_empty());
         let calls = transport.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         let payload = &calls[0].1;
@@ -567,5 +520,63 @@ mod tests {
         assert!(!serialized.contains("prompt"));
         assert!(!serialized.contains("text"));
         assert!(!serialized.contains("command"));
+    }
+
+    #[test]
+    fn deliver_skips_devices_that_opted_out_of_the_event_kind() {
+        let transport = RecordingTransport::default();
+        let event = PushEvent {
+            event_id: "desk:se:ses:task_completed".into(),
+            kind: "task_completed",
+            desktop_id: "desk".into(),
+            session_id: Some("ses".into()),
+            approval_id: None,
+        };
+        deliver(
+            &transport,
+            "https://gateway/v1/push",
+            "secret",
+            &[
+                ("on".to_string(), {
+                    let mut t = token(false);
+                    t.on_completed = true;
+                    t
+                }),
+                ("off".to_string(), {
+                    let mut t = token(true);
+                    t.on_completed = false;
+                    t
+                }),
+            ],
+            &event,
+        );
+        // Only the device that enabled completions is contacted.
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deliver_reports_devices_with_dead_tokens() {
+        let transport = RecordingTransport {
+            calls: Mutex::new(Vec::new()),
+            unregistered: true,
+        };
+        let event = PushEvent {
+            event_id: "desk:se:ses:task_failed".into(),
+            kind: "task_failed",
+            desktop_id: "desk".into(),
+            session_id: Some("ses".into()),
+            approval_id: None,
+        };
+        let dead = deliver(
+            &transport,
+            "https://gateway/v1/push",
+            "secret",
+            &[
+                ("dev_a".to_string(), token(true)),
+                ("dev_b".to_string(), token(true)),
+            ],
+            &event,
+        );
+        assert_eq!(dead, vec!["dev_a".to_string(), "dev_b".to_string()]);
     }
 }

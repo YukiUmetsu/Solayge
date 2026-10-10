@@ -37,7 +37,7 @@ describe("Session detail (loopback client)", () => {
     // Collapsed by default. jsdom does not hide the content of a closed
     // `<details>`, so assert the element's own state rather than the absence
     // of its text (which would still be in the DOM).
-    const details = screen.getByText("Task details").closest("details");
+    const details = (await screen.findByText("Task details")).closest("details");
     expect(details).not.toHaveAttribute("open");
     await user.click(await screen.findByText("Task details"));
     expect(details).toHaveAttribute("open");
