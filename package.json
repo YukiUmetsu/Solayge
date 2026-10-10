@@ -12,6 +12,7 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "tauri": "node scripts/tauri.mjs",
+    "push:gateway": "node scripts/push-gateway.mjs",
     "make:sounds": "node scripts/make-sounds.mjs",
     "clean:bundle": "node -e \"const{rmSync}=require('fs');for(const d of ['src-tauri/target/release/bundle/macos','src-tauri/target/release/bundle/dmg'])rmSync(d,{recursive:true,force:true})\""
   },

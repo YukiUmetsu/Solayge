@@ -144,6 +144,10 @@ pub fn run() {
             commands::test_notification,
             // TEMPORARY (remove before release): on-demand background push test.
             commands::push_test_question,
+            commands::push_dev_config,
+            commands::push_dev_config_set,
+            commands::push_dev_config_clear,
+            commands::push_gateway_health,
             commands::notification_status,
             commands::open_notification_settings,
             commands::get_prompt_history,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
-import type { RemoteStatus } from "../types";
+import type { DevPushConfigView, RemoteStatus } from "../types";
 import { ErrorNote } from "./Field";
 import { Icon } from "./Icons";
 import { SectionLabel } from "./AgentConfigForm";
@@ -91,25 +91,87 @@ export function RemoteAccess() {
   const [httpsPort, setHttpsPort] = useState("");
 
   // TEMPORARY (dev-only): state for the background-push test controls.
+  const [devConfig, setDevConfig] = useState<DevPushConfigView | null>(null);
+  const [gatewayUrl, setGatewayUrl] = useState("");
+  const [gatewayToken, setGatewayToken] = useState("");
   const [testSessionId, setTestSessionId] = useState("");
-  const [testPushResult, setTestPushResult] = useState<string | null>(null);
-  const [testPushBusy, setTestPushBusy] = useState(false);
+  const [pushResult, setPushResult] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
 
   useEffect(() => {
     if (status) setHttpsPort(String(status.https_port));
     // Only reset when the manager reports a different port (after apply/retry).
   }, [status?.https_port]);
 
+  // TEMPORARY (dev-only): load the runtime gateway config on mount.
+  const loadDevConfig = useCallback(async () => {
+    try {
+      const config = await api.pushDevConfig();
+      setDevConfig(config);
+      if (config?.url) setGatewayUrl(config.url);
+    } catch {
+      // Optional dev feature; ignore when the command is unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDevConfig();
+  }, [loadDevConfig]);
+
+  // TEMPORARY (dev-only): save / clear the runtime gateway config.
+  async function saveGateway() {
+    setPushBusy(true);
+    setPushResult(null);
+    try {
+      const config = await api.pushDevConfigSet(gatewayUrl.trim(), gatewayToken);
+      setDevConfig(config);
+      setGatewayToken("");
+      setPushResult("Gateway saved. Check it, then send a test push.");
+    } catch (e) {
+      setPushResult(String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function clearGateway() {
+    setPushBusy(true);
+    setPushResult(null);
+    try {
+      const config = await api.pushDevConfigClear();
+      setDevConfig(config);
+      setGatewayUrl(config?.url ?? "");
+      setGatewayToken("");
+      setPushResult("Gateway override cleared.");
+    } catch (e) {
+      setPushResult(String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function checkGateway() {
+    setPushBusy(true);
+    setPushResult(null);
+    try {
+      setPushResult(await api.pushGatewayHealth());
+    } catch (e) {
+      setPushResult(String(e));
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
   // TEMPORARY (dev-only): send a synthetic question push to every paired phone.
   async function sendTestQuestion() {
-    setTestPushBusy(true);
-    setTestPushResult(null);
+    setPushBusy(true);
+    setPushResult(null);
     try {
-      setTestPushResult(await api.pushTestQuestion(testSessionId.trim() || null));
+      setPushResult(await api.pushTestQuestion(testSessionId.trim() || null));
     } catch (e) {
-      setTestPushResult(String(e));
+      setPushResult(String(e));
     } finally {
-      setTestPushBusy(false);
+      setPushBusy(false);
     }
   }
 
@@ -293,23 +355,73 @@ export function RemoteAccess() {
 
       <ErrorNote error={error} />
 
-      {/* TEMPORARY (dev-only): fire a synthetic "Agent has a question" push at
-          every paired phone to test FCM delivery and tap deep-linking. */}
-      <div className="rounded-lg border border-dashed border-line p-3">
+      {/* TEMPORARY (dev-only): configure a local push gateway and fire a
+          synthetic "Agent has a question" push at every paired phone. */}
+      <div className="space-y-2 rounded-lg border border-dashed border-line p-3">
         <div className="text-[11px] font-medium text-ink">
           Developer: test background push
         </div>
-        <p className="mt-0.5 text-[11px] leading-relaxed text-ink-subtle">
-          Sends a synthetic &ldquo;Agent has a question&rdquo; push to every paired
-          phone. Requires the gateway URL/token in the desktop environment and a
-          phone that has registered a push token.
+        <p className="text-[11px] leading-relaxed text-ink-subtle">
+          Easiest path: run{" "}
+          <span className="mono">pnpm push:gateway</span> in the repo. It starts a
+          local gateway and fills these fields in; background the phone, then send
+          a test push.
         </p>
-        <div className="mt-2 flex flex-wrap items-end gap-2">
+        <div className="text-[11px] text-ink-subtle">
+          Gateway:{" "}
+          <span className="text-ink">
+            {!devConfig
+              ? "…"
+              : devConfig.source === "none"
+                ? "not configured"
+                : `${devConfig.source === "dev" ? "runtime override" : "environment"}${
+                    devConfig.has_token ? " · token set" : " · no token"
+                  }`}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-[11px] text-ink-subtle">
+            <span className="block">Gateway URL</span>
+            <input
+              value={gatewayUrl}
+              disabled={pushBusy}
+              onChange={(e) => setGatewayUrl(e.target.value)}
+              placeholder="http://127.0.0.1:8787/v1/push"
+              className="mono mt-1 w-72 rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink"
+            />
+          </label>
+          <label className="text-[11px] text-ink-subtle">
+            <span className="block">Bearer token</span>
+            <input
+              type="password"
+              value={gatewayToken}
+              disabled={pushBusy}
+              onChange={(e) => setGatewayToken(e.target.value)}
+              placeholder={devConfig?.has_token ? "(blank keeps it)" : "PUSH_GATEWAY_TOKEN"}
+              className="mono mt-1 w-56 rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink"
+            />
+          </label>
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+            onClick={() => void saveGateway()}
+            disabled={pushBusy || !gatewayUrl.trim()}
+          >
+            Save gateway
+          </button>
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+            onClick={() => void clearGateway()}
+            disabled={pushBusy || devConfig?.source !== "dev"}
+          >
+            Clear
+          </button>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
           <label className="text-[11px] text-ink-subtle">
             <span className="block">Session id (optional)</span>
             <input
               value={testSessionId}
-              disabled={testPushBusy}
+              disabled={pushBusy}
               onChange={(e) => setTestSessionId(e.target.value)}
               placeholder="ses_…"
               className="mono mt-1 w-56 rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink"
@@ -317,17 +429,23 @@ export function RemoteAccess() {
           </label>
           <button
             className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
+            onClick={() => void checkGateway()}
+            disabled={pushBusy || devConfig?.source === "none" || !devConfig}
+          >
+            <Icon name="refresh" className="h-3 w-3" />
+            Check gateway
+          </button>
+          <button
+            className="btn btn-ghost !px-2.5 !py-1 text-[11px]"
             onClick={() => void sendTestQuestion()}
-            disabled={testPushBusy || !status}
+            disabled={pushBusy || !status}
           >
             <Icon name="zap" className="h-3 w-3" />
             Send test question push
           </button>
         </div>
-        {testPushResult && (
-          <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
-            {testPushResult}
-          </p>
+        {pushResult && (
+          <p className="text-[11px] leading-relaxed text-ink-subtle">{pushResult}</p>
         )}
       </div>
     </section>

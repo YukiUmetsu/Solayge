@@ -229,6 +229,9 @@ pnpm --filter @solayge/mobile tauri android build --debug --apk --target aarch64
 
 # install android debug apk to your mobile phone
 adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+
+# add push gateway for push notifications
+pnpm push:gateway
 ```
 
 On macOS, `pnpm tauri build` goes through `scripts/tauri.mjs`, which wraps the

@@ -32,6 +32,7 @@ import type {
   InteractionResult,
   ConnectedDevice,
   DesktopIdentity,
+  DevPushConfigView,
   PairingOffer,
   PairingStatus,
   RemoteAccessPreferences,
@@ -158,6 +159,11 @@ export const api = {
   // TEMPORARY (dev-only): fire a synthetic background `question` push.
   pushTestQuestion: (sessionId?: string | null) =>
     invoke<string>("push_test_question", { sessionId: sessionId ?? null }),
+  pushDevConfig: () => invoke<DevPushConfigView>("push_dev_config"),
+  pushDevConfigSet: (url: string, token: string) =>
+    invoke<DevPushConfigView>("push_dev_config_set", { url, token }),
+  pushDevConfigClear: () => invoke<DevPushConfigView>("push_dev_config_clear"),
+  pushGatewayHealth: () => invoke<string>("push_gateway_health"),
   notificationStatus: () => invoke<string>("notification_status"),
   openNotificationSettings: () => invoke<void>("open_notification_settings"),
 

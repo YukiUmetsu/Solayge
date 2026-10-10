@@ -228,19 +228,40 @@ Waiting for a real agent to ask a question is slow, so a **temporary** desktop
 command fires a synthetic `question` push on demand. It is clearly marked
 `TEMPORARY` in the code and should be removed before release.
 
-* **UI:** Settings → Remote access → **Developer: test background push**. Enter a
-  session id (optional) and click **Send test question push**. The result line
-  reports how many phones were targeted, or the first error (missing gateway
-  config, no registered token, FCM rejection).
+The easiest path needs no environment variables and no app restart:
+
+```sh
+# 1. One-time: download a service-account JSON (Firebase console → Project
+#    settings → Service accounts → Generate new private key) and save it as
+#    ~/.solayge/fcm-service-account.json.
+# 2. Start a local gateway and point the desktop app at it:
+pnpm push:gateway
+```
+
+`pnpm push:gateway` finds the service account (or takes
+`--service-account <path>` / `GOOGLE_APPLICATION_CREDENTIALS`), reuses or
+generates a bearer token, writes the desktop's **dev-only** config
+(`push-dev.json`, owner-only, in the app data directory), and runs the gateway.
+
+Then: **Settings → Remote access → Developer: test background push** — the
+Gateway URL/token fields are pre-filled. Background the phone and click **Send
+test question push**. The same panel can **Save gateway** (paste a URL/token
+manually), **Clear** the override, and **Check gateway** (GET `/healthz`).
+
+* **UI:** the result line reports how many phones were targeted, or the first
+  error (missing gateway config, no registered token, FCM rejection).
 * **Backend:** `commands::push_test_question` → `push::dispatch_test_question`.
   Each call uses a unique event id, so the phone's deduplication does not swallow
   a repeated test. It bypasses the desktop's local notification settings on
   purpose.
 * It reuses the production path (gateway bearer auth → FCM HTTP v1 → Android
   notification with the `question` kind and high priority), so a green test means
-  the real path works. Without `SOLAYGE_PUSH_GATEWAY_URL`/`SOLAYGE_PUSH_GATEWAY_TOKEN`
-  on the desktop, or a token in `push-tokens.json`, it reports the missing piece
-  instead of sending.
+  the real path works. Without a configured gateway or a token in
+  `push-tokens.json`, it reports the missing piece instead of sending.
+* **Config precedence:** the `push-dev.json` override wins over
+  `SOLAYGE_PUSH_GATEWAY_URL`/`SOLAYGE_PUSH_GATEWAY_TOKEN`. A normal install has
+  no override file, so environment-only configuration (production/CI) is
+  unchanged. Use **Clear** to remove it.
 
 ## 7. Verification status
 
@@ -250,7 +271,7 @@ Verified here (automated):
 |---|---|---|
 | `solayge-protocol` | unit + cross-language fixture tests | pass |
 | `solayge-push-gateway` | routing, auth, payload, dedup/priority tests | pass |
-| `solayge` desktop | 239 lib tests (incl. host handshake, push module) | pass |
+| `solayge` desktop | 241 lib tests (incl. host handshake, push module) | pass |
 | `solayge-mobile` (Rust) | `cargo check` | pass |
 | mobile TypeScript | `tsc` + 114 vitest tests | pass |
 | shared types | build + fixture tests | pass |

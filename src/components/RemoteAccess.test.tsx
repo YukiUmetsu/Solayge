@@ -8,6 +8,10 @@ const { apiMock } = vi.hoisted(() => ({
     remoteApply: vi.fn(),
     remoteRetry: vi.fn(),
     pushTestQuestion: vi.fn(),
+    pushDevConfig: vi.fn(),
+    pushDevConfigSet: vi.fn(),
+    pushDevConfigClear: vi.fn(),
+    pushGatewayHealth: vi.fn(),
   },
 }));
 vi.mock("../api", () => ({ api: apiMock }));
@@ -43,6 +47,14 @@ beforeEach(() => {
   apiMock.remoteApply.mockReset().mockResolvedValue(STATUS);
   apiMock.remoteRetry.mockReset().mockResolvedValue(STATUS);
   apiMock.pushTestQuestion.mockReset();
+  apiMock.pushDevConfig.mockReset().mockResolvedValue({
+    url: "",
+    has_token: false,
+    source: "none",
+  });
+  apiMock.pushDevConfigSet.mockReset();
+  apiMock.pushDevConfigClear.mockReset();
+  apiMock.pushGatewayHealth.mockReset();
 });
 
 describe("Remote access", () => {
@@ -119,6 +131,32 @@ describe("Remote access", () => {
     expect(
       await screen.findByText(/Sent a test question push to 1 device/),
     ).toBeInTheDocument();
+  });
+
+  it("the dev panel saves the gateway override", async () => {
+    const user = userEvent.setup();
+    apiMock.pushDevConfigSet.mockResolvedValue({
+      url: "http://127.0.0.1:8787/v1/push",
+      has_token: true,
+      source: "dev",
+    });
+    render(<RemoteAccess />);
+    await screen.findByText("Running on 127.0.0.1:51234");
+
+    await user.type(
+      screen.getByPlaceholderText("http://127.0.0.1:8787/v1/push"),
+      "http://127.0.0.1:8787/v1/push",
+    );
+    await user.type(screen.getByPlaceholderText("PUSH_GATEWAY_TOKEN"), "secret");
+    await user.click(screen.getByRole("button", { name: /save gateway/i }));
+
+    await waitFor(() =>
+      expect(apiMock.pushDevConfigSet).toHaveBeenCalledWith(
+        "http://127.0.0.1:8787/v1/push",
+        "secret",
+      ),
+    );
+    expect(await screen.findByText(/Gateway saved/)).toBeInTheDocument();
   });
 
   it("retry re-runs the lifecycle check", async () => {

@@ -223,7 +223,17 @@ pub fn handle_push(
     }
     let request: PushRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
-        Err(_) => return GatewayResponse::json(400, "{\"error\":\"invalid payload\"}"),
+        // Return a fixed shape hint, never the parser's message: a serde error
+        // can quote the offending value, and the body holds the registration
+        // token, which must not be echoed anywhere (including the UI).
+        Err(_) => {
+            let hint = serde_json::json!({
+                "error": "invalid payload",
+                "hint": "expected { token, event: { event_id, kind, desktop_id } }",
+            })
+            .to_string();
+            return GatewayResponse::json(400, &hint);
+        }
     };
     if let Err(message) = validate(&request) {
         return GatewayResponse::json(400, &format!("{{\"error\":\"{message}\"}}"));
@@ -350,6 +360,19 @@ mod tests {
             handle_push(&body, Some("Bearer secret"), "secret", &sender).status,
             400
         );
+    }
+
+    #[test]
+    fn a_payload_missing_a_required_field_reports_a_shape_hint_safely() {
+        let sender = RecordingSender::default();
+        // What a desktop that did not carry `desktop_id` sends.
+        let body = br#"{"token":"fcm-token","event":{"event_id":"evt_1","kind":"question"}}"#;
+        let response = handle_push(body, Some("Bearer secret"), "secret", &sender);
+        assert_eq!(response.status, 400);
+        // The hint names the required fields without echoing the token.
+        assert!(response.body.contains("desktop_id"));
+        assert!(!response.body.contains("fcm-token"));
+        assert!(sender.messages.lock().unwrap().is_empty());
     }
 
     #[test]

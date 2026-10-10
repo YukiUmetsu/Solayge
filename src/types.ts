@@ -502,6 +502,14 @@ export interface RemoteStatus {
   last_error?: string;
 }
 
+/** TEMPORARY (dev-only): the desktop's push-gateway configuration. */
+export interface DevPushConfigView {
+  url: string;
+  has_token: boolean;
+  /** `dev` (runtime override), `env` (environment), or `none`. */
+  source: string;
+}
+
 export interface CacheStats {
   prompt_count: number;
   oldest_prompt?: number | null;
